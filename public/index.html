@@ -1,0 +1,1781 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>ShortFlow Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">SF</span>
+          <div class="brand-copy">
+            <h1>ShortFlow Studio</h1>
+            <p>Premiere Pro 숏폼 제작 워크플로</p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <span class="connection-pill">
+            <span class="status-dot" aria-hidden="true"></span>
+            활성 시퀀스
+          </span>
+          <button
+            id="refresh-btn"
+            class="icon-button"
+            type="button"
+            title="프로젝트 상태 새로고침"
+            aria-label="프로젝트 상태 새로고침"
+          >
+            <span aria-hidden="true">↻</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="sequence-status" aria-label="현재 Premiere Pro 상태" aria-live="polite">
+        <dl class="status-grid">
+          <div class="status-item status-item-wide">
+            <dt>프로젝트</dt>
+            <dd id="status-project" title="">연결 확인 중…</dd>
+          </div>
+          <div class="status-item status-item-wide">
+            <dt>시퀀스</dt>
+            <dd id="status-sequence" title="">—</dd>
+          </div>
+          <div class="status-item">
+            <dt>프레임</dt>
+            <dd id="status-frame">—</dd>
+          </div>
+          <div class="status-item">
+            <dt>길이</dt>
+            <dd id="status-duration">—</dd>
+          </div>
+          <div class="status-item status-item-wide">
+            <dt>선택 범위</dt>
+            <dd id="status-selection" title="">—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <nav class="workflow-nav" aria-label="ShortFlow 작업 메뉴">
+        <div class="tab-list" role="tablist" aria-orientation="horizontal">
+          <button
+            id="tab-qc"
+            class="nav-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="panel-qc"
+            data-tab="qc"
+          >
+            <span class="tab-index" aria-hidden="true">01</span>
+            QC
+          </button>
+          <button
+            id="tab-short"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-short"
+            data-tab="short"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">02</span>
+            숏폼 생성
+          </button>
+          <button
+            id="tab-markers"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-markers"
+            data-tab="markers"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">03</span>
+            마커 배치
+          </button>
+          <button
+            id="tab-automation"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-automation"
+            data-tab="automation"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">04</span>
+            자동 편집
+          </button>
+          <button
+            id="tab-asset"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-asset"
+            data-tab="asset"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">05</span>
+            음악·효과음
+          </button>
+          <button
+            id="tab-voice"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-voice"
+            data-tab="voice"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">06</span>
+            TTS·STT
+          </button>
+          <button
+            id="tab-reference"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-reference"
+            data-tab="reference"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">07</span>
+            AI 레퍼런스
+          </button>
+          <button
+            id="tab-brand"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-brand"
+            data-tab="brand"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">08</span>
+            브랜드 MOGRT
+          </button>
+          <button
+            id="tab-thumbnail"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-thumbnail"
+            data-tab="thumbnail"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">09</span>
+            썸네일
+          </button>
+          <button
+            id="tab-export"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-export"
+            data-tab="export"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">10</span>
+            내보내기
+          </button>
+          <button
+            id="tab-ai-settings"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-ai-settings"
+            data-tab="ai-settings"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">11</span>
+            AI 설정
+          </button>
+          <button
+            id="tab-log"
+            class="nav-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-log"
+            data-tab="log"
+            tabindex="-1"
+          >
+            <span class="tab-index" aria-hidden="true">12</span>
+            로그
+          </button>
+        </div>
+      </nav>
+
+      <main class="workspace">
+        <section
+          id="panel-qc"
+          class="workflow-panel is-active"
+          role="tabpanel"
+          aria-labelledby="tab-qc"
+          data-panel="qc"
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">PRE-FLIGHT CHECK</p>
+              <h2>시퀀스 QC</h2>
+              <p class="panel-description">숏폼 제작 전에 해상도, 길이, 트랙과 미디어 상태를 빠르게 점검합니다.</p>
+            </div>
+            <button id="qc-btn" class="primary-button" type="button">
+              <span aria-hidden="true">✓</span>
+              QC 검사 실행
+            </button>
+          </div>
+
+          <div class="metric-strip" aria-label="검사 항목">
+            <div class="metric-card">
+              <span class="metric-icon" aria-hidden="true">9:16</span>
+              <strong>세로 비율</strong>
+              <span>1080 × 1920 기준</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-icon" aria-hidden="true">60s</span>
+              <strong>재생 길이</strong>
+              <span>플랫폼 권장 길이</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-icon" aria-hidden="true">A/V</span>
+              <strong>미디어 상태</strong>
+              <span>오프라인 및 빈 트랙</span>
+            </div>
+          </div>
+
+          <div class="result-card">
+            <div class="card-title-row">
+              <div>
+                <p class="eyebrow">RESULTS</p>
+                <h3>검사 결과</h3>
+              </div>
+              <span class="neutral-badge">대기</span>
+            </div>
+            <div id="qc-results" class="empty-state" aria-live="polite" aria-atomic="true">
+              <span class="empty-state-icon" aria-hidden="true">◇</span>
+              <strong>아직 검사 결과가 없습니다</strong>
+              <p>활성 시퀀스를 연 뒤 QC 검사 실행을 눌러주세요.</p>
+            </div>
+          </div>
+
+          <div class="settings-card final-qc-card">
+            <div class="section-heading section-heading-action">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3>최종 내보내기 게이트</h3>
+                  <p>자막·Safe Zone·오디오·오프라인 미디어·가이드 잔존·출력 경로까지 검사합니다.</p>
+                </div>
+              </div>
+              <span id="final-qc-gate" class="neutral-badge">대기</span>
+            </div>
+            <div class="form-grid final-qc-controls">
+              <div class="field">
+                <label for="final-qc-platform-select">배포 플랫폼</label>
+                <div class="select-wrap"><select id="final-qc-platform-select"><option value="youtube-shorts">YouTube Shorts</option><option value="instagram-reels">Instagram Reels</option><option value="tiktok">TikTok</option></select></div>
+              </div>
+              <div class="field"><label for="final-qc-output-name">출력 파일명</label><input id="final-qc-output-name" type="text" maxlength="180" value="ShortFlow_Export.mp4" /></div>
+              <div class="field"><label for="final-qc-true-peak">True Peak <span class="unit">dBTP · 선택</span></label><input id="final-qc-true-peak" type="number" min="-100" max="20" step="0.1" placeholder="측정값 없음" /></div>
+              <div class="field"><label for="final-qc-clipped-samples">클리핑 샘플 <span class="unit">선택</span></label><input id="final-qc-clipped-samples" type="number" min="0" step="1" placeholder="0" /></div>
+              <div class="field"><label for="final-qc-longest-silence">최장 무음 <span class="unit">초 · 선택</span></label><input id="final-qc-longest-silence" type="number" min="0" step="0.1" placeholder="측정값 없음" /></div>
+              <div class="field"><label for="final-qc-dialogue-lufs">대사 LUFS <span class="unit">선택</span></label><input id="final-qc-dialogue-lufs" type="number" min="-100" max="10" step="0.1" placeholder="측정값 없음" /></div>
+              <div class="field"><label for="final-qc-bgm-lufs">BGM LUFS <span class="unit">선택</span></label><input id="final-qc-bgm-lufs" type="number" min="-100" max="10" step="0.1" placeholder="측정값 없음" /></div>
+              <div class="field field-span-2"><label for="final-qc-missing-fonts">누락 폰트 <span class="unit">쉼표 구분</span></label><input id="final-qc-missing-fonts" type="text" maxlength="1000" placeholder="Premiere 경고가 있을 때만 입력" /></div>
+              <div class="field field-span-2"><label for="final-qc-missing-assets">누락 외부 에셋 <span class="unit">쉼표 구분</span></label><input id="final-qc-missing-assets" type="text" maxlength="1000" placeholder="MOGRT·LUT 등 누락 항목" /></div>
+            </div>
+            <div class="form-actions final-qc-actions">
+              <span id="final-qc-summary" class="setting-hint">아직 최종 QC를 실행하지 않았습니다.</span>
+              <button id="final-qc-run-btn" class="primary-button primary-button-large" type="button">최종 QC 실행</button>
+            </div>
+            <div id="final-qc-results" class="final-qc-results" aria-live="polite">
+              <div class="empty-state compact-empty-state"><strong>최종 검사 대기</strong><p>내보내기 직전에 실행해 주세요.</p></div>
+            </div>
+            <div class="final-qc-waiver">
+              <div class="field"><label for="final-qc-waiver-code">예외 승인 가능한 오류</label><div class="select-wrap"><select id="final-qc-waiver-code"></select></div></div>
+              <div class="field"><label for="final-qc-waiver-reason">승인 사유 <span class="unit">5자 이상</span></label><input id="final-qc-waiver-reason" type="text" maxlength="300" placeholder="예외 승인 근거를 기록해 주세요" /></div>
+              <button id="final-qc-waive-btn" class="secondary-button" type="button" disabled>사유 기록 후 승인</button>
+            </div>
+            <div class="button-cluster final-qc-report-actions">
+              <button id="final-qc-json-btn" class="secondary-button" type="button" disabled>JSON 보고서</button>
+              <button id="final-qc-md-btn" class="secondary-button" type="button" disabled>Markdown 보고서</button>
+            </div>
+            <p class="action-note">해상도·길이·오프라인 미디어·가이드 잔존 등 HARD BLOCK은 사유를 입력해도 통과시킬 수 없습니다.</p>
+          </div>
+        </section>
+
+        <section
+          id="panel-short"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-short"
+          data-panel="short"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">VERTICAL SEQUENCE</p>
+              <h2>숏폼 시퀀스 생성</h2>
+              <p class="panel-description">현재 편집본을 기준으로 플랫폼에 맞는 세로 시퀀스를 안전하게 생성합니다.</p>
+            </div>
+          </div>
+
+          <form class="settings-card" aria-label="숏폼 생성 설정">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">01</span>
+              <div>
+                <h3>출력 규격</h3>
+                <p>플랫폼 프리셋을 선택하거나 직접 해상도를 입력하세요.</p>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field field-span-2">
+                <label for="preset-select">플랫폼 프리셋</label>
+                <div class="select-wrap">
+                  <select id="preset-select" name="preset">
+                    <option value="youtube-shorts">YouTube Shorts · 1080 × 1920</option>
+                    <option value="instagram-reels">Instagram Reels · 1080 × 1920</option>
+                    <option value="tiktok">TikTok · 1080 × 1920</option>
+                    <option value="square">정사각형 피드 · 1080 × 1080</option>
+                    <option value="custom">사용자 지정</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="width-input">가로 <span class="unit">px</span></label>
+                <input id="width-input" name="width" type="number" min="16" max="16384" step="2" value="1080" inputmode="numeric" />
+              </div>
+              <div class="field">
+                <label for="height-input">세로 <span class="unit">px</span></label>
+                <input id="height-input" name="height" type="number" min="16" max="16384" step="2" value="1920" inputmode="numeric" />
+              </div>
+              <div class="field field-span-2">
+                <label for="name-input">새 시퀀스 이름</label>
+                <input id="name-input" name="sequenceName" type="text" maxlength="120" value="ShortFlow_9x16" autocomplete="off" />
+              </div>
+            </div>
+
+            <div class="section-divider"></div>
+
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">02</span>
+              <div>
+                <h3>편집 범위와 리프레임</h3>
+                <p>복제할 시간 범위와 가로 영상을 세로로 맞추는 방식을 정합니다.</p>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label for="range-select">생성 범위</label>
+                <div class="select-wrap">
+                  <select id="range-select" name="range">
+                    <option value="selection">선택한 클립</option>
+                    <option value="inout">인/아웃 구간</option>
+                    <option value="sequence">전체 시퀀스</option>
+                    <option value="markers">스토리 마커 구간</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="max-duration-input">최대 길이 <span class="unit">초</span></label>
+                <input id="max-duration-input" name="maxDuration" type="number" min="1" max="600" step="1" value="60" inputmode="numeric" />
+              </div>
+              <div class="field">
+                <label for="reframe-select">리프레임 방식</label>
+                <div class="select-wrap">
+                  <select id="reframe-select" name="reframe">
+                    <option value="fill">화면 채우기</option>
+                    <option value="fit">전체 화면 맞추기</option>
+                    <option value="scale-only">비율만 조정</option>
+                    <option value="keep">원본 유지</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="scope-select">적용 대상</label>
+                <div class="select-wrap">
+                  <select id="scope-select" name="scope">
+                    <option value="video">모든 비디오 클립</option>
+                    <option value="selected">선택한 클립만</option>
+                    <option value="primary">V1 주 영상만</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <label class="checkbox-row" for="center-checkbox">
+              <input id="center-checkbox" name="center" type="checkbox" checked />
+              <span class="custom-checkbox" aria-hidden="true"></span>
+              <span>
+                <strong>클립을 프레임 중앙에 자동 정렬</strong>
+                <small>각 클립의 위치를 새 세로 프레임 중심으로 이동합니다.</small>
+              </span>
+            </label>
+
+            <div class="form-actions">
+              <p class="action-note">원본 시퀀스는 변경하지 않고 새 시퀀스를 만듭니다.</p>
+              <button id="create-short-btn" class="primary-button primary-button-large" type="button">
+                숏폼 시퀀스 생성
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section
+          id="panel-markers"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-markers"
+          data-panel="markers"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">STORY BEATS</p>
+              <h2>스토리 마커 배치</h2>
+              <p class="panel-description">훅과 CTA 기준점을 추가하고 마커 사이 구간을 개별 숏폼으로 준비합니다.</p>
+            </div>
+          </div>
+
+          <div class="two-column-layout">
+            <form class="settings-card compact-card" aria-label="스토리 마커 설정">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3>마커 타이밍</h3>
+                  <p>재생 헤드 또는 선택 범위를 기준으로 배치합니다.</p>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="hook-seconds-input">훅 길이 <span class="unit">초</span></label>
+                  <input id="hook-seconds-input" name="hookSeconds" type="number" min="0" max="30" step="0.5" value="3" inputmode="decimal" />
+                </div>
+                <div class="field">
+                  <label for="cta-seconds-input">CTA 여유 <span class="unit">초</span></label>
+                  <input id="cta-seconds-input" name="ctaSeconds" type="number" min="0" max="30" step="0.5" value="5" inputmode="decimal" />
+                </div>
+              </div>
+              <button id="add-story-markers-btn" class="primary-button full-width-button" type="button">
+                <span aria-hidden="true">＋</span>
+                스토리 마커 추가
+              </button>
+            </form>
+
+            <div class="settings-card compact-card">
+              <div class="section-heading section-heading-action">
+                <div class="section-heading-copy">
+                  <span class="section-number" aria-hidden="true">02</span>
+                  <div>
+                    <h3>마커 구간</h3>
+                    <p>현재 시퀀스의 ShortFlow 마커를 불러옵니다.</p>
+                  </div>
+                </div>
+                <button id="scan-markers-btn" class="secondary-button small-button" type="button">다시 검색</button>
+              </div>
+              <div id="marker-list" class="item-list" aria-live="polite">
+                <div class="empty-state compact-empty-state">
+                  <span class="empty-state-icon" aria-hidden="true">◆</span>
+                  <strong>발견된 마커가 없습니다</strong>
+                  <p>스토리 마커를 추가하거나 다시 검색해 주세요.</p>
+                </div>
+              </div>
+              <button id="batch-create-btn" class="primary-button full-width-button" type="button" disabled>
+                마커 구간 일괄 생성
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-automation"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-automation"
+          data-panel="automation"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">RETENTION AUTOMATION</p>
+              <h2>자동 점프컷·펀치인·Safe Zone</h2>
+              <p class="panel-description">STT 타임코드로 지루한 공백과 강조 지점을 찾고, 플랫폼 UI에 가려지는 영역을 미리 검사합니다.</p>
+            </div>
+            <span class="safety-badge"><span aria-hidden="true">⎘</span> 복제본에만 적용</span>
+          </div>
+
+          <div class="automation-workspace">
+            <section class="settings-card automation-card" aria-labelledby="jumpcut-heading">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3 id="jumpcut-heading">무음 점프컷·자동 펀치인</h3>
+                  <p>음성 구간을 분석한 뒤 적용 전 컷 목록과 예상 길이를 보여줍니다.</p>
+                </div>
+              </div>
+
+              <div class="automation-source-note">
+                <span aria-hidden="true">T</span>
+                <div>
+                  <strong>최근 STT 타임코드 사용</strong>
+                  <p id="automation-stt-status">먼저 TTS·STT 탭에서 화자 구분 또는 Whisper 자막을 생성해 주세요.</p>
+                </div>
+              </div>
+
+              <div class="form-grid automation-form-grid">
+                <div class="field">
+                  <label for="auto-min-silence-input">최소 무음 <span class="unit">초</span></label>
+                  <input id="auto-min-silence-input" type="number" min="0.1" max="10" step="0.05" value="0.42" inputmode="decimal" />
+                </div>
+                <div class="field">
+                  <label for="auto-padding-input">음성 여백 <span class="unit">초</span></label>
+                  <input id="auto-padding-input" type="number" min="0" max="2" step="0.01" value="0.08" inputmode="decimal" />
+                </div>
+                <div class="field">
+                  <label for="auto-punch-scale-input">펀치인 크기 <span class="unit">%</span></label>
+                  <input id="auto-punch-scale-input" type="number" min="101" max="150" step="1" value="112" inputmode="numeric" />
+                </div>
+                <div class="field">
+                  <label for="auto-punch-count-input">최대 펀치인 <span class="unit">개</span></label>
+                  <input id="auto-punch-count-input" type="number" min="1" max="100" step="1" value="12" inputmode="numeric" />
+                </div>
+                <div class="field field-span-2">
+                  <label for="auto-keywords-input">강조 키워드</label>
+                  <input id="auto-keywords-input" type="text" maxlength="500" placeholder="핵심, 결론, 제품명처럼 쉼표로 구분" />
+                </div>
+              </div>
+
+              <div class="automation-switches">
+                <label class="checkbox-row" for="auto-trim-leading-checkbox">
+                  <input id="auto-trim-leading-checkbox" type="checkbox" checked />
+                  <span class="custom-checkbox" aria-hidden="true"></span>
+                  <span>앞 무음 제거</span>
+                </label>
+                <label class="checkbox-row" for="auto-trim-trailing-checkbox">
+                  <input id="auto-trim-trailing-checkbox" type="checkbox" checked />
+                  <span class="custom-checkbox" aria-hidden="true"></span>
+                  <span>뒤 무음 제거</span>
+                </label>
+                <label class="checkbox-row" for="auto-punch-checkbox">
+                  <input id="auto-punch-checkbox" type="checkbox" checked />
+                  <span class="custom-checkbox" aria-hidden="true"></span>
+                  <span>강조 펀치인 추천</span>
+                </label>
+              </div>
+
+              <button id="auto-analyze-btn" class="primary-button full-width-button" type="button">비파괴 편집안 분석</button>
+
+              <div id="auto-plan-summary" class="automation-summary" aria-live="polite">
+                <div><span>제거 예상</span><strong>—</strong></div>
+                <div><span>완성 길이</span><strong>—</strong></div>
+                <div><span>펀치인</span><strong>—</strong></div>
+              </div>
+              <div id="auto-cut-list" class="automation-cut-list" aria-live="polite">
+                <div class="empty-state compact-empty-state">
+                  <strong>아직 분석한 편집안이 없습니다</strong>
+                  <p>STT 결과를 만든 뒤 분석을 실행해 주세요.</p>
+                </div>
+              </div>
+              <div class="form-actions automation-actions">
+                <button id="auto-markers-btn" class="secondary-button" type="button" disabled>추천 지점 마커 추가</button>
+                <button id="auto-apply-btn" class="primary-button" type="button" disabled>복제 시퀀스에 적용</button>
+              </div>
+              <p class="action-note">Premiere 공개 UXP API로 안전하게 적용할 수 없는 컷은 마커 추천으로 남기며 원본 시퀀스는 변경하지 않습니다.</p>
+            </section>
+
+            <section class="settings-card automation-card" aria-labelledby="safezone-heading">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3 id="safezone-heading">소셜 미디어 Safe Zone</h3>
+                  <p>플랫폼 UI에 가려질 수 있는 영역과 선택 요소의 충돌을 검사합니다.</p>
+                </div>
+              </div>
+
+              <div class="form-grid safe-zone-controls">
+                <div class="field">
+                  <label for="safe-platform-select">플랫폼</label>
+                  <div class="select-wrap">
+                    <select id="safe-platform-select">
+                      <option value="youtube-shorts">YouTube Shorts</option>
+                      <option value="instagram-reels">Instagram Reels</option>
+                      <option value="tiktok">TikTok</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="safe-role-select">검사 대상</label>
+                  <div class="select-wrap">
+                    <select id="safe-role-select">
+                      <option value="caption">자막·CTA</option>
+                      <option value="content">인물·핵심 오브젝트</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="safe-zone-preview-shell">
+                <canvas id="safe-zone-canvas" width="540" height="960" role="img" aria-label="9대16 플랫폼 Safe Zone 미리보기"></canvas>
+                <span class="safe-zone-preview-label">보수적 가이드 · 사용자 조정 가능</span>
+              </div>
+
+              <div class="safe-zone-box-controls">
+                <div class="range-field">
+                  <div class="range-label-row"><label for="safe-box-x-input">가로 위치</label><output id="safe-box-x-output" class="range-value">20%</output></div>
+                  <input id="safe-box-x-input" type="range" min="0" max="100" step="1" value="20" />
+                </div>
+                <div class="range-field">
+                  <div class="range-label-row"><label for="safe-box-y-input">세로 위치</label><output id="safe-box-y-output" class="range-value">55%</output></div>
+                  <input id="safe-box-y-input" type="range" min="0" max="100" step="1" value="55" />
+                </div>
+                <div class="range-field">
+                  <div class="range-label-row"><label for="safe-box-width-input">너비</label><output id="safe-box-width-output" class="range-value">60%</output></div>
+                  <input id="safe-box-width-input" type="range" min="5" max="100" step="1" value="60" />
+                </div>
+                <div class="range-field">
+                  <div class="range-label-row"><label for="safe-box-height-input">높이</label><output id="safe-box-height-output" class="range-value">12%</output></div>
+                  <input id="safe-box-height-input" type="range" min="3" max="100" step="1" value="12" />
+                </div>
+              </div>
+
+              <div id="safe-zone-result" class="safe-zone-result" role="status" aria-live="polite">
+                위치 값을 조절하거나 Premiere 선택 항목을 검사해 주세요.
+              </div>
+              <div class="form-actions automation-actions">
+                <button id="safe-check-btn" class="secondary-button" type="button">침범 검사</button>
+                <button id="safe-align-btn" class="primary-button" type="button">안전 영역으로 자동 정렬</button>
+              </div>
+              <button id="safe-overlay-btn" class="secondary-button full-width-button" type="button">Premiere 가이드 오버레이 만들기</button>
+              <p class="action-note">플랫폼 UI는 업데이트될 수 있습니다. 내보내기 전 최신 가이드와 결과 화면을 한 번 더 확인해 주세요.</p>
+            </section>
+          </div>
+        </section>
+
+        <section
+          id="panel-asset"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-asset"
+          data-panel="asset"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SOUND LIBRARY</p>
+              <h2>음악·효과음 에셋</h2>
+              <p class="panel-description">자주 쓰는 음원 폴더를 동기화하고 원하는 트랙으로 끌어 놓아 빠르게 배치합니다.</p>
+            </div>
+            <button id="sync-assets-btn" class="primary-button" type="button">
+              <span aria-hidden="true">↻</span>
+              에셋 동기화
+            </button>
+          </div>
+
+          <div class="settings-card asset-root-card">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">01</span>
+              <div>
+                <h3>라이브러리 폴더</h3>
+                <p>음악과 효과음을 보관한 최상위 폴더를 지정하세요.</p>
+              </div>
+            </div>
+            <div class="file-picker-row">
+              <div class="file-summary">
+                <span class="file-icon audio-file-icon" aria-hidden="true">SFX</span>
+                <div>
+                  <span class="file-label">에셋 루트</span>
+                  <strong id="asset-root-name" title="">선택되지 않음</strong>
+                </div>
+              </div>
+              <div class="button-cluster">
+                <button id="open-asset-root-btn" class="secondary-button" type="button" disabled>폴더 열기</button>
+                <button id="choose-asset-root-btn" class="secondary-button" type="button">폴더 선택</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="asset-workspace">
+            <aside class="settings-card asset-sidebar" aria-label="에셋 배치 설정">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3>대상 트랙</h3>
+                  <p>드롭할 때 사용할 기본 트랙입니다.</p>
+                </div>
+              </div>
+              <div class="form-grid track-grid">
+                <div class="field">
+                  <label for="asset-video-track-input">비디오 트랙</label>
+                  <div class="track-input-wrap">
+                    <span aria-hidden="true">V</span>
+                    <input id="asset-video-track-input" name="assetVideoTrack" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="asset-audio-track-input">오디오 트랙</label>
+                  <div class="track-input-wrap audio-track-input-wrap">
+                    <span aria-hidden="true">A</span>
+                    <input id="asset-audio-track-input" name="assetAudioTrack" type="number" min="1" max="99" step="1" value="2" inputmode="numeric" />
+                  </div>
+                </div>
+              </div>
+              <div
+                id="asset-drop-zone"
+                class="asset-drop-zone drop-surface"
+                role="button"
+                tabindex="0"
+                aria-label="파일을 끌어 놓아 에셋 라이브러리에 추가"
+              >
+                <span class="drop-zone-icon" aria-hidden="true">↓</span>
+                <strong>파일을 여기에 놓으세요</strong>
+                <span>WAV, MP3, AIFF, M4A</span>
+              </div>
+            </aside>
+
+            <div class="settings-card asset-browser">
+              <div class="section-heading section-heading-action">
+                <div class="section-heading-copy">
+                  <span class="section-number" aria-hidden="true">03</span>
+                  <div>
+                    <h3>라이브러리</h3>
+                    <p>카드를 타임라인으로 드래그해 배치할 수 있습니다.</p>
+                  </div>
+                </div>
+              </div>
+              <div class="browser-toolbar">
+                <div class="field search-field">
+                  <label class="sr-only" for="asset-search-input">에셋 검색</label>
+                  <div class="search-input-wrap">
+                    <span aria-hidden="true">⌕</span>
+                    <input id="asset-search-input" name="assetSearch" type="text" placeholder="파일명 또는 태그 검색" autocomplete="off" />
+                  </div>
+                </div>
+                <div class="field type-filter-field">
+                  <label class="sr-only" for="asset-type-select">에셋 유형</label>
+                  <div class="select-wrap">
+                    <select id="asset-type-select" name="assetType" aria-label="에셋 유형 필터">
+                      <option value="all">전체 에셋</option>
+                      <option value="music">음악</option>
+                      <option value="sfx">효과음</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div id="asset-list" class="item-list asset-list drop-surface" role="list" aria-live="polite">
+                <div class="empty-state compact-empty-state">
+                  <span class="empty-state-icon" aria-hidden="true">♫</span>
+                  <strong>동기화된 에셋이 없습니다</strong>
+                  <p>라이브러리 폴더를 선택하고 에셋 동기화를 실행해 주세요.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-voice"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-voice"
+          data-panel="voice"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">AI VOICE WORKFLOW</p>
+              <h2>TTS 음성·STT 자막</h2>
+              <p class="panel-description">대본을 음성으로 만들거나 음성·영상 파일을 원고와 타임코드 자막으로 변환합니다.</p>
+            </div>
+            <span id="speech-status" class="connection-status is-idle" role="status" aria-live="polite">
+              <span class="connection-status-dot" aria-hidden="true"></span>
+              <span>AI 설정 필요</span>
+            </span>
+          </div>
+
+          <div class="speech-workspace">
+            <section class="settings-card speech-card" aria-labelledby="tts-heading">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3 id="tts-heading">TTS · 대본을 음성으로</h3>
+                  <p>한국어 대본과 말투 지시를 최대 4,096자까지 생성합니다.</p>
+                </div>
+              </div>
+
+              <div class="field textarea-field">
+                <label for="tts-text-input">대본</label>
+                <textarea id="tts-text-input" rows="8" maxlength="4096" placeholder="음성으로 만들 대본을 입력해 주세요."></textarea>
+                <span class="field-hint"><span id="tts-character-count">0</span> / 4,096자</span>
+              </div>
+
+              <div class="form-grid speech-form-grid">
+                <div class="field">
+                  <label for="tts-model-select">모델</label>
+                  <div class="select-wrap">
+                    <select id="tts-model-select">
+                      <option value="gpt-4o-mini-tts">GPT-4o mini TTS · 추천</option>
+                      <option value="tts-1-hd">TTS-1 HD · 고품질</option>
+                      <option value="tts-1">TTS-1 · 빠른 생성</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="tts-voice-select">목소리</label>
+                  <div class="select-wrap">
+                    <select id="tts-voice-select">
+                      <option value="marin">Marin · 고품질 추천</option>
+                      <option value="cedar">Cedar · 고품질 추천</option>
+                      <option value="coral">Coral</option>
+                      <option value="alloy">Alloy</option>
+                      <option value="ash">Ash</option>
+                      <option value="ballad">Ballad</option>
+                      <option value="echo">Echo</option>
+                      <option value="fable">Fable</option>
+                      <option value="nova">Nova</option>
+                      <option value="onyx">Onyx</option>
+                      <option value="sage">Sage</option>
+                      <option value="shimmer">Shimmer</option>
+                      <option value="verse">Verse</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="tts-format-select">파일 형식</label>
+                  <div class="select-wrap">
+                    <select id="tts-format-select">
+                      <option value="wav">WAV · 편집 권장</option>
+                      <option value="mp3">MP3 · 작은 용량</option>
+                      <option value="aac">AAC</option>
+                      <option value="flac">FLAC</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="range-field speech-speed-field">
+                  <div class="range-label-row">
+                    <label for="tts-speed-input">말하기 속도</label>
+                    <output id="tts-speed-output" class="range-value" for="tts-speed-input">1.00×</output>
+                  </div>
+                  <input id="tts-speed-input" type="range" min="0.25" max="4" step="0.05" value="1" />
+                </div>
+                <div class="field field-span-2 textarea-field">
+                  <label for="tts-instructions-input">말투 지시</label>
+                  <textarea id="tts-instructions-input" rows="3" maxlength="4096" placeholder="예: 친근하고 또렷한 한국어로, 첫 문장은 빠르게 강조해 주세요."></textarea>
+                  <span class="field-hint">TTS-1/HD에서는 말투 지시가 적용되지 않습니다.</span>
+                </div>
+              </div>
+
+              <div class="file-row speech-output-row">
+                <div class="file-meta">
+                  <strong>음성 저장 폴더</strong>
+                  <span id="tts-output-name" title="">선택되지 않음</span>
+                </div>
+                <button id="tts-output-btn" class="secondary-button" type="button">폴더 선택</button>
+              </div>
+              <div class="speech-insert-options">
+                <label class="checkbox-row" for="tts-insert-checkbox">
+                  <input id="tts-insert-checkbox" type="checkbox" checked />
+                  <span class="custom-checkbox" aria-hidden="true"></span>
+                  <span>생성 후 현재 재생 위치에 자동 삽입</span>
+                </label>
+                <div class="field compact-number-field">
+                  <label for="tts-audio-track-input">오디오 트랙</label>
+                  <input id="tts-audio-track-input" type="number" min="1" max="99" step="1" value="2" inputmode="numeric" />
+                </div>
+              </div>
+              <audio id="tts-audio-preview" class="speech-preview" controls hidden></audio>
+              <button id="tts-generate-btn" class="primary-button full-width-button" type="button">음성 생성 및 저장</button>
+            </section>
+
+            <section class="settings-card speech-card" aria-labelledby="stt-heading">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3 id="stt-heading">STT · 음성을 원고·SRT로</h3>
+                  <p>25MB 이하 파일을 화자 구분 타임코드와 함께 변환합니다.</p>
+                </div>
+              </div>
+
+              <div class="file-row">
+                <div class="file-meta">
+                  <strong>음성·영상 파일</strong>
+                  <span id="stt-source-name" title="">선택되지 않음</span>
+                </div>
+                <button id="stt-source-btn" class="secondary-button" type="button">파일 선택</button>
+              </div>
+
+              <div class="form-grid speech-form-grid">
+                <div class="field field-span-2">
+                  <label for="stt-model-select">변환 방식</label>
+                  <div class="select-wrap">
+                    <select id="stt-model-select">
+                      <option value="gpt-4o-transcribe-diarize">화자 구분 + 타임코드 SRT · 추천</option>
+                      <option value="gpt-4o-transcribe">고정확도 원고</option>
+                      <option value="gpt-4o-mini-transcribe">경제형 원고</option>
+                      <option value="whisper-1">Whisper SRT · 레거시</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="stt-language-input">언어 코드</label>
+                  <input id="stt-language-input" type="text" value="ko" maxlength="12" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="field">
+                  <label for="stt-output-format-select">저장 형식</label>
+                  <div class="select-wrap">
+                    <select id="stt-output-format-select">
+                      <option value="both">TXT + SRT</option>
+                      <option value="srt">SRT</option>
+                      <option value="text">TXT</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="field field-span-2 textarea-field">
+                  <label for="stt-prompt-input">고유명사·문맥 힌트</label>
+                  <textarea id="stt-prompt-input" rows="3" maxlength="1000" placeholder="예: ShortFlow Studio, Premiere Pro, 제품명과 출연자 이름"></textarea>
+                  <span class="field-hint">화자 구분 모델에서는 문맥 힌트가 지원되지 않습니다.</span>
+                </div>
+              </div>
+
+              <div class="file-row speech-output-row">
+                <div class="file-meta">
+                  <strong>자막 저장 폴더</strong>
+                  <span id="stt-output-name" title="">선택되지 않음</span>
+                </div>
+                <button id="stt-output-btn" class="secondary-button" type="button">폴더 선택</button>
+              </div>
+              <label class="checkbox-row speech-import-option" for="stt-import-checkbox">
+                <input id="stt-import-checkbox" type="checkbox" checked />
+                <span class="custom-checkbox" aria-hidden="true"></span>
+                <span>저장한 SRT를 Premiere 프로젝트로 가져오기</span>
+              </label>
+              <button id="stt-run-btn" class="primary-button full-width-button" type="button">원고·자막 생성</button>
+
+              <div class="field textarea-field speech-result-field">
+                <div class="field-action-heading">
+                  <label for="stt-result-output">변환 결과</label>
+                  <button id="stt-copy-btn" class="text-button" type="button" disabled>원고 복사</button>
+                </div>
+                <textarea id="stt-result-output" rows="10" readonly placeholder="변환 결과가 여기에 표시됩니다."></textarea>
+                <span id="stt-result-meta" class="field-hint">아직 처리한 파일이 없습니다.</span>
+              </div>
+            </section>
+          </div>
+
+          <section id="subtitle-editor" class="settings-card subtitle-editor-card" aria-labelledby="subtitle-editor-heading" aria-busy="false">
+            <div class="section-heading section-heading-action subtitle-editor-heading">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">03</span>
+                <div>
+                  <h3 id="subtitle-editor-heading">자막 편집기</h3>
+                  <p>단어 타이밍을 유지하며 수정·숨김·분할하고 SRT로 안전하게 내보냅니다.</p>
+                </div>
+              </div>
+              <span id="subtitle-status" class="subtitle-status" role="status" aria-live="polite" data-status="ready">자막 편집기 준비</span>
+            </div>
+
+            <div class="subtitle-toolbar" role="toolbar" aria-label="자막 문서 도구">
+              <div class="button-cluster subtitle-file-actions">
+                <button id="subtitle-import-btn" class="secondary-button" type="button">SRT 불러오기</button>
+                <button id="subtitle-export-btn" class="secondary-button" type="button" disabled>SRT 내보내기</button>
+              </div>
+              <div class="button-cluster subtitle-history-actions">
+                <button id="subtitle-undo-btn" class="text-button" type="button" disabled aria-label="자막 편집 되돌리기">↶ 되돌리기</button>
+                <button id="subtitle-redo-btn" class="text-button" type="button" disabled aria-label="자막 편집 다시 실행">↷ 다시 실행</button>
+              </div>
+              <div class="subtitle-reflow-controls">
+                <label for="subtitle-max-chars-input">큐당 최대 글자</label>
+                <input id="subtitle-max-chars-input" type="number" min="4" max="120" step="1" value="19" inputmode="numeric" />
+                <button id="subtitle-reflow-btn" class="secondary-button" type="button" disabled>긴 자막 나누기</button>
+              </div>
+            </div>
+
+            <div class="subtitle-ai-toolbar" aria-label="AI 자막 도구">
+              <div class="subtitle-ai-copy">
+                <strong>AI 보조</strong>
+                <span>연결된 provider의 JSON을 검증한 뒤에만 문서에 적용합니다.</span>
+              </div>
+              <div class="button-cluster subtitle-ai-actions">
+                <button id="subtitle-ai-reflow-btn" class="secondary-button" type="button" disabled>AI 줄바꿈</button>
+                <button id="subtitle-ai-review-btn" class="secondary-button" type="button" disabled>맞춤법 검토</button>
+              </div>
+              <div class="subtitle-translate-controls">
+                <label class="sr-only" for="subtitle-translate-language-input">번역 대상 언어</label>
+                <input id="subtitle-translate-language-input" type="text" value="영어" maxlength="64" autocomplete="off" placeholder="번역 언어" />
+                <button id="subtitle-ai-translate-btn" class="secondary-button" type="button" disabled>번역</button>
+              </div>
+            </div>
+
+            <div class="subtitle-list-heading">
+              <strong>편집 큐</strong>
+              <span id="subtitle-meta" class="field-hint" title="">0개 큐 · 0개 단어 · DOM 0/0 · 최대 19자</span>
+            </div>
+            <div
+              id="subtitle-cue-list"
+              class="subtitle-cue-list"
+              role="list"
+              aria-label="자막 편집 큐"
+              aria-live="polite"
+              aria-busy="false"
+            >
+              <div class="subtitle-empty-state" role="status">
+                <strong>편집할 자막이 없습니다</strong>
+                <p>STT 결과를 연결하거나 SRT 파일을 불러와 주세요.</p>
+              </div>
+            </div>
+            <p class="subtitle-keyboard-hint">
+              단어 선택 후 <kbd>E</kbd>/<kbd>F2</kbd> 수정 · <kbd>H</kbd> 숨김 · <kbd>J</kbd> 뒤 단어와 붙이기 · <kbd>Shift</kbd>+<kbd>J</kbd> 앞 단어와 붙이기 · <kbd>S</kbd> 큐 나누기
+            </p>
+          </section>
+
+          <div class="security-note speech-disclosure">
+            <span class="security-note-icon" aria-hidden="true">i</span>
+            <div>
+              <strong>AI 음성 사용 고지</strong>
+              <p>TTS 음성임을 최종 콘텐츠에서 명확하게 고지하고, 타인의 목소리를 사칭하거나 동의 없이 복제하지 마세요. 선택한 파일과 대본은 설정한 AI API로 전송됩니다.</p>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-reference"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-reference"
+          data-panel="reference"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">VISUAL DIRECTION</p>
+              <h2>AI 이미지·동영상 레퍼런스</h2>
+              <p class="panel-description">생성형 AI 결과물과 무드 레퍼런스를 모아 편집 방향을 한 화면에서 관리합니다.</p>
+            </div>
+            <button id="choose-reference-btn" class="secondary-button" type="button">
+              <span aria-hidden="true">＋</span>
+              레퍼런스 파일 선택
+            </button>
+          </div>
+
+          <div class="two-column-layout reference-layout">
+            <form class="settings-card compact-card reference-form" aria-label="레퍼런스 추가">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3>레퍼런스 정보</h3>
+                  <p>유형과 활용 메모를 함께 저장합니다.</p>
+                </div>
+              </div>
+              <div class="field">
+                <label for="reference-type-select">레퍼런스 유형</label>
+                <div class="select-wrap">
+                  <select id="reference-type-select" name="referenceType">
+                    <option value="image">AI 이미지</option>
+                    <option value="video">AI 동영상</option>
+                    <option value="moodboard">무드보드</option>
+                    <option value="other">기타</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field textarea-field">
+                <label for="reference-notes-input">활용 메모</label>
+                <textarea
+                  id="reference-notes-input"
+                  name="referenceNotes"
+                  rows="6"
+                  maxlength="1000"
+                  placeholder="색감, 카메라 움직임, 구도처럼 편집에 반영할 내용을 적어 주세요."
+                ></textarea>
+                <span class="field-hint">선택한 파일과 함께 프로젝트 메타데이터에 저장됩니다.</span>
+              </div>
+              <button id="add-reference-btn" class="primary-button full-width-button" type="button" disabled>
+                레퍼런스 보드에 추가
+              </button>
+            </form>
+
+            <div class="settings-card compact-card reference-board">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3>레퍼런스 보드</h3>
+                  <p>카드를 드래그해 우선순위를 정렬하세요.</p>
+                </div>
+              </div>
+              <div id="reference-list" class="reference-list drop-surface" role="list" aria-live="polite">
+                <div class="empty-state compact-empty-state">
+                  <span class="empty-state-icon" aria-hidden="true">▧</span>
+                  <strong>등록된 레퍼런스가 없습니다</strong>
+                  <p>이미지 또는 동영상 파일을 선택해 보드에 추가해 주세요.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-brand"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-brand"
+          data-panel="brand"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">BRAND LAYER</p>
+              <h2>브랜드 키트·MOGRT</h2>
+              <p class="panel-description">폰트·색상·자막·썸네일·TTS·MOGRT 설정을 한 번 저장해 모든 숏폼에 일관되게 적용합니다.</p>
+            </div>
+          </div>
+
+          <div class="settings-card brand-kit-card">
+            <div class="section-heading section-heading-action">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3>브랜드 키트</h3>
+                  <p>최대 20개 프리셋 · 현재 <strong id="brand-kit-count">0 / 20</strong></p>
+                </div>
+              </div>
+              <div class="button-cluster">
+                <button id="brand-kit-import-btn" class="secondary-button" type="button">JSON 가져오기</button>
+                <button id="brand-kit-export-btn" class="secondary-button" type="button">JSON 내보내기</button>
+              </div>
+            </div>
+
+            <div class="brand-kit-toolbar">
+              <div class="field brand-kit-select-field">
+                <label for="brand-kit-select">현재 키트</label>
+                <div class="select-wrap"><select id="brand-kit-select" aria-label="브랜드 키트 선택"></select></div>
+              </div>
+              <div class="button-cluster brand-kit-toolbar-actions">
+                <button id="brand-kit-new-btn" class="secondary-button" type="button">새 키트</button>
+                <button id="brand-kit-duplicate-btn" class="secondary-button" type="button">복제</button>
+                <button id="brand-kit-delete-btn" class="danger-button" type="button">삭제</button>
+              </div>
+            </div>
+
+            <div class="brand-kit-section">
+              <h4>기본 아이덴티티</h4>
+              <div class="form-grid brand-form-grid">
+                <div class="field field-span-2">
+                  <label for="brand-name-input">키트 이름</label>
+                  <input id="brand-name-input" type="text" maxlength="80" placeholder="예: 메인 채널" />
+                </div>
+                <div class="field">
+                  <label for="brand-font-input">기본 폰트</label>
+                  <input id="brand-font-input" type="text" maxlength="120" value="Pretendard" />
+                </div>
+                <div class="field">
+                  <label for="brand-font-weight-input">폰트 굵기</label>
+                  <input id="brand-font-weight-input" type="number" min="100" max="900" step="100" value="700" />
+                </div>
+                <div class="field"><label for="brand-primary-color">주 색상</label><input id="brand-primary-color" type="color" value="#ffffff" /></div>
+                <div class="field"><label for="brand-secondary-color">보조 색상</label><input id="brand-secondary-color" type="color" value="#111111" /></div>
+                <div class="field"><label for="brand-accent-color">강조 색상</label><input id="brand-accent-color" type="color" value="#8b5cf6" /></div>
+                <div class="field">
+                  <label>로고 파일</label>
+                  <div class="inline-file-control"><strong id="brand-logo-name" title="">선택되지 않음</strong><button id="brand-logo-btn" class="secondary-button" type="button">선택</button></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="brand-kit-section">
+              <h4>자막·썸네일 기본값</h4>
+              <div class="form-grid brand-form-grid">
+                <div class="field"><label for="brand-caption-max-input">자막 최대 글자</label><input id="brand-caption-max-input" type="number" min="4" max="80" step="1" value="24" /></div>
+                <div class="field"><label for="brand-caption-position-select">자막 위치</label><div class="select-wrap"><select id="brand-caption-position-select"><option value="top">상단</option><option value="center">중앙</option><option value="bottom" selected>하단</option></select></div></div>
+                <label class="checkbox-row"><input id="brand-caption-shadow-checkbox" type="checkbox" checked /><span class="custom-checkbox" aria-hidden="true"></span><span>자막 그림자</span></label>
+                <label class="checkbox-row"><input id="brand-caption-highlight-checkbox" type="checkbox" /><span class="custom-checkbox" aria-hidden="true"></span><span>핵심 단어 강조</span></label>
+                <div class="field"><label for="brand-thumb-layout-select">썸네일 분할</label><div class="select-wrap"><select id="brand-thumb-layout-select"><option value="full">1분할</option><option value="vertical">2분할 좌우</option><option value="horizontal">2분할 상하</option><option value="hero-left">3분할 좌측 강조</option><option value="hero-top">3분할 상단 강조</option><option value="grid">4분할</option></select></div></div>
+                <div class="field"><label for="brand-thumb-background-color">썸네일 배경</label><input id="brand-thumb-background-color" type="color" value="#111111" /></div>
+                <div class="field"><label for="brand-thumb-text-color">썸네일 글자</label><input id="brand-thumb-text-color" type="color" value="#ffffff" /></div>
+                <div class="field"><label for="brand-thumb-brightness-input">밝기</label><input id="brand-thumb-brightness-input" type="number" min="0" max="200" step="1" value="100" /></div>
+                <div class="field"><label for="brand-thumb-contrast-input">대비</label><input id="brand-thumb-contrast-input" type="number" min="0" max="200" step="1" value="100" /></div>
+                <div class="field"><label for="brand-thumb-saturation-input">채도</label><input id="brand-thumb-saturation-input" type="number" min="0" max="200" step="1" value="100" /></div>
+                <div class="field"><label for="brand-thumb-shadow-input">그림자</label><input id="brand-thumb-shadow-input" type="number" min="0" max="100" step="1" value="0" /></div>
+                <div class="field"><label for="brand-thumb-shadow-color">그림자 색</label><input id="brand-thumb-shadow-color" type="color" value="#000000" /></div>
+                <div class="field"><label for="brand-thumb-glow-input">외부광선</label><input id="brand-thumb-glow-input" type="number" min="0" max="100" step="1" value="0" /></div>
+                <div class="field"><label for="brand-thumb-glow-color">광선 색</label><input id="brand-thumb-glow-color" type="color" value="#8b5cf6" /></div>
+              </div>
+            </div>
+
+            <div class="brand-kit-section">
+              <h4>TTS 기본값</h4>
+              <div class="form-grid brand-form-grid">
+                <div class="field"><label for="brand-tts-model-select">모델</label><div class="select-wrap"><select id="brand-tts-model-select"><option value="gpt-4o-mini-tts">GPT-4o mini TTS</option><option value="tts-1-hd">TTS-1 HD</option><option value="tts-1">TTS-1</option></select></div></div>
+                <div class="field"><label for="brand-tts-voice-input">목소리</label><input id="brand-tts-voice-input" type="text" maxlength="40" value="marin" /></div>
+                <div class="field"><label for="brand-tts-speed-input">속도</label><input id="brand-tts-speed-input" type="number" min="0.25" max="4" step="0.05" value="1" /></div>
+                <div class="brand-active-summary"><span>활성 키트</span><strong id="brand-active-name">—</strong></div>
+              </div>
+            </div>
+
+            <div class="form-actions brand-kit-actions">
+              <button id="brand-kit-save-btn" class="secondary-button" type="button">키트 저장</button>
+              <button id="brand-kit-apply-btn" class="primary-button primary-button-large" type="button">현재 작업에 적용 <span aria-hidden="true">→</span></button>
+            </div>
+            <p class="action-note">JSON 공유 파일에는 로고·MOGRT의 로컬 권한 토큰이 포함되지 않습니다. 다른 PC에서는 해당 파일을 다시 선택해 주세요.</p>
+          </div>
+
+          <div class="settings-card brand-mogrt-card">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">02</span>
+              <div>
+                <h3>템플릿 선택</h3>
+                <p>로컬 디스크의 .mogrt 파일을 선택하세요.</p>
+              </div>
+            </div>
+
+            <div class="file-picker-row">
+              <div class="file-summary">
+                <span class="file-icon" aria-hidden="true">MG</span>
+                <div>
+                  <span class="file-label">선택된 템플릿</span>
+                  <strong id="mogrt-name" title="">선택되지 않음</strong>
+                </div>
+              </div>
+              <button id="choose-mogrt-btn" class="secondary-button" type="button">MOGRT 선택</button>
+            </div>
+
+            <div class="section-divider"></div>
+
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">02</span>
+              <div>
+                <h3>삽입 위치</h3>
+                <p>재생 헤드 위치의 지정된 비디오 트랙에 추가합니다.</p>
+              </div>
+            </div>
+
+            <div class="inline-setting-row">
+              <div class="field track-field">
+                <label for="mogrt-track-input">비디오 트랙</label>
+                <div class="track-input-wrap">
+                  <span aria-hidden="true">V</span>
+                  <input id="mogrt-track-input" name="mogrtTrack" type="number" min="1" max="99" step="1" value="2" inputmode="numeric" />
+                </div>
+              </div>
+              <p class="setting-hint">기존 클립과 겹치지 않는 상위 트랙을 권장합니다.</p>
+            </div>
+
+            <div class="form-actions aligned-end">
+              <button id="insert-mogrt-btn" class="primary-button primary-button-large" type="button">
+                현재 위치에 삽입
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-thumbnail"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-thumbnail"
+          data-panel="thumbnail"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">THUMBNAIL LAB</p>
+              <h2>썸네일 제작</h2>
+              <p class="panel-description">시퀀스 프레임과 레퍼런스를 조합해 1280 × 720 썸네일을 만들고 AI로 보정합니다.</p>
+            </div>
+            <button id="thumb-export-btn" class="primary-button" type="button">
+              <span aria-hidden="true">↓</span>
+              PNG 내보내기
+            </button>
+          </div>
+
+          <div class="thumbnail-workspace">
+            <div class="thumbnail-main-column">
+              <div class="settings-card thumbnail-stage-card">
+                <div class="thumbnail-toolbar">
+                  <div class="field thumbnail-layout-field">
+                    <label for="thumbnail-layout-select">화면 분할</label>
+                    <div class="select-wrap">
+                      <select id="thumbnail-layout-select" name="thumbnailLayout">
+                        <option value="full">1분할 · 전체</option>
+                        <option value="vertical">2분할 · 좌우</option>
+                        <option value="horizontal">2분할 · 상하</option>
+                        <option value="hero-left">3분할 · 왼쪽 강조</option>
+                        <option value="hero-top">3분할 · 상단 강조</option>
+                        <option value="grid">4분할 · 그리드</option>
+                      </select>
+                    </div>
+                  </div>
+                  <button id="thumbnail-source-btn" class="secondary-button" type="button">
+                    <span aria-hidden="true">＋</span>
+                    소스 추가
+                  </button>
+                </div>
+
+                <div class="thumbnail-canvas-shell">
+                  <canvas
+                    id="thumbnail-canvas"
+                    width="1280"
+                    height="720"
+                    role="img"
+                    aria-label="1280 × 720 썸네일 미리보기 캔버스"
+                  >
+                    이 환경에서는 썸네일 캔버스 미리보기를 표시할 수 없습니다.
+                  </canvas>
+                  <div class="canvas-size-badge" aria-hidden="true">1280 × 720</div>
+                </div>
+              </div>
+
+              <div class="settings-card layer-panel">
+                <div class="section-heading section-heading-action">
+                  <div class="section-heading-copy">
+                    <span class="section-number" aria-hidden="true">01</span>
+                    <div>
+                      <h3>레이어</h3>
+                      <p>카드를 드래그해 앞뒤 순서를 변경하세요.</p>
+                    </div>
+                  </div>
+                  <span class="drag-hint"><span aria-hidden="true">↕</span> 드래그 정렬</span>
+                </div>
+                <div id="thumbnail-layer-list" class="thumbnail-layer-list drop-surface" role="list" aria-live="polite">
+                  <div class="empty-state layer-empty-state">
+                    <span class="empty-state-icon" aria-hidden="true">▱</span>
+                    <strong>아직 레이어가 없습니다</strong>
+                    <p>소스 추가를 눌러 시퀀스 프레임이나 이미지를 불러오세요.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-card thumb-ai-card">
+                <div class="section-heading">
+                  <span class="section-number" aria-hidden="true">02</span>
+                  <div>
+                    <h3>AI 이미지 보정</h3>
+                    <p>선택한 프리셋과 프롬프트를 현재 썸네일에 적용합니다.</p>
+                  </div>
+                </div>
+                <div class="form-grid thumb-ai-grid">
+                  <div class="field">
+                    <label for="thumb-ai-preset-select">AI 프리셋</label>
+                    <div class="select-wrap">
+                      <select id="thumb-ai-preset-select" name="thumbAiPreset">
+                        <option value="none">사용 안 함</option>
+                        <option value="basic">기본 보정</option>
+                        <option value="vivid">강렬 보정</option>
+                        <option value="upscale">화질 개선</option>
+                        <option value="remove-bg">배경 제거</option>
+                        <option value="chat">AI 대화로 수정</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field field-span-2 thumb-prompt-field">
+                    <label for="thumb-ai-prompt-input">추가 지시</label>
+                    <textarea
+                      id="thumb-ai-prompt-input"
+                      name="thumbAiPrompt"
+                      rows="3"
+                      maxlength="1500"
+                      placeholder="예: 인물은 유지하고 배경 대비를 높여 주세요."
+                    ></textarea>
+                  </div>
+                </div>
+                <div class="form-actions thumb-ai-actions">
+                  <p class="action-note">AI 설정 탭에서 먼저 공급자와 API 키를 설정해 주세요.</p>
+                  <button id="thumb-ai-run-btn" class="primary-button" type="button">AI 보정 실행</button>
+                </div>
+                <div class="history-block">
+                  <div class="history-heading">
+                    <strong>보정 기록</strong>
+                    <span>최근 결과를 선택해 되돌릴 수 있습니다.</span>
+                  </div>
+                  <div id="thumb-ai-history" class="thumb-ai-history" role="list" aria-live="polite">
+                    <div class="history-empty">아직 AI 보정 기록이 없습니다.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="settings-card thumbnail-inspector" aria-label="썸네일 이미지 조정">
+              <div class="section-heading">
+                <span class="section-number" aria-hidden="true">03</span>
+                <div>
+                  <h3>이미지 조정</h3>
+                  <p>선택한 레이어에 적용됩니다.</p>
+                </div>
+              </div>
+
+              <div class="range-field">
+                <div class="range-label-row">
+                  <label for="thumb-brightness-input">밝기</label>
+                  <output class="range-value" for="thumb-brightness-input" data-value-for="thumb-brightness-input">100%</output>
+                </div>
+                <input id="thumb-brightness-input" name="thumbBrightness" type="range" min="0" max="200" step="1" value="100" />
+              </div>
+              <div class="range-field">
+                <div class="range-label-row">
+                  <label for="thumb-contrast-input">대비</label>
+                  <output class="range-value" for="thumb-contrast-input" data-value-for="thumb-contrast-input">100%</output>
+                </div>
+                <input id="thumb-contrast-input" name="thumbContrast" type="range" min="0" max="200" step="1" value="100" />
+              </div>
+              <div class="range-field">
+                <div class="range-label-row">
+                  <label for="thumb-saturation-input">채도</label>
+                  <output class="range-value" for="thumb-saturation-input" data-value-for="thumb-saturation-input">100%</output>
+                </div>
+                <input id="thumb-saturation-input" name="thumbSaturation" type="range" min="0" max="200" step="1" value="100" />
+              </div>
+
+              <div class="section-divider"></div>
+
+              <div class="effect-stack">
+                <div class="effect-row">
+                  <label class="checkbox-row compact-toggle" for="thumb-shadow-checkbox">
+                    <input id="thumb-shadow-checkbox" name="thumbShadow" type="checkbox" />
+                    <span class="custom-checkbox" aria-hidden="true"></span>
+                    <span><strong>그림자</strong></span>
+                  </label>
+                  <div class="color-field">
+                    <label class="sr-only" for="thumb-shadow-color">그림자 색상</label>
+                    <input id="thumb-shadow-color" name="thumbShadowColor" type="color" value="#000000" title="그림자 색상" />
+                  </div>
+                </div>
+                <div class="effect-row">
+                  <label class="checkbox-row compact-toggle" for="thumb-glow-checkbox">
+                    <input id="thumb-glow-checkbox" name="thumbGlow" type="checkbox" />
+                    <span class="custom-checkbox" aria-hidden="true"></span>
+                    <span><strong>글로우</strong></span>
+                  </label>
+                  <div class="color-field">
+                    <label class="sr-only" for="thumb-glow-color">글로우 색상</label>
+                    <input id="thumb-glow-color" name="thumbGlowColor" type="color" value="#8b5cf6" title="글로우 색상" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="inspector-note">
+                <span aria-hidden="true">i</span>
+                <p>캔버스의 레이어를 선택한 뒤 조정 값을 변경하세요.</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section
+          id="panel-export"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-export"
+          data-panel="export"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">DELIVERY</p>
+              <h2>영상 내보내기</h2>
+              <p class="panel-description">Adobe Media Encoder 프리셋과 저장 위치를 지정해 완성본을 출력합니다.</p>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">01</span>
+              <div>
+                <h3>내보내기 파일</h3>
+                <p>Media Encoder 프리셋과 결과물이 저장될 폴더를 선택하세요.</p>
+              </div>
+            </div>
+
+            <div class="file-picker-stack">
+              <div class="file-picker-row">
+                <div class="file-summary">
+                  <span class="file-icon preset-file-icon" aria-hidden="true">EPR</span>
+                  <div>
+                    <span class="file-label">인코딩 프리셋</span>
+                    <strong id="preset-name" title="">선택되지 않음</strong>
+                  </div>
+                </div>
+                <button id="choose-preset-btn" class="secondary-button" type="button">프리셋 선택</button>
+              </div>
+              <div class="file-picker-row">
+                <div class="file-summary">
+                  <span class="file-icon folder-icon" aria-hidden="true">DIR</span>
+                  <div>
+                    <span class="file-label">저장 폴더</span>
+                    <strong id="output-name" title="">선택되지 않음</strong>
+                  </div>
+                </div>
+                <button id="choose-output-btn" class="secondary-button" type="button">폴더 선택</button>
+              </div>
+            </div>
+
+            <div class="section-divider"></div>
+
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">02</span>
+              <div>
+                <h3>출력 방식</h3>
+                <p>인코더 작업과 출력할 시퀀스 범위를 설정합니다.</p>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label for="export-mode-select">처리 방식</label>
+                <div class="select-wrap">
+                  <select id="export-mode-select" name="exportMode">
+                    <option value="queue">Media Encoder 대기열</option>
+                    <option value="immediate">즉시 인코딩</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="export-range-select">출력 범위</label>
+                <div class="select-wrap">
+                  <select id="export-range-select" name="exportRange">
+                    <option value="entire">전체 시퀀스</option>
+                    <option value="inout">인/아웃 구간</option>
+                    <option value="workarea">작업 영역</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="export-action-grid">
+              <button id="export-video-btn" class="primary-button primary-button-large" type="button">
+                <span aria-hidden="true">▶</span>
+                영상 내보내기
+              </button>
+              <button id="export-cover-btn" class="secondary-button secondary-button-large" type="button">
+                <span aria-hidden="true">▣</span>
+                현재 프레임 커버 저장
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="panel-ai-settings"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-ai-settings"
+          data-panel="ai-settings"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">AI CONNECTION</p>
+              <h2>AI 설정</h2>
+              <p class="panel-description">썸네일 이미지 보정과 TTS·STT에 공통으로 사용할 API 연결을 설정합니다.</p>
+            </div>
+            <div id="ai-status" class="connection-status is-idle" role="status" aria-live="polite" aria-atomic="true">
+              <span class="connection-status-dot" aria-hidden="true"></span>
+              <span>연결 확인 필요</span>
+            </div>
+          </div>
+
+          <div class="settings-card ai-settings-card">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">01</span>
+              <div>
+                <h3>API 연결</h3>
+                <p>키는 플러그인의 로컬 보안 저장소에만 저장됩니다.</p>
+              </div>
+            </div>
+
+            <div class="form-grid ai-form-grid">
+              <div class="field">
+                <label for="ai-provider-select">AI 공급자</label>
+                <div class="select-wrap">
+                  <select id="ai-provider-select" name="aiProvider">
+                    <option value="openai">OpenAI</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="ai-model-input">모델</label>
+                <input id="ai-model-input" name="aiModel" type="text" value="gpt-image-2" maxlength="120" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field field-span-2">
+                <label for="ai-endpoint-input">API 엔드포인트</label>
+                <input
+                  id="ai-endpoint-input"
+                  name="aiEndpoint"
+                  type="url"
+                  value="https://api.openai.com/v1"
+                  maxlength="500"
+                  autocomplete="off"
+                  spellcheck="false"
+                  readonly
+                />
+              </div>
+              <div class="field field-span-2">
+                <label for="ai-api-key-input">API 키</label>
+                <div class="secret-input-wrap">
+                  <span aria-hidden="true">•••</span>
+                  <input
+                    id="ai-api-key-input"
+                    name="aiApiKey"
+                    type="password"
+                    placeholder="API 키 입력"
+                    maxlength="500"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </div>
+                <span class="field-hint">키는 로그에 표시되지 않으며 프로젝트 파일에도 포함되지 않습니다.</span>
+              </div>
+            </div>
+
+            <div class="security-note">
+              <span class="security-note-icon" aria-hidden="true">⌁</span>
+              <div>
+                <strong>공식 OpenAI 엔드포인트만 허용</strong>
+                <p>현재 패키지의 네트워크 권한은 api.openai.com으로 제한되어 있으며 API 키는 다른 도메인으로 전송되지 않습니다.</p>
+              </div>
+            </div>
+
+            <div class="form-actions ai-settings-actions">
+              <button id="ai-test-btn" class="secondary-button" type="button">연결 테스트</button>
+              <button id="ai-save-btn" class="primary-button primary-button-large" type="button">
+                설정 저장
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="settings-card ai-queue-card">
+            <div class="section-heading section-heading-action">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3>AI 작업 큐·비용 보호</h3>
+                  <p>중복 요청, 재시도, 동시 실행과 일일 사용량을 한곳에서 관리합니다.</p>
+                </div>
+              </div>
+              <div class="button-cluster">
+                <button id="ai-queue-pause-btn" class="secondary-button" type="button">큐 일시정지</button>
+                <button id="ai-cache-clear-btn" class="secondary-button" type="button">캐시 지우기</button>
+              </div>
+            </div>
+            <div class="ai-queue-metrics">
+              <div><span>오늘 사용</span><strong id="ai-queue-usage">0 / 100회 · 0 / 100단위</strong></div>
+              <div><span>결과 캐시</span><strong id="ai-cache-count">0개</strong></div>
+            </div>
+            <div class="form-grid ai-queue-controls">
+              <div class="field"><label for="ai-queue-concurrency-input">동시 실행</label><input id="ai-queue-concurrency-input" type="number" min="1" max="3" step="1" value="2" /></div>
+              <div class="field"><label for="ai-request-limit-input">일일 요청 한도</label><input id="ai-request-limit-input" type="number" min="0" max="1000000" step="1" value="100" /></div>
+              <div class="field"><label for="ai-cost-limit-input">일일 비용 단위</label><input id="ai-cost-limit-input" type="number" min="0" max="1000000" step="0.1" value="100" /></div>
+              <div class="field"><label for="ai-confirm-threshold-input">승인 필요 단위</label><input id="ai-confirm-threshold-input" type="number" min="0" max="1000000" step="0.1" value="10" /></div>
+            </div>
+            <div class="form-actions aligned-end"><button id="ai-queue-save-btn" class="primary-button" type="button">큐·한도 저장</button></div>
+            <div id="ai-job-list" class="ai-job-list" aria-live="polite"><p class="action-note">대기 중이거나 최근 실행한 AI 작업이 없습니다.</p></div>
+            <p class="action-note">비용 단위는 공급자 청구 금액이 아니라 사용자 보호용 상대 단위입니다. 실제 청구 내역은 OpenAI 사용량 페이지에서 확인해 주세요.</p>
+          </div>
+        </section>
+
+        <section
+          id="panel-log"
+          class="workflow-panel"
+          role="tabpanel"
+          aria-labelledby="tab-log"
+          data-panel="log"
+          hidden
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">ACTIVITY</p>
+              <h2>작업 로그</h2>
+              <p class="panel-description">현재 세션에서 실행한 작업, 경고와 오류를 시간순으로 확인합니다.</p>
+            </div>
+            <button id="clear-log-btn" class="secondary-button" type="button">로그 지우기</button>
+          </div>
+
+          <div class="log-card">
+            <div class="log-toolbar" aria-hidden="true">
+              <span>시간</span>
+              <span>유형</span>
+              <span>내용</span>
+            </div>
+            <ol id="log-list" class="log-list" aria-live="polite" aria-relevant="additions text">
+              <li class="log-empty">
+                <span aria-hidden="true">_</span>
+                기록된 작업이 없습니다.
+              </li>
+            </ol>
+          </div>
+
+          <div class="settings-card recovery-card">
+            <div class="section-heading section-heading-action">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">01</span>
+                <div>
+                  <h3>비파괴 작업 복구</h3>
+                  <p>자동 편집 전 생성한 검증된 복제 시퀀스와 작업 상태를 최대 50개까지 기록합니다.</p>
+                </div>
+              </div>
+              <strong id="recovery-count" class="recovery-count" aria-label="복구 기록 수">0 / 50</strong>
+            </div>
+            <div id="recovery-list" class="recovery-list" aria-live="polite" aria-relevant="additions text">
+              <p class="action-note">기록된 비파괴 작업이 없습니다.</p>
+            </div>
+            <p class="action-note">“복제본 제거”는 원본 시퀀스를 먼저 활성화한 뒤 기록과 일치하는 복제 시퀀스만 제거합니다.</p>
+          </div>
+
+          <div class="settings-card diagnostics-card">
+            <div class="section-heading section-heading-action">
+              <div class="section-heading-copy">
+                <span class="section-number" aria-hidden="true">02</span>
+                <div>
+                  <h3>시스템 진단</h3>
+                  <p>Premiere·UXP 버전과 공개 API, 파일·보안 저장소·인코더 사용 가능 여부를 점검합니다.</p>
+                </div>
+              </div>
+              <div class="button-cluster">
+                <button id="run-diagnostics-btn" class="secondary-button small-button" type="button">진단 실행</button>
+                <button id="export-diagnostics-btn" class="secondary-button small-button" type="button" disabled>진단 JSON 저장</button>
+              </div>
+            </div>
+            <p id="diagnostics-summary" class="diagnostics-summary is-idle" role="status" aria-live="polite">아직 진단을 실행하지 않았습니다.</p>
+            <div id="diagnostics-list" class="diagnostics-list" aria-live="polite"></div>
+            <p class="action-note">자동 외부 전송은 하지 않습니다. JSON 저장 시 API 키, 경로, 미디어명, 원고 등 민감 정보는 제거됩니다.</p>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span>ShortFlow Studio</span>
+        <span class="footer-divider" aria-hidden="true"></span>
+        <span>Premiere Pro UXP</span>
+        <span class="footer-version">v1.0.0</span>
+      </footer>
+    </div>
+
+    <div id="busy-overlay" class="busy-overlay" role="status" aria-live="assertive" aria-atomic="true" hidden>
+      <div class="busy-dialog">
+        <span class="spinner" aria-hidden="true"></span>
+        <strong id="busy-message">작업을 처리하고 있습니다…</strong>
+        <span>Premiere Pro에서 작업이 완료될 때까지 기다려 주세요.</span>
+      </div>
+    </div>
+
+    <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+
+    <script src="index.js"></script>
+  </body>
+</html>

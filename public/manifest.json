@@ -1,0 +1,72 @@
+{
+  "manifestVersion": 5,
+  "id": "com.seunghooda.shortflow.studio.direct",
+  "name": "ShortFlow Studio",
+  "shortname": "ShortFlow",
+  "version": "1.0.0",
+  "main": "index.html",
+  "host": {
+    "app": "premierepro",
+    "minVersion": "25.6.0"
+  },
+  "requiredPermissions": {
+    "localFileSystem": "request",
+    "network": {
+      "domains": [
+        "https://api.openai.com"
+      ]
+    },
+    "launchProcess": {
+      "schemes": ["file"],
+      "extensions": [
+        "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma",
+        "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "psd", "tif", "tiff", "webp",
+        "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mxf", "webm", "wmv"
+      ]
+    }
+  },
+  "entrypoints": [
+    {
+      "id": "shortflowPanel",
+      "type": "panel",
+      "label": {
+        "default": "ShortFlow Studio"
+      },
+      "minimumSize": {
+        "width": 320,
+        "height": 480
+      },
+      "maximumSize": {
+        "width": 1600,
+        "height": 2000
+      },
+      "preferredDockedSize": {
+        "width": 400,
+        "height": 760
+      },
+      "preferredFloatingSize": {
+        "width": 460,
+        "height": 820
+      },
+      "icons": [
+        {
+          "width": 24,
+          "height": 24,
+          "path": "icons/shortflow.svg",
+          "scale": [1, 2],
+          "theme": ["darkest", "dark", "medium", "light", "lightest", "all"]
+        }
+      ]
+    }
+  ],
+  "icons": [
+    {
+      "width": 48,
+      "height": 48,
+      "path": "icons/shortflow.svg",
+      "scale": [1, 2],
+      "theme": ["darkest", "dark", "medium", "light", "lightest", "all"],
+      "species": ["pluginList"]
+    }
+  ]
+}
