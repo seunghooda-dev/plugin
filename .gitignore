@@ -2,6 +2,11 @@ node_modules/
 dist/
 release/
 .test-build/
+.ai-test-build/
+.thumbnail-test-build/
+.job-test-build/
+.recovery-test-build/
+.final-qc-test-build/
 *.log
 .DS_Store
 Thumbs.db
