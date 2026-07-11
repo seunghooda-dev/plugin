@@ -9,7 +9,7 @@
 - **자동 검증**: Node mock/순수 테스트 또는 build verifier가 통과했습니다.
 - **호스트 미검증**: Premiere Pro/UXP/Media Encoder 실제 실행 증거가 없습니다.
 
-현재 `npm test` 결과는 818/818 통과입니다. 이 숫자는 Premiere 호스트 검증을 뜻하지 않습니다.
+현재 `npm test` 결과는 821/821 통과입니다. 이 숫자는 Premiere 호스트 검증을 뜻하지 않습니다.
 
 | ID | 요구사항 | 구현 파일 | 자동 근거 | 패널/배포 상태 | Premiere 호스트 |
 |---|---|---|---|---|---|
@@ -30,7 +30,7 @@
 | R-015 | AI 큐 5종, 동시성/취소/재시도/캐시/일일 provider-unit 예산 | `src/job-queue.ts`, `src/ai-queue-controller.ts` | `tests/job-queue.test.ts` | 패널 연결 | 미검증 |
 | R-016 | clone-before-mutation, 50개 저널, rollback/interrupted 복구 | `src/recovery.ts`, `index.ts` | `tests/recovery.test.ts` | 패널 연결 | 미검증 |
 | R-017 | 최종 QC snapshot, hard-block/waiver, JSON/Markdown report와 export gate | `src/final-qc.ts`, `src/final-qc-controller.ts`, `index.ts` | `tests/final-qc.test.ts` | 패널 연결 | 미검증 |
-| R-018 | 진단, API guard, 익명 bundle, telemetry 명시적 opt-in | `src/diagnostics.ts` | `tests/diagnostics.test.ts` | 엔진 준비 | 미검증 |
+| R-018 | 진단, API guard, 익명 bundle, telemetry 명시적 opt-in | `src/diagnostics.ts`, `index.ts` | `tests/diagnostics.test.ts`, `tests/ui-contract.test.ts` | 패널 연결 | 미검증 |
 | R-019 | API key 비밀 저장, error/report redaction, HTTPS/SSRF 방어 | `src/ai.ts`, `src/speech.ts`, `src/diagnostics.ts`, `src/final-qc.ts` | 관련 `ai`, `speech`, `diagnostics`, `final-qc` 테스트 | 혼합 | 미검증 |
 | R-020 | CCX 루트 manifest, dist 안전검증, 재현 가능한 SHA-256, 덮어쓰기 보호 | `scripts/verify-dist.mjs`, `scripts/package-ccx.mjs`, `package.json` | `npm run build`, `npm run package:ccx` | 서명 전 후보 | 해당 없음 |
 | R-021 | Windows/macOS 설치 및 업데이트 | `README.md`, `docs/QA_CHECKLIST.md` | 문서 검토만 | 미완료 | 미검증 |
@@ -43,5 +43,5 @@
 1. Windows와 macOS에서 Premiere Pro 25.6+ UXP Developer Tool 로드 결과
 2. 실제 프로젝트에서 복제/마커/MOGRT/Media Encoder/파일 권한 회귀 테스트
 3. OpenAI 이미지/TTS/STT 실제 계정 호출과 비용·고지·개인정보 검토
-4. 진단 엔진의 `index.ts`/UI 연결 또는 배포 범위 제외 결정
+4. 진단 UI의 실제 UXP capability probe와 로컬 JSON bundle 검토
 5. Adobe 정식 plugin ID, 서명/notarization, 조직 배포 또는 Marketplace 심사 증거

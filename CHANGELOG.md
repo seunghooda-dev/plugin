@@ -20,7 +20,7 @@
 - clone-before-mutation 복구 저널, 외부 부작용 rollback과 interrupted 복구 엔진
 - 자막·Safe Zone·오디오·누락 미디어·출력 경로를 검사하는 최종 QC 게이트
 - 익명 진단 번들, API capability guard와 명시적 opt-in telemetry 엔진
-- TypeScript, ESLint, 818개 Node mock/순수 테스트와 Vite 배포 검증
+- TypeScript, ESLint, 821개 Node mock/순수 테스트와 Vite 배포 검증
 - `dist` 루트의 재현 가능한 CCX 후보 패키징, SHA-256, 심볼릭 링크/민감 파일/HTTPS 도메인 검사와 안전한 덮어쓰기 정책
 
 ### 보안·개인정보
@@ -32,12 +32,12 @@
 
 ### 검증 상태
 
-- 2026-07-11 개발 환경에서 `npm test`: 818/818 통과
+- 2026-07-11 개발 환경에서 `npm test`: 821/821 통과
 - Premiere Pro, Media Encoder, UXP Developer Tool 실제 호스트 테스트: 미실시
 - Windows/macOS CCX 설치, Adobe 서명, notarization, Marketplace 심사: 미실시
 
 ### 알려진 제약
 
 - 내장 Auto Reframe이나 AI 하이라이트 선택을 호출하지 않으며 스케일/위치 및 STT 규칙 기반 계획을 사용합니다.
-- 자막 컨트롤러, 복구와 최종 QC는 패널 초기화 흐름에 연결됐지만 Premiere 호스트에서 미검증입니다. 진단 엔진은 코드/테스트가 준비됐지만 현재 `index.ts` 초기화 흐름에는 연결되지 않았습니다.
+- 자막 컨트롤러, 복구, 최종 QC와 진단 UI는 패널 초기화 흐름에 연결됐지만 Premiere 호스트에서 미검증입니다.
 - 로컬 CCX는 서명 전 후보이며 Marketplace 배포 가능 상태를 의미하지 않습니다.

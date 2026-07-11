@@ -6,7 +6,7 @@ ShortFlow Studio는 Adobe Premiere Pro용 UXP 숏폼 제작 패널입니다. 시
 
 이 저장소는 **Premiere Pro가 설치되지 않은 개발 환경**에서 작성되었습니다.
 
-- 2026-07-11 기준 Node 기반 정적/mock 테스트: **818개 통과**
+- 2026-07-11 기준 Node 기반 정적/mock 테스트: **821개 통과**
 - TypeScript, ESLint, Vite build와 `dist` 구조 검증: 자동 명령으로 제공
 - Premiere Pro, Adobe Media Encoder, UXP Developer Tool 실제 실행: **아직 검증하지 않음**
 - Windows/macOS CCX 설치, Adobe 서명, Marketplace 심사: **아직 완료하지 않음**
@@ -40,12 +40,9 @@ ShortFlow Studio는 Adobe Premiere Pro용 UXP 숏폼 제작 패널입니다. 시
 - AI 작업 큐의 중복 제거, 취소, 재시도, 동시 실행 수, provider-unit 일일 한도와 승인 임계값
 - clone-before-mutation 검증, 최대 50개 작업 저널, 중단 작업 복원과 검증된 복제 시퀀스 rollback을 제공하는 비파괴 복구 흐름
 - 실제 시퀀스·미디어 상태와 STT/Safe Zone·사용자 입력 오디오 값을 수집하는 최종 QC, waiver, JSON/Markdown 보고서와 내보내기 차단 게이트
+- Premiere/UXP capability 진단 실행, 민감정보를 제거한 로컬 JSON 진단 번들 저장, 복구 저널 목록과 검증된 복제본 제거 UI
 
-### 코드·자동 테스트가 준비됐지만 현재 `index.ts`에 연결되지 않은 엔진
-
-- 진단/익명 번들/telemetry opt-in 엔진
-
-이 두 번째 그룹은 라이브 패널 기능으로 간주하면 안 됩니다. 실제 연결, Premiere snapshot 수집, UI 승인 흐름과 호스트 테스트가 추가로 필요합니다.
+이 기능들은 패널 초기화 흐름에 연결되어 있지만, 실제 Premiere/UXP 호스트에서 아직 검증되지 않았습니다. 운영 배포 전에는 UXP Developer Tool과 Premiere 프로젝트에서 파일 권한, 시퀀스 mutation, Canvas, Media Encoder, 진단 probe 결과를 직접 확인해야 합니다.
 
 ## AI 이미지·음성
 
@@ -156,7 +153,7 @@ npm run package:ccx
 - Premiere 내장 Auto Reframe 명령을 직접 호출하지 않습니다. 현재 리프레임은 공개 API로 가능한 스케일·위치 계산이며 얼굴/피사체 추적이 아닙니다.
 - AI가 영상 내용을 판단해 하이라이트를 고르는 기능은 없습니다. 자동 편집은 STT 시간 구간, 무음과 명시적 키워드/구두점 규칙을 사용한 검토 가능한 계획입니다.
 - OpenAI STT로 SRT/텍스트를 생성할 수 있지만 Premiere의 내장 음성 분석/캡션 생성 명령을 호출하는 것은 아닙니다.
-- recovery와 final QC는 패널 작업 흐름에 연결됐지만 Premiere 호스트 결과는 아직 검증하지 않았습니다. diagnostics 엔진은 실제 Premiere 작업 흐름에 아직 연결되지 않았습니다.
+- recovery, final QC와 diagnostics UI는 패널 작업 흐름에 연결됐지만 Premiere 호스트 결과는 아직 검증하지 않았습니다.
 - 로컬 mock 성공은 운영체제 코덱, 폰트, MOGRT, Media Encoder 프리셋과 실 렌더 품질을 보증하지 않습니다.
 
 ## Marketplace 제출 전
