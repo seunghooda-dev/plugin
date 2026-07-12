@@ -9,6 +9,7 @@ import {
   buildExportFilename,
   buildSafeZoneItemAlignmentActions,
   centeredPosition,
+  cloneSequence,
   errorMessage,
   exportTimestamp,
   joinNativePath,
@@ -16,7 +17,9 @@ import {
   normalizeExportExtension,
   normalizePremierePath,
   premiereContextKey,
+  planClipPunchKeyframes,
   prepareInsertAssetPreflight,
+  punchApplicabilityWarning,
   readSequenceStatus,
   removeVerifiedClonedSequenceFromProject,
   sameMediaPath,
@@ -775,6 +778,114 @@ describe("errorMessage", () => {
     const message = errorMessage(new Error(`Authorization: Bearer ${secret}`));
     assert.equal(message.includes(secret), false);
     assert.match(message, /REDACTED/u);
+  });
+});
+
+describe("automation clone preparation and clip-local punch planning", () => {
+  const cue = (start: number, end: number, scale = 120) => ({
+    start,
+    end,
+    scale,
+    reason: "test",
+    text: "punch",
+  });
+
+  it("keeps a cue that covers the whole clip zoomed through both clip boundaries", () => {
+    assert.deepEqual(planClipPunchKeyframes(1, 3, 100, [cue(0, 4)]), [
+      { time: 0, value: 120 },
+      { time: 2, value: 120 },
+    ]);
+  });
+
+  it("adds reset values only at clip-local boundaries where the cue actually ends", () => {
+    assert.deepEqual(planClipPunchKeyframes(1, 4, 100, [cue(0.5, 2)]), [
+      { time: 0, value: 120 },
+      { time: 1, value: 120 },
+      { time: 1.1, value: 100 },
+    ]);
+    assert.deepEqual(planClipPunchKeyframes(1, 4, 100, [cue(3, 5)]), [
+      { time: 1.9, value: 100 },
+      { time: 2, value: 120 },
+      { time: 3, value: 120 },
+    ]);
+    assert.deepEqual(planClipPunchKeyframes(1, 5, 100, [cue(2, 3)]), [
+      { time: 0.9, value: 100 },
+      { time: 1, value: 120 },
+      { time: 2, value: 120 },
+      { time: 2.1, value: 100 },
+    ]);
+  });
+
+  it("reports requested punch cues that have no applicable video clip", () => {
+    assert.equal(punchApplicabilityWarning(0, 0, 0), null);
+    assert.equal(punchApplicabilityWarning(1, 0, 0), "펀치인 대상 비디오 클립이 없어 추천 마커만 유지했습니다.");
+    assert.equal(punchApplicabilityWarning(1, 2, 0), "펀치인을 적용할 수 있는 비디오 클립이 없어 추천 마커만 유지했습니다.");
+    assert.equal(punchApplicabilityWarning(1, 2, 1), null);
+  });
+
+  it("removes a discovered clone when rename, open, or activation preparation fails", async () => {
+    for (const failure of ["rename", "open", "activate"] as const) {
+      const sequences: Array<Record<string, unknown>> = [];
+      const actions: string[] = [];
+      let active: unknown = null;
+      const cloneItem = {
+        createSetNameAction: () => ({ kind: "rename" }),
+        getParentBin: () => ({ createRemoveItemAction: () => ({ kind: "remove" }) }),
+      };
+      const clone = {
+        guid: `clone-${failure}`,
+        name: "Clone",
+        getProjectItem: async () => cloneItem,
+      };
+      const source = {
+        guid: `source-${failure}`,
+        name: "Source",
+        createCloneAction: () => ({ kind: "clone" }),
+      };
+      sequences.push(source);
+      const project = {
+        getSequences: async () => [...sequences],
+        lockedAccess: (callback: () => void) => callback(),
+        executeTransaction: (callback: (compound: { addAction(action: { kind: string }): boolean }) => void) => {
+          callback({
+            addAction: (action) => {
+              actions.push(action.kind);
+              if (action.kind === "clone") sequences.push(clone);
+              if (action.kind === "remove") sequences.splice(sequences.indexOf(clone), 1);
+              return !(failure === "rename" && action.kind === "rename");
+            },
+          });
+          return true;
+        },
+        openSequence: async () => {
+          if (failure === "open") throw new Error("open failed");
+          return true;
+        },
+        setActiveSequence: async (sequence: unknown) => {
+          if (failure === "activate" && sequence === clone) return false;
+          active = sequence;
+          return true;
+        },
+      } as unknown as Project;
+
+      await assert.rejects(() => cloneSequence(project, source as unknown as never, "Prepared Clone"));
+      assert.deepEqual(sequences, [source], `${failure} failure left an orphan clone`);
+      assert.equal(active, source, `${failure} failure did not reactivate the source`);
+      assert.ok(actions.includes("remove"), `${failure} failure did not remove the clone`);
+    }
+  });
+
+  it("keeps clone GUID, context, and recovery hook failures inside the cleanup boundary", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const functionStart = source.indexOf("export async function applyAutomationPlan");
+    const functionEnd = source.indexOf("export function translateSafeZonePosition", functionStart);
+    const body = source.slice(functionStart, functionEnd);
+    const guardedStart = body.indexOf("try {");
+    assert.ok(guardedStart >= 0);
+    assert.ok(guardedStart < body.indexOf("cloneGuid = guidKey(clone.guid)"));
+    assert.ok(guardedStart < body.indexOf("const cloneContextKey = premiereContextKey"));
+    assert.ok(guardedStart < body.indexOf("await hooks.onClonePrepared?."));
+    assert.match(body, /catch \(error\)[\s\S]*removeKnownClonedSequenceFromProject\(project, source, clone\)/u);
   });
 });
 

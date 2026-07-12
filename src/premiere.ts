@@ -550,7 +550,26 @@ export async function removeVerifiedClonedSequenceFromProject(
   const clone = sequences.find((sequence) => guidKey(sequence.guid) === cloneKey);
   if (!source) throw new ShortFlowError("SOURCE_SEQUENCE_NOT_FOUND", "보존된 원본 시퀀스를 찾지 못했습니다.");
   if (!clone) return;
-  await project.setActiveSequence(source);
+  await removeKnownClonedSequenceFromProject(project, source, clone);
+}
+
+async function removeKnownClonedSequenceFromProject(
+  project: Project,
+  source: Sequence,
+  clone: Sequence,
+): Promise<void> {
+  const sourceKey = guidKey(source.guid).trim();
+  const cloneKey = guidKey(clone.guid).trim();
+  if (source === clone || (sourceKey && cloneKey && sourceKey === cloneKey)) {
+    throw new ShortFlowError("INVALID_CLONE_ID", "원본과 복제 시퀀스를 안전하게 구분하지 못했습니다.");
+  }
+  if (await project.setActiveSequence(source) === false) {
+    const active = await project.getActiveSequence();
+    const activeKey = active ? guidKey(active.guid).trim() : "";
+    if (active !== source && (!sourceKey || activeKey !== sourceKey)) {
+      throw new ShortFlowError("SOURCE_REACTIVATE_FAILED", "복제 시퀀스 정리 전에 원본 시퀀스를 다시 활성화하지 못했습니다.");
+    }
+  }
   const item = await clone.getProjectItem();
   const parent = item.getParentBin();
   if (!commitActionFactories(project, [() => parent.createRemoveItemAction(item)], "ShortFlow: 실패한 복제 시퀀스 제거")) {
@@ -980,7 +999,7 @@ async function renameSequence(project: Project, sequence: Sequence, requestedNam
   return name;
 }
 
-async function cloneSequence(
+export async function cloneSequence(
   project: Project,
   source: Sequence,
   name: string,
@@ -1009,13 +1028,25 @@ async function cloneSequence(
     throw new ShortFlowError("CLONE_NOT_FOUND", "복제 작업은 실행됐지만 새 시퀀스를 찾지 못했습니다.");
   }
 
-  await renameSequence(project, clone, name);
-  // openSequence may report false when the clone is already open; activation is authoritative.
-  await project.openSequence(clone);
-  if (!await project.setActiveSequence(clone)) {
-    throw new ShortFlowError("ACTIVATE_CLONE_FAILED", "복제된 시퀀스를 활성화하지 못했습니다.");
+  try {
+    await renameSequence(project, clone, name);
+    // openSequence may report false when the clone is already open; activation is authoritative.
+    await project.openSequence(clone);
+    if (!await project.setActiveSequence(clone)) {
+      throw new ShortFlowError("ACTIVATE_CLONE_FAILED", "복제된 시퀀스를 활성화하지 못했습니다.");
+    }
+    return clone;
+  } catch (error) {
+    try {
+      await removeKnownClonedSequenceFromProject(project, source, clone);
+    } catch (cleanupError) {
+      throw new ShortFlowError(
+        "AUTOMATION_CLONE_CLEANUP_FAILED",
+        `복제 시퀀스 준비 실패 후 정리하지 못했습니다. 원래 오류: ${errorMessage(error)} · 정리 오류: ${errorMessage(cleanupError)}`,
+      );
+    }
+    throw error;
   }
-  return clone;
 }
 
 async function setSequenceFrame(
@@ -1642,6 +1673,55 @@ export async function addAutomationMarkers(
   return addAutomationMarkersToSequence(project, sequence, plan, cues, () => assertActiveContextKey(contextKey));
 }
 
+export interface PlannedPunchKeyframe {
+  /** Clip-local time in seconds. */
+  time: number;
+  value: number;
+}
+
+/** Plans clip-local scale values without touching Premiere Host objects. */
+export function planClipPunchKeyframes(
+  itemStart: number,
+  itemEnd: number,
+  startValue: number,
+  cues: readonly PunchCue[],
+): PlannedPunchKeyframe[] {
+  if (
+    !Number.isFinite(itemStart) || !Number.isFinite(itemEnd) || itemEnd <= itemStart ||
+    !Number.isFinite(startValue)
+  ) {
+    return [];
+  }
+  const clipDuration = itemEnd - itemStart;
+  const keyframes = new Map<number, number>();
+  for (const cue of cues.filter((candidate) => candidate.start < itemEnd && candidate.end > itemStart).slice(0, 50)) {
+    const localStart = Math.max(0, cue.start - itemStart);
+    const localEnd = Math.min(clipDuration, cue.end - itemStart);
+    if (localEnd <= localStart) continue;
+    const transition = Math.min(0.1, Math.max(0.03, (localEnd - localStart) / 4));
+    const zoomScale = startValue * Math.max(1.01, Math.min(1.5, cue.scale / 100));
+
+    if (localStart > 0) keyframes.set(Math.max(0, localStart - transition), startValue);
+    keyframes.set(localStart, zoomScale);
+    keyframes.set(localEnd, zoomScale);
+    if (localEnd < clipDuration) keyframes.set(Math.min(clipDuration, localEnd + transition), startValue);
+  }
+  return [...keyframes.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([time, value]) => ({ time, value }));
+}
+
+export function punchApplicabilityWarning(
+  cueCount: number,
+  candidateClipCount: number,
+  punchedClipCount: number,
+): string | null {
+  if (cueCount <= 0 || punchedClipCount > 0) return null;
+  return candidateClipCount <= 0
+    ? "펀치인 대상 비디오 클립이 없어 추천 마커만 유지했습니다."
+    : "펀치인을 적용할 수 있는 비디오 클립이 없어 추천 마커만 유지했습니다.";
+}
+
 async function buildPunchInActions(
   item: VideoClipTrackItem,
   cues: readonly PunchCue[],
@@ -1669,22 +1749,10 @@ async function buildPunchInActions(
   if (!Number.isFinite(startValue)) {
     return { actions: [], changed: false, warning: "기존 스케일 값을 읽지 못한 클립을 건너뛰었습니다." };
   }
-  const clipDuration = itemEnd - itemStart;
-  const keyframes = new Map<number, number>();
-  for (const cue of matching) {
-    const localStart = Math.max(0, cue.start - itemStart);
-    const localEnd = Math.min(clipDuration, cue.end - itemStart);
-    if (localEnd <= localStart) continue;
-    const transition = Math.min(0.1, Math.max(0.03, (localEnd - localStart) / 4));
-    const zoomScale = startValue * Math.max(1.01, Math.min(1.5, cue.scale / 100));
-    keyframes.set(Math.max(0, localStart - transition), startValue);
-    keyframes.set(localStart, zoomScale);
-    keyframes.set(localEnd, zoomScale);
-    keyframes.set(Math.min(clipDuration, localEnd + transition), startValue);
-  }
-  if (keyframes.size === 0) return { actions: [], changed: false };
+  const keyframes = planClipPunchKeyframes(itemStart, itemEnd, startValue, matching);
+  if (keyframes.length === 0) return { actions: [], changed: false };
   const actions: ActionFactory[] = [() => scale.createSetTimeVaryingAction(true)];
-  for (const [time, value] of [...keyframes.entries()].sort((left, right) => left[0] - right[0])) {
+  for (const { time, value } of keyframes) {
     actions.push(() => {
       const keyframe = scale.createKeyframe(value);
       keyframe.position = ppro.TickTime.createWithSeconds(time);
@@ -1715,9 +1783,13 @@ export async function applyAutomationPlan(
     () => assertActiveContextKey(sourceContextKey),
   );
   const sourceGuid = guidKey(source.guid);
-  const cloneGuid = guidKey(clone.guid);
-  const cloneContextKey = premiereContextKey(project.guid, clone.guid);
+  let cloneGuid = "";
   try {
+    cloneGuid = guidKey(clone.guid);
+    if (!sourceGuid || !cloneGuid || sourceGuid === cloneGuid) {
+      throw new ShortFlowError("INVALID_CLONE_ID", "자동 편집용 원본과 복제 시퀀스 식별자가 올바르지 않습니다.");
+    }
+    const cloneContextKey = premiereContextKey(project.guid, clone.guid);
     const sequenceName = await renameSequence(project, clone, `${String(source.name ?? "Sequence")}_ShortFlow_Auto_${timestamp}`);
     await project.setActiveSequence(clone);
     await assertActiveContextKey(cloneContextKey);
@@ -1740,6 +1812,8 @@ export async function applyAutomationPlan(
         warnings.push(`펀치인 적용 실패: ${errorMessage(error)}`);
       }
     }
+    const applicabilityWarning = punchApplicabilityWarning(cues.length, items.length, punchedClips);
+    if (applicabilityWarning) warnings.unshift(applicabilityWarning);
     await assertActiveContextKey(cloneContextKey);
     if (actions.length > 0 && !commitActionFactories(project, actions, "ShortFlow: 비파괴 펀치인 적용")) {
       warnings.push("펀치인 키프레임 트랜잭션이 거부되어 추천 마커만 유지했습니다.");
@@ -1757,7 +1831,7 @@ export async function applyAutomationPlan(
     };
   } catch (error) {
     try {
-      await removeVerifiedClonedSequenceFromProject(project, sourceGuid, cloneGuid);
+      await removeKnownClonedSequenceFromProject(project, source, clone);
     } catch (cleanupError) {
       throw new ShortFlowError(
         "AUTOMATION_CLONE_CLEANUP_FAILED",

@@ -4,14 +4,14 @@ ShortFlow Studio는 Adobe Premiere Pro용 UXP 숏폼 제작 패널입니다. 현
 
 ## 현재 검증 상태
 
-현재는 Mock Host와 실제 Premiere 개발 로드 확인을 분리해 검증하고 있습니다. Premiere/UXP 기본 로드, 패널 표시, 테스트 MP4 프로젝트 import, 활성 시퀀스 생성, 기본 QC, Safe Zone BMP overlay, SRT 파일 import, 음악/SFX 폴더 동기화와 WAV A1 삽입, 타임라인 TrackItem 선택 감지, 자동 컷 dry-run과 추천 마커 추가는 실제 Host smoke로 제한 통과했습니다. TTS live/API 삽입과 자동 컷 복제 시퀀스 적용은 내부 베타 최종 승인 전 별도 Host gate로 다시 수행합니다.
+현재는 Mock Host와 실제 Premiere 개발 로드 확인을 분리해 검증하고 있습니다. Premiere/UXP 기본 로드, 패널 표시, 테스트 MP4 프로젝트 import, 활성 시퀀스 생성, 기본 QC, Safe Zone BMP overlay, SRT 파일 import, 음악/SFX 폴더 동기화와 WAV A1 삽입, 타임라인 TrackItem 선택 감지, 자동 컷 dry-run과 추천 마커 추가를 실제 Host smoke로 확인했습니다. 추가로 무음 간격 SRT를 사용해 원본 시퀀스를 보존하고 새 복제 시퀀스에 `SF CUT 01/02`와 `SF ZOOM` 마커를 적용하는 기본 자동 컷·펀치인 Host 경로도 통과했습니다. TTS live/API 삽입은 내부 베타 최종 승인 전 별도 Host gate로 수행합니다.
 
 - 범위 재정의 직전 Node 기반 정적/mock 기준선: **864개 통과**
-- 현재 Mock 기준선: **전체 1002/1002 통과**
+- 현재 Mock 기준선: **전체 1008/1008 통과**
 - 현재 TypeScript, 전체 ESLint, Vite build, `dist` 구조 검증 통과
 - 이전 로컬 CCX 후보와 SHA-256은 `npm run beta:evidence:verified`로 생성·검증했습니다. 이후 소스가 변경됐으므로 최종 내부 베타 후보는 남은 Host gate 통과 후 다시 생성합니다.
-- Premiere Pro/UXP Developer Tool 실제 실행: **기본 로드, UDT watch/reload, 패널 표시, 테스트 MP4 import, 활성 시퀀스 기본 QC, Safe Zone overlay, SRT import, 음악/SFX WAV 삽입, TrackItem 선택 감지 확인**
-- TTS live/API 삽입, 자동 컷 복제 시퀀스 적용, Media Encoder, Windows/macOS CCX 설치, Adobe 서명, Marketplace 심사: **아직 완료하지 않음**
+- Premiere Pro/UXP Developer Tool 실제 실행: **기본 로드, UDT watch/reload, 패널 표시, 테스트 MP4 import, 활성 시퀀스 기본 QC, Safe Zone overlay, SRT import, 음악/SFX WAV 삽입, TrackItem 선택 감지, 자동 컷·펀치인 복제 적용 확인**
+- TTS live/API 삽입, Media Encoder, Windows/macOS CCX 설치, Adobe 서명, Marketplace 심사: **아직 완료하지 않음**
 
 자동 테스트는 순수 로직과 어댑터 경계를 검증하지만 Premiere 프로젝트 변경, UXP 버전 차이, 파일 권한, Media Encoder 연동과 실제 렌더 결과를 보증하지 않습니다. 현재 포함·제외 기준은 [내부 베타 범위](docs/INTERNAL_BETA_SCOPE.md), 4주 진행 순서는 [로드맵](docs/ROADMAP.md), 설치 후 검증은 [실제 Host smoke runbook](docs/HOST_BETA_RUNBOOK.md), 전체 검증은 [QA 체크리스트](docs/QA_CHECKLIST.md)와 [요구사항 추적표](docs/REQUIREMENTS_MATRIX.md)를 확인해 주세요.
 

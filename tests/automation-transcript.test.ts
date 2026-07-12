@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
 
+import { planSilenceCuts, recommendPunchCues } from "../src/automation";
 import {
   resolveAutomationTranscript,
   speechControllerTranscriptToAutomationTranscript,
@@ -8,6 +11,9 @@ import {
 } from "../src/automation-transcript";
 import type { SpeechControllerTranscript } from "../src/speech-controller";
 import type { SubtitleDocument } from "../src/subtitles";
+import { parseSrt } from "../src/subtitles";
+
+const ROOT = path.resolve(__dirname, "../..");
 
 function documentFixture(): SubtitleDocument {
   return {
@@ -106,5 +112,34 @@ describe("resolveAutomationTranscript", () => {
     const transcript = resolveAutomationTranscript(null, documentFixture());
     assert.equal(transcript?.name, "자막: project-A");
     assert.equal(transcript?.segments.length, 2);
+  });
+});
+
+describe("Premiere Host automation fixture", () => {
+  it("contains real silence gaps and emphasis for both cut and punch smoke gates", () => {
+    const source = readFileSync(
+      path.join(ROOT, "tests", "shortflow_automation_gap.srt"),
+      "utf8",
+    );
+    const document = parseSrt(source, { projectKey: "host-automation-gap" });
+    const transcript = subtitleDocumentToAutomationTranscript(document);
+    assert.ok(transcript);
+
+    const cutPlan = planSilenceCuts(transcript.segments, 6.03, {
+      minSilence: 0.42,
+      padding: 0.08,
+      trimLeading: true,
+      trimTrailing: true,
+    });
+    const punches = recommendPunchCues(transcript.segments, 6.03, {
+      keywords: ["ShortFlow", "중요", "핵심"],
+      maximumCues: 12,
+    });
+
+    assert.ok(cutPlan.cuts.length >= 2, `expected at least two silence cuts, received ${cutPlan.cuts.length}`);
+    assert.ok(cutPlan.cuts.every((cut) => cut.end > cut.start && cut.duration >= 0.12));
+    assert.ok(punches.length >= 2, `expected at least two punch cues, received ${punches.length}`);
+    assert.ok(punches.some((cue) => cue.text.includes("중요")));
+    assert.ok(punches.some((cue) => cue.text.includes("ShortFlow")));
   });
 });

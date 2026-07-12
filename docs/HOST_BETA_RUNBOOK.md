@@ -342,7 +342,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 - `npm run typecheck` 통과
 - `npm run build` 통과
 - compiled automation fallback/controller tests 통과: 11/11
-- `npm run check` 통과: typecheck, lint, build, dist 검증, 1002/1002 tests
+- `npm run check` 통과: typecheck, lint, build, dist 검증, 1008/1008 tests
 
 추가 Host 확인:
 
@@ -365,7 +365,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - Premiere Pro: 2026, UXP Developer Tools 연결 대상 `premierepro v26.3.0`
 - 테스트 프로젝트: `무제.prproj`, 활성 시퀀스 `시퀀스 01`
-- 로컬 후보: `npm run check` 통과. typecheck, lint, build, dist 검증, 1002/1002 tests
+- 로컬 후보: `npm run check` 통과. typecheck, lint, build, dist 검증, 1008/1008 tests
 
 결과:
 
@@ -388,7 +388,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - Premiere Pro: 2026, UXP Developer Tools 연결 대상 `premierepro v26.3.0`
 - 테스트 프로젝트: `무제.prproj`, 활성 시퀀스 `시퀀스 01`
-- 로컬 후보: TTS/STT floating panel 레이아웃 수정 후 `npm run check` 통과. typecheck, lint, build, dist 검증, 1002/1002 tests
+- 로컬 후보: TTS/STT floating panel 레이아웃 수정 후 `npm run check` 통과. typecheck, lint, build, dist 검증, 1008/1008 tests
 
 결과:
 
@@ -399,7 +399,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | TTS live/API 삽입 | 보류 | API key와 실제 전송 승인을 사용하지 않았으므로 OpenAI TTS 호출과 생성 파일 타임라인 삽입은 아직 통과로 판정하지 않습니다. |
 | 자동 컷·펀치인 입력 없음 상태 | Host 통과 | `자동 편집` 탭에서 STT/SRT transcript가 없는 상태일 때 `STT 결과가 비어있어 아직 자동 편집을 사용할 수 없습니다. 다시 분석해 주세요.` 안내와 비활성 실행 버튼을 확인했습니다. 프로젝트 mutation 없음. |
 | 자동 컷·펀치인 dry-run/추천 마커 | Host 통과 | SRT fallback으로 `2개 타임코드` 분석, marker/apply 버튼 활성화, 추천 마커 `1개 추가 완료` 로그를 확인했습니다. |
-| 자동 컷·펀치인 복제 시퀀스 적용 | 수정 후 재검증 필요 | 실제 apply 시 SRT fallback transcript를 재조회하지 못해 `TTS/STT 필요` 상태로 돌아가는 버그를 발견했습니다. `src/automation-controller.ts`와 `tests/automation-controller.test.ts`에서 analyzed SRT fallback 유지 테스트와 수정이 추가됐고, 새 build 적용 후 Host에서 다시 실행해야 합니다. |
+| 자동 컷·펀치인 복제 시퀀스 적용 | Mock 보강 후 Host 재검증 필요 | 실제 apply 시 SRT fallback transcript를 재조회하지 못해 `TTS/STT 필요` 상태로 돌아가는 버그를 발견했습니다. analyzed SRT fallback 유지, 복제 준비 실패 시 원본 재활성화·복제본 정리, 클립 경계 펀치인 키프레임 회귀 테스트를 추가했고 `npm run check`가 통과했습니다. 새 build 적용 후 Host에서 다시 실행해야 합니다. |
 
 관찰:
 
@@ -419,7 +419,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - `npm run check` 통과
 - typecheck, lint, build, dist 검증 통과
-- 전체 테스트 `1002/1002` 통과, 실패 0
+- 전체 테스트 `1008/1008` 통과, 실패 0
 
 남은 Host gate:
 
@@ -446,11 +446,35 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | Premiere selection API 직접 조회 | 제한 통과/Host 차이 발견 | `sequence.getSelection().getTrackItems()` 직접 조회 결과는 `count: 0`이지만, 개별 TrackItem `getIsSelected()` 조회에서는 선택 상태가 true로 반영됐습니다. 현재 프로젝트 패널/속성 패널 선택과 타임라인 TrackItem 선택은 구분해 기록합니다. |
 | TrackItem fallback 선택 감지 | Host 통과 | UXP Debug Console에서 timeline fallback 직접 조회 결과 `SF_ALL_ITEMS_SELECTED`가 video/audio TrackItem 4개를 반환했고 각 항목의 `selected: true`를 확인했습니다. 최신 `dist` reload 후 `#refresh-btn` 클릭으로 ShortFlow 상태 UI가 `타임라인 4개 선택 · 00:06`으로 갱신됐습니다. |
 | 자동 편집 안전 차단 | 통과 | 패널 본문에서 `STT 결과가 비어있어 아직 자동 편집을 사용할 수 없습니다. 다시 분석해 주세요.` 안내와 복제 시퀀스 적용 버튼의 제한 상태를 확인했습니다. |
-| 현재 Mock 기준선 | 통과 | selection fallback, TTS 응답 컨테이너 검증, 자동화 host mutation snapshot guard와 SRT fallback 유지 보강, 로컬 Whisper 오프라인 검증 스크립트와 Whisper JSON 자막 변환 계약 추가 후 `npm run check`가 typecheck, lint, build, dist 검증, 1002/1002 tests로 통과했습니다. |
+| 현재 Mock 기준선 | 통과 | selection fallback, TTS 응답 컨테이너 검증, 자동화 host mutation snapshot guard와 SRT fallback 유지, clone 준비 실패 정리, 클립 경계 펀치인 키프레임 회귀, 로컬 Whisper 오프라인 검증 스크립트와 Whisper JSON 자막 변환 계약 추가 후 `npm run check`가 typecheck, lint, build, dist 검증, 1008/1008 tests로 통과했습니다. |
 | 베타 증거 템플릿 | 통과 | `beta-evidence/ShortFlow_Beta_Evidence_20260712T111256Z.md`를 생성했습니다. |
 | 로컬 Whisper 오프라인 STT smoke | 통과/Host 대체 아님 | `local-whisper-evidence/20260712T110447Z/ShortFlow_Local_Whisper_Evidence_20260712T110447Z.md`에서 base/cpu, 2개 segment, 9개 word timestamp, 생성 샘플 키워드 4/4를 확인했습니다. OpenAI live API, TTS 생성, Premiere Host 삽입 gate는 아직 통과로 판정하지 않습니다. |
 
 아직 통과로 판정하지 않는 항목:
 
 - TTS live/API 삽입: API 호출·파일 저장·Premiere import·지정 트랙 삽입은 아직 실행하지 않았습니다.
-- 자동 컷 복제 시퀀스 적용: dry-run과 추천 마커 추가는 Host에서 통과했습니다. 복제 시퀀스 적용은 SRT fallback 유지 버그를 수정한 뒤 새 빌드 적용 상태에서 재검증해야 합니다.
+- 자동 컷 복제 시퀀스 적용: dry-run과 추천 마커 추가는 Host에서 통과했습니다. SRT fallback 유지와 복제 준비 실패 정리는 Mock 회귀 테스트로 보강했으며, 새 빌드 적용 상태에서 실제 Host 복제 적용을 재검증해야 합니다.
+
+## 20. 자동 컷·펀치인 복제 적용 재검증 — 2026-07-12 21:17 KST
+
+사용 입력:
+
+- `tests/shortflow_automation_gap.srt`
+- 3개 cue, 무음 간격 2개, 기본 `minSilence=0.42`
+- 원본 시퀀스: `시퀀스 01`
+
+결과:
+
+| 항목 | 상태 | 실제값 |
+|---|---|---|
+| SRT fallback 분석 | Host 통과 | CUT 2개(`00:01.08–00:01.92`, `00:03.08–00:04.42`), ZOOM 2개(`00:02.05–00:02.95`, `00:04.55–00:05.45`) |
+| 원본 보존 | Host 통과 | 원본 `시퀀스 01` 탭이 그대로 유지됨 |
+| 복제 생성·활성화 | Host 통과 | `시퀀스 01_ShortFlow_Auto_20260712121754 2` 생성 후 활성 시퀀스로 전환됨 |
+| 자동 편집 마커 | Host 통과 | 타임라인과 Program Monitor에 `SF CUT 01`, `SF ZOOM`, `SF CUT 02`, `SF ZOOM` 표시 |
+| 비파괴 기본 경로 | Host 통과 | 원본을 직접 변경하지 않고 복제본에만 적용 |
+
+제한:
+
+- 공개 Premiere UXP API 제약으로 CUT은 실제 razor 삭제가 아니라 `SF CUT` 검토 마커입니다.
+- Motion 펀치인 키프레임의 시각적 보간·easing 품질은 별도 플레이백 QA에서 추가 확인합니다.
+- TTS live/API 삽입은 API key를 사용하지 않았으므로 계속 보류합니다.

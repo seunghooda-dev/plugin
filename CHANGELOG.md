@@ -47,11 +47,13 @@
 ### 검증 상태
 
 - 범위 재정의 전 `npm test`: 864/864 통과
-- 2026-07-12 Mock 기준선 `npm run check`: typecheck·전체 lint·build·dist 검증·1002/1002 test 통과
+- 2026-07-12 Mock 기준선 `npm run check`: typecheck·전체 lint·build·dist 검증·1008/1008 test 통과
 - 이전 로컬 CCX 후보와 SHA-256은 `npm run beta:evidence:verified`로 생성·검증 완료. SHA-256: `dadc2dd405a8facceca761175d63360b140b0e8d30fe783d167d3c8cedc50df8`. 이후 소스 변경분은 최종 Host gate 후 재패키징 필요.
-- Premiere Pro/UXP Developer Tool 실제 개발 로드: 패널 표시, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 기본 QC, 최신 dist 탭 전환, 마커 탭 표시, Safe Zone overlay, SRT 파일 import, 음악/SFX WAV A1 삽입, TrackItem 선택 감지까지 제한 통과
+- Premiere Pro/UXP Developer Tool 실제 개발 로드: 패널 표시, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 기본 QC, 최신 dist 탭 전환, 마커 탭 표시, Safe Zone overlay, SRT 파일 import, 음악/SFX WAV A1 삽입, TrackItem 선택 감지, 자동 컷·펀치인 복제 적용까지 제한 통과
 - Premiere Pro 26.3 Host에서 `sequence.getSelection()`이 빈 배열을 반환해도 개별 `TrackItem.getIsSelected()` fallback으로 선택 상태를 감지하도록 보강하고 실제 패널 UI에서 `타임라인 4개 선택 · 00:06` 표시를 확인
-- TTS live/API 생성·삽입, 자동 컷 복제 시퀀스 적용과 Media Encoder Host 테스트: 최종 승인 전 재검증 필요
+- 자동 컷 복제 준비 중 rename/open/activate 실패 시 원본을 재활성화하고 생성된 복제본을 정리하도록 보강했으며, 클립 경계에 걸친 펀치인 키프레임 회귀 테스트를 추가
+- 무음 간격 SRT를 사용한 실제 Host에서 원본 보존, 복제 시퀀스 활성화, `SF CUT 01/02`·`SF ZOOM` 마커 배치를 확인
+- TTS live/API 생성·삽입과 Media Encoder Host 테스트: 최종 승인 전 재검증 필요
 - Windows/macOS CCX 설치, Adobe 서명, notarization, Marketplace 심사: 미실시
 
 ### 알려진 제약
