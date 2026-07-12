@@ -6,14 +6,21 @@ import {
   addLayer,
   buildCssFilter,
   calculateLayoutRects,
+  canvasToImageBytes,
   canvasToPngBytes,
   createThumbnailState,
+  inferThumbnailImageMime,
   removeLayer,
   renderThumbnail,
+  renderThumbnailSvg,
   reorderLayers,
   setLayout,
+  thumbnailBytesToDataUrl,
   updateAdjustments,
+  updateBadgeOverlay,
   updateOverlay,
+  updateTextOverlay,
+  updateTransform,
   type CanvasBlobLike,
   type CanvasContextLike,
   type ThumbnailLayoutId,
@@ -32,6 +39,18 @@ type StrokeCall = {
   strokeStyle: unknown;
 };
 
+type TextCall = {
+  text: string;
+  x: number;
+  y: number;
+  maxWidth?: number;
+  fillStyle: unknown;
+  font: string;
+  textAlign: CanvasTextAlign;
+  shadowBlur: number;
+  shadowColor: string;
+};
+
 class MockContext implements CanvasContextLike {
   readonly canvas = { width: 10, height: 10 };
   filter = "none";
@@ -43,10 +62,14 @@ class MockContext implements CanvasContextLike {
   shadowColor = "transparent";
   shadowOffsetX = 0;
   shadowOffsetY = 0;
+  font = "";
+  textAlign: CanvasTextAlign = "start";
+  textBaseline: CanvasTextBaseline = "alphabetic";
   imageSmoothingEnabled = false;
   imageSmoothingQuality: "low" | "medium" | "high" = "low";
   readonly drawCalls: DrawCall[] = [];
   readonly strokeCalls: StrokeCall[] = [];
+  readonly textCalls: TextCall[] = [];
   readonly clearCalls: number[][] = [];
   readonly fillCalls: number[][] = [];
   readonly clipRects: number[][] = [];
@@ -84,6 +107,28 @@ class MockContext implements CanvasContextLike {
       shadowColor: this.shadowColor,
       strokeStyle: this.strokeStyle,
     });
+  }
+
+  measureText(text: string): { width: number } {
+    return { width: text.length * 10 };
+  }
+
+  fillText(text: string, x: number, y: number, maxWidth?: number): void {
+    const call: TextCall = {
+      text,
+      x,
+      y,
+      fillStyle: this.fillStyle,
+      font: this.font,
+      textAlign: this.textAlign,
+      shadowBlur: this.shadowBlur,
+      shadowColor: this.shadowColor,
+    };
+    if (maxWidth !== undefined) {
+      this.textCalls.push({ ...call, maxWidth });
+      return;
+    }
+    this.textCalls.push(call);
   }
 
   drawImage(
@@ -248,6 +293,9 @@ describe("thumbnail state", () => {
     assert.ok(Object.isFrozen(state.layers[0]));
     assert.ok(Object.isFrozen(state.layers[0]?.adjustments));
     assert.ok(Object.isFrozen(state.layers[0]?.overlay));
+    assert.ok(Object.isFrozen(state.layers[0]?.transform));
+    assert.ok(Object.isFrozen(state.textOverlay));
+    assert.ok(Object.isFrozen(state.badgeOverlay));
   });
 
   it("sanitizes the background color", () => {
@@ -476,6 +524,76 @@ describe("adjustments, overlay, and CSS filter", () => {
   });
 });
 
+describe("thumbnail text and badge overlays", () => {
+  it("normalizes title overlay text, size, position, and colors", () => {
+    const state = createThumbnailState();
+    const updated = updateTextOverlay(state, {
+      text: `  ${"긴 제목 ".repeat(40)}  `,
+      x: 2,
+      y: -1,
+      fontSize: 999,
+      color: "#ABC",
+      shadow: 999,
+      glowColor: "url(file:///secret)",
+      align: "right",
+      maxWidthRatio: 9,
+    });
+    assert.equal(updated.textOverlay.text.length, 120);
+    assert.equal(updated.textOverlay.x, 1);
+    assert.equal(updated.textOverlay.y, 0);
+    assert.equal(updated.textOverlay.fontSize, 180);
+    assert.equal(updated.textOverlay.color, "#abc");
+    assert.equal(updated.textOverlay.shadow, 100);
+    assert.equal(updated.textOverlay.glowColor, "#8b5cf6");
+    assert.equal(updated.textOverlay.align, "right");
+    assert.equal(updated.textOverlay.maxWidthRatio, 1);
+  });
+
+  it("normalizes badge overlay text, colors, spacing, and visibility", () => {
+    const state = createThumbnailState();
+    const updated = updateBadgeOverlay(state, {
+      text: "  Shorts   요약  ",
+      fontSize: -20,
+      backgroundColor: "#0F0",
+      color: "white",
+      paddingX: 999,
+      paddingY: -1,
+      radius: Number.POSITIVE_INFINITY,
+      visible: false,
+    });
+    assert.equal(updated.badgeOverlay.text, "Shorts 요약");
+    assert.equal(updated.badgeOverlay.fontSize, 10);
+    assert.equal(updated.badgeOverlay.backgroundColor, "#0f0");
+    assert.equal(updated.badgeOverlay.color, "white");
+    assert.equal(updated.badgeOverlay.paddingX, 80);
+    assert.equal(updated.badgeOverlay.paddingY, 0);
+    assert.equal(updated.badgeOverlay.radius, 48);
+    assert.equal(updated.badgeOverlay.visible, false);
+  });
+});
+
+describe("thumbnail layer transform", () => {
+  it("normalizes selected layer zoom and offsets", () => {
+    const state = createThumbnailState({ layers: layerSources("a") });
+    const updated = updateTransform(state, {
+      zoom: 999,
+      offsetX: -9,
+      offsetY: 9,
+    });
+    assert.equal(updated.layers[0]?.transform.zoom, 4);
+    assert.equal(updated.layers[0]?.transform.offsetX, -1);
+    assert.equal(updated.layers[0]?.transform.offsetY, 1);
+  });
+
+  it("updates an explicit layer transform only", () => {
+    const state = createThumbnailState({ layers: layerSources("a", "b") });
+    const updated = updateTransform(state, "b", { zoom: 2, offsetX: 0.5 });
+    assert.equal(updated.layers[0]?.transform.zoom, 1);
+    assert.equal(updated.layers[1]?.transform.zoom, 2);
+    assert.equal(updated.layers[1]?.transform.offsetX, 0.5);
+  });
+});
+
 describe("calculateLayoutRects", () => {
   it("calculates a full-frame cell", () => {
     assert.deepEqual(calculateLayoutRects(1280, 720, 1, "full"), [
@@ -630,7 +748,19 @@ describe("renderThumbnail", () => {
     assert.equal(ctx.filter, "none");
   });
 
-  it("draws shadow and outer glow only for the selected cell", async () => {
+  it("applies selected layer zoom and crop offsets during image drawing", async () => {
+    const ctx = new MockContext();
+    let state = createThumbnailState({
+      width: 100,
+      height: 100,
+      layers: layerSources("a"),
+    });
+    state = updateTransform(state, { zoom: 2, offsetX: 1, offsetY: -1 });
+    await renderThumbnail(ctx, state, () => ({ width: 200, height: 200 }));
+    assert.deepEqual(ctx.drawCalls[0]?.args, [100, 0, 100, 100, 0, 0, 100, 100]);
+  });
+
+  it("draws shadow and outer glow for every configured layer", async () => {
     const ctx = new MockContext();
     let state = createThumbnailState({
       width: 200,
@@ -646,12 +776,53 @@ describe("renderThumbnail", () => {
       glowColor: "#00ff88",
     });
     await renderThumbnail(ctx, state, () => ({ width: 100, height: 100 }));
-    assert.equal(ctx.strokeCalls.length, 2);
-    assert.deepEqual(ctx.strokeCalls.map((call) => call.args[0]), [101, 101]);
-    assert.equal(ctx.strokeCalls[0]?.shadowBlur, 12);
-    assert.equal(ctx.strokeCalls[0]?.shadowColor, "#123456");
-    assert.equal(ctx.strokeCalls[1]?.shadowBlur, 18);
-    assert.equal(ctx.strokeCalls[1]?.shadowColor, "#00ff88");
+    assert.equal(ctx.strokeCalls.length, 4);
+    assert.deepEqual(ctx.strokeCalls.map((call) => call.args[0]), [1, 1, 101, 101]);
+    assert.equal(ctx.strokeCalls[0]?.shadowBlur, 10);
+    assert.equal(ctx.strokeCalls[0]?.shadowColor, "red");
+    assert.equal(ctx.strokeCalls[1]?.shadowBlur, 10);
+    assert.equal(ctx.strokeCalls[1]?.shadowColor, "red");
+    assert.equal(ctx.strokeCalls[2]?.shadowBlur, 12);
+    assert.equal(ctx.strokeCalls[2]?.shadowColor, "#123456");
+    assert.equal(ctx.strokeCalls[3]?.shadowBlur, 18);
+    assert.equal(ctx.strokeCalls[3]?.shadowColor, "#00ff88");
+  });
+
+  it("draws badge and title overlays after image layers", async () => {
+    const ctx = new MockContext();
+    let state = createThumbnailState({
+      width: 1000,
+      height: 500,
+      layers: layerSources("a"),
+    });
+    state = updateBadgeOverlay(state, {
+      text: "핵심",
+      x: 0.1,
+      y: 0.2,
+      backgroundColor: "#ffcc00",
+      color: "#111111",
+    });
+    state = updateTextOverlay(state, {
+      text: "바로 쓰는 숏폼",
+      x: 0.5,
+      y: 0.8,
+      fontSize: 64,
+      color: "#ffffff",
+      shadow: 12,
+    });
+    await renderThumbnail(ctx, state, () => ({ width: 1280, height: 720 }));
+    assert.equal(ctx.drawCalls.length, 1);
+    assert.equal(ctx.textCalls.length, 2);
+    assert.equal(ctx.textCalls[0]?.text, "핵심");
+    assert.equal(ctx.textCalls[0]?.x, 122);
+    assert.equal(ctx.textCalls[0]?.fillStyle, "#111111");
+    assert.equal(ctx.fillCalls.at(-1)?.[0], 100);
+    assert.equal(ctx.textCalls[1]?.text, "바로 쓰는 숏폼");
+    assert.equal(ctx.textCalls[1]?.x, 500);
+    assert.equal(ctx.textCalls[1]?.y, 400);
+    assert.equal(ctx.textCalls[1]?.font, "700 64px sans-serif");
+    assert.equal(ctx.textCalls[1]?.textAlign, "center");
+    assert.equal(ctx.textCalls[1]?.shadowBlur, 12);
   });
 
   it("supports async image resolvers", async () => {
@@ -820,5 +991,130 @@ describe("canvasToPngBytes", () => {
       /Canvas PNG 내보내기를 지원하지 않습니다/u,
     );
     await assert.rejects(canvasToPngBytes(null as never), TypeError);
+  });
+});
+
+describe("canvasToImageBytes", () => {
+  it("exports JPG bytes through convertToBlob with a JPEG MIME type and quality", async () => {
+    let requestedType = "";
+    let requestedQuality = 0;
+    const bytes = await canvasToImageBytes({
+      async convertToBlob(options) {
+        requestedType = options?.type ?? "";
+        requestedQuality = options?.quality ?? 0;
+        return makeBlob([255, 216, 255, 217]);
+      },
+    }, "jpg");
+    assert.equal(requestedType, "image/jpeg");
+    assert.equal(requestedQuality, 0.92);
+    assert.deepEqual([...bytes], [255, 216, 255, 217]);
+  });
+
+  it("exports JPG bytes through toBlob and data URL fallbacks", async () => {
+    let toBlobType = "";
+    let toBlobQuality = 0;
+    const blobBytes = await canvasToImageBytes({
+      toBlob(callback, type, quality) {
+        toBlobType = type ?? "";
+        toBlobQuality = quality ?? 0;
+        callback(makeBlob([4, 5, 6]));
+      },
+    }, "jpg");
+    assert.equal(toBlobType, "image/jpeg");
+    assert.equal(toBlobQuality, 0.92);
+    assert.deepEqual([...blobBytes], [4, 5, 6]);
+
+    const dataUrlBytes = await canvasToImageBytes({
+      toDataURL(type) {
+        assert.equal(type, "image/jpeg");
+        return "data:image/jpeg;base64,/9j/2Q==";
+      },
+    }, "jpg");
+    assert.deepEqual([...dataUrlBytes], [255, 216, 255, 217]);
+  });
+
+  it("rejects unsupported JPG export environments with format-specific messages", async () => {
+    await assert.rejects(
+      canvasToImageBytes({}, "jpg"),
+      /Canvas JPG 내보내기를 지원하지 않습니다/u,
+    );
+    await assert.rejects(
+      canvasToImageBytes({ toDataURL: () => "data:image/png;base64,AQID" }, "jpg"),
+      /유효한 JPG data URL/u,
+    );
+  });
+});
+
+describe("renderThumbnailSvg", () => {
+  it("creates portable image data URLs for SVG fallback exports", () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+
+    assert.equal(inferThumbnailImageMime("cover", bytes), "image/png");
+    assert.equal(inferThumbnailImageMime("cover.JPG"), "image/jpeg");
+    assert.equal(inferThumbnailImageMime("cover.webp"), "image/webp");
+    assert.equal(thumbnailBytesToDataUrl(bytes, inferThumbnailImageMime("cover.png", bytes)), "data:image/png;base64,iVBORw==");
+  });
+
+  it("sniffs image mime types when file names are missing extensions", () => {
+    assert.equal(inferThumbnailImageMime("unknown", Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])), "image/jpeg");
+    assert.equal(
+      inferThumbnailImageMime("unknown", Uint8Array.from([
+        0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+      ])),
+      "image/webp",
+    );
+    assert.equal(inferThumbnailImageMime("unknown", Uint8Array.from([0x47, 0x49, 0x46, 0x38])), "image/gif");
+  });
+
+  it("renders a deterministic SVG fallback with layout, text, badge, and effects", () => {
+    const state = createThumbnailState({
+      layout: "grid",
+      backgroundColor: "#101010",
+      layers: [
+        {
+          id: "one",
+          source: "one",
+          adjustments: { brightness: 120, contrast: 90, saturation: 150 },
+          overlay: { shadow: 12, glow: 0, shadowColor: "#000000" },
+          transform: { zoom: 1.4, offsetX: 0.5, offsetY: -0.25 },
+        },
+        "two",
+        "three",
+        "four",
+      ],
+      textOverlay: { text: "조회수 <상승> & 테스트", color: "#ffffff", shadow: 10 },
+      badgeOverlay: { text: "HOT & SAFE", visible: true },
+    });
+
+    const svg = renderThumbnailSvg(state, {
+      title: "ShortFlow <fallback>",
+      resolveImageHref(source) {
+        return `file:///C:/assets/${source}.png`;
+      },
+    });
+
+    assert.match(svg, /^<\?xml version="1\.0" encoding="UTF-8"\?>/u);
+    assert.match(svg, /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="1280" height="720"/u);
+    assert.match(svg, /<title>ShortFlow &lt;fallback&gt;<\/title>/u);
+    assert.match(svg, /clipPath id="shortflow-clip-3"/u);
+    assert.match(svg, /href="file:\/\/\/C:\/assets\/one\.png"/u);
+    assert.match(svg, /brightness\(120%\) contrast\(90%\) saturate\(150%\)/u);
+    assert.match(svg, /scale\(1\.4\)/u);
+    assert.match(svg, /HOT &amp; SAFE/u);
+    assert.match(svg, /조회수 &lt;상승&gt; &amp; 테스트/u);
+    assert.doesNotMatch(svg, /<script/iu);
+  });
+
+  it("rejects executable or non-image SVG hrefs before generating a fallback file", () => {
+    const state = createThumbnailState({ layers: ["unsafe"] });
+
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => "javascript:alert(1)" }),
+      /실행 가능한 scheme/u,
+    );
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => "data:text/html;base64,PHNjcmlwdA==" }),
+      /이미지 data URL/u,
+    );
   });
 });

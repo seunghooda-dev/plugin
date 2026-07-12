@@ -31,6 +31,7 @@ export interface PluginSettings {
   aiProvider: "openai" | "custom";
   aiEndpoint: string;
   aiModel: string;
+  aiConsentAccepted: boolean;
   ttsOutputToken: string;
   ttsOutputName: string;
   ttsModel: "gpt-4o-mini-tts" | "tts-1-hd" | "tts-1";
@@ -71,6 +72,7 @@ export const DEFAULT_SETTINGS: Readonly<PluginSettings> = Object.freeze({
   aiProvider: "openai",
   aiEndpoint: "https://api.openai.com/v1",
   aiModel: "gpt-image-2",
+  aiConsentAccepted: false,
   ttsOutputToken: "",
   ttsOutputName: "",
   ttsModel: "gpt-4o-mini-tts",
@@ -131,6 +133,7 @@ export function normalizeSettings(value: unknown): PluginSettings {
     aiProvider: "openai",
     aiEndpoint: DEFAULT_SETTINGS.aiEndpoint,
     aiModel: stringValue(input.aiModel, DEFAULT_SETTINGS.aiModel, 128),
+    aiConsentAccepted: input.aiConsentAccepted === true,
     ttsOutputToken: stringValue(input.ttsOutputToken, "", 4096),
     ttsOutputName: stringValue(input.ttsOutputName, "", 260),
     ttsModel: oneOf(input.ttsModel, ["gpt-4o-mini-tts", "tts-1-hd", "tts-1"], DEFAULT_SETTINGS.ttsModel),

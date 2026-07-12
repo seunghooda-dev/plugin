@@ -29,6 +29,7 @@ describe("speech settings", () => {
     assert.equal(DEFAULT_SETTINGS.sttModel, "gpt-4o-transcribe-diarize");
     assert.equal(DEFAULT_SETTINGS.sttLanguage, "ko");
     assert.equal(DEFAULT_SETTINGS.sttOutputFormat, "both");
+    assert.equal(DEFAULT_SETTINGS.aiConsentAccepted, false);
   });
 
   it("clamps TTS speed and track inputs", () => {
@@ -51,6 +52,11 @@ describe("speech settings", () => {
     assert.equal(normalized.ttsFormat, DEFAULT_SETTINGS.ttsFormat);
     assert.equal(normalized.sttModel, DEFAULT_SETTINGS.sttModel);
     assert.equal(normalized.sttOutputFormat, DEFAULT_SETTINGS.sttOutputFormat);
+  });
+
+  it("persists AI transfer consent only when explicitly true", () => {
+    assert.equal(normalizeSettings({ aiConsentAccepted: true }).aiConsentAccepted, true);
+    assert.equal(normalizeSettings({ aiConsentAccepted: "true" as never }).aiConsentAccepted, false);
   });
 
   it("bounds persisted speech text metadata", () => {

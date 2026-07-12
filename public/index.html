@@ -53,6 +53,14 @@
             <dt>길이</dt>
             <dd id="status-duration">—</dd>
           </div>
+          <div class="status-item">
+            <dt>재생 위치</dt>
+            <dd id="status-playhead">—</dd>
+          </div>
+          <div class="status-item status-item-wide">
+            <dt>인/아웃</dt>
+            <dd id="status-inout" title="">—</dd>
+          </div>
           <div class="status-item status-item-wide">
             <dt>선택 범위</dt>
             <dd id="status-selection" title="">—</dd>
@@ -238,6 +246,29 @@
               <span aria-hidden="true">✓</span>
               QC 검사 실행
             </button>
+          </div>
+
+          <div class="qc-status-strip" aria-label="현재 시퀀스 상태 요약" aria-live="polite">
+            <div class="qc-status-item qc-status-item-wide">
+              <span>시퀀스</span>
+              <strong id="qc-status-sequence" title="">—</strong>
+            </div>
+            <div class="qc-status-item">
+              <span>프레임</span>
+              <strong id="qc-status-frame">—</strong>
+            </div>
+            <div class="qc-status-item">
+              <span>길이</span>
+              <strong id="qc-status-duration">—</strong>
+            </div>
+            <div class="qc-status-item">
+              <span>재생 위치</span>
+              <strong id="qc-status-playhead">—</strong>
+            </div>
+            <div class="qc-status-item qc-status-item-wide">
+              <span>선택</span>
+              <strong id="qc-status-selection" title="">—</strong>
+            </div>
           </div>
 
           <div class="metric-strip" aria-label="검사 항목">
@@ -748,6 +779,50 @@
                 <strong>파일을 여기에 놓으세요</strong>
                 <span>WAV, MP3, AIFF, M4A</span>
               </div>
+
+              <div class="asset-rights-card" aria-label="선택 에셋 권리 정보">
+                <div class="section-heading compact-section-heading">
+                  <span class="section-number" aria-hidden="true">04</span>
+                  <div>
+                    <h3>권리 정보</h3>
+                    <p id="asset-rights-status">선택한 음악·효과음·이미지·영상·AI 에셋의 권리 정보를 기록하면 최종 QC에 반영됩니다.</p>
+                  </div>
+                </div>
+                <strong id="asset-rights-selected-name" class="asset-rights-selected" title="">에셋을 선택해 주세요</strong>
+                <div class="form-grid asset-rights-grid">
+                  <div class="field">
+                    <label for="asset-rights-kind-select">유형</label>
+                    <div class="select-wrap">
+                      <select id="asset-rights-kind-select" disabled>
+                        <option value="music">음악</option>
+                        <option value="sfx">효과음</option>
+                        <option value="image">이미지</option>
+                        <option value="video">영상</option>
+                        <option value="ai-audio">AI 음성</option>
+                        <option value="ai-image">AI 이미지</option>
+                        <option value="ai-video">AI 영상</option>
+                        <option value="other">기타</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="asset-rights-commercial-select">상업 사용</label>
+                    <div class="select-wrap">
+                      <select id="asset-rights-commercial-select" disabled>
+                        <option value="unknown">미확인</option>
+                        <option value="allowed">가능</option>
+                        <option value="forbidden">금지</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field field-span-2"><label for="asset-rights-source-input">출처</label><input id="asset-rights-source-input" type="text" maxlength="2000" disabled placeholder="예: Artlist, Epidemic Sound, 직접 제작" /></div>
+                  <div class="field field-span-2"><label for="asset-rights-license-input">라이선스</label><input id="asset-rights-license-input" type="text" maxlength="2000" disabled placeholder="예: Creator Pro, Royalty-free, 직접 소유" /></div>
+                  <div class="field field-span-2"><label for="asset-rights-expiry-input">만료일 <span class="unit">선택</span></label><input id="asset-rights-expiry-input" type="date" disabled /></div>
+                  <div class="field field-span-2"><label for="asset-rights-attribution-input">출처 표기</label><input id="asset-rights-attribution-input" type="text" maxlength="2000" disabled placeholder="최종 리포트에 들어갈 표기 문구" /></div>
+                  <div class="field field-span-2"><label for="asset-rights-notes-input">메모</label><textarea id="asset-rights-notes-input" rows="3" maxlength="2000" disabled placeholder="계약 범위, 캠페인명, 구매 계정 등"></textarea></div>
+                </div>
+                <button id="asset-rights-save-btn" class="secondary-button full-width-button" type="button" disabled>권리 정보 저장</button>
+              </div>
             </aside>
 
             <div class="settings-card asset-browser">
@@ -778,6 +853,17 @@
                     </select>
                   </div>
                 </div>
+                <div class="field type-filter-field">
+                  <label class="sr-only" for="asset-category-select">폴더 카테고리</label>
+                  <div class="select-wrap">
+                    <select id="asset-category-select" name="assetCategory" aria-label="폴더 카테고리 필터" disabled>
+                      <option value="all">전체 폴더</option>
+                    </select>
+                  </div>
+                </div>
+                <button id="open-asset-category-btn" class="secondary-button small-button" type="button" disabled>
+                  선택 폴더 열기
+                </button>
               </div>
               <div id="asset-list" class="item-list asset-list drop-surface" role="list" aria-live="polite">
                 <div class="empty-state compact-empty-state">
@@ -786,6 +872,7 @@
                   <p>라이브러리 폴더를 선택하고 에셋 동기화를 실행해 주세요.</p>
                 </div>
               </div>
+              <audio id="asset-audio-preview" class="asset-audio-preview" controls hidden></audio>
             </div>
           </div>
         </section>
@@ -1080,7 +1167,7 @@
                 <span class="section-number" aria-hidden="true">01</span>
                 <div>
                   <h3>레퍼런스 정보</h3>
-                  <p>유형과 활용 메모를 함께 저장합니다.</p>
+                  <p>유형, 출처, 태그와 활용 메모를 함께 저장합니다.</p>
                 </div>
               </div>
               <div class="field">
@@ -1093,6 +1180,26 @@
                     <option value="other">기타</option>
                   </select>
                 </div>
+              </div>
+              <div class="field">
+                <label for="reference-source-input">출처</label>
+                <input
+                  id="reference-source-input"
+                  name="referenceSource"
+                  type="text"
+                  maxlength="512"
+                  placeholder="예: 직접 제작, Pinterest moodboard, Midjourney export"
+                />
+              </div>
+              <div class="field">
+                <label for="reference-tags-input">태그</label>
+                <input
+                  id="reference-tags-input"
+                  name="referenceTags"
+                  type="text"
+                  maxlength="512"
+                  placeholder="예: 강렬함, 빨간 배경, 줌인"
+                />
               </div>
               <div class="field textarea-field">
                 <label for="reference-notes-input">활용 메모</label>
@@ -1296,12 +1403,24 @@
             <div>
               <p class="eyebrow">THUMBNAIL LAB</p>
               <h2>썸네일 제작</h2>
-              <p class="panel-description">시퀀스 프레임과 레퍼런스를 조합해 1280 × 720 썸네일을 만들고 AI로 보정합니다.</p>
+              <p class="panel-description">시퀀스 프레임과 레퍼런스를 조합해 1280 × 720 썸네일을 만들고 PNG/JPG로 저장합니다.</p>
             </div>
-            <button id="thumb-export-btn" class="primary-button" type="button">
-              <span aria-hidden="true">↓</span>
-              PNG 내보내기
-            </button>
+            <div class="thumbnail-export-controls">
+              <label class="sr-only" for="thumb-export-format-select">썸네일 내보내기 형식</label>
+              <div class="select-wrap">
+                <select id="thumb-export-format-select" name="thumbnailExportFormat">
+                  <option value="png">PNG</option>
+                  <option value="jpg">JPG</option>
+                </select>
+              </div>
+              <button id="thumb-export-btn" class="primary-button" type="button">
+                <span aria-hidden="true">↓</span>
+                썸네일 내보내기
+              </button>
+              <button id="thumb-export-svg-btn" class="secondary-button" type="button" title="Premiere UXP Canvas가 PNG/JPG를 지원하지 않을 때 SVG로 저장합니다.">
+                SVG fallback
+              </button>
+            </div>
           </div>
 
           <div class="thumbnail-workspace">
@@ -1361,19 +1480,19 @@
                 </div>
               </div>
 
-              <div class="settings-card thumb-ai-card">
+              <div class="settings-card thumb-ai-card" hidden>
                 <div class="section-heading">
                   <span class="section-number" aria-hidden="true">02</span>
                   <div>
-                    <h3>AI 이미지 보정</h3>
-                    <p>선택한 프리셋과 프롬프트를 현재 썸네일에 적용합니다.</p>
+                    <h3>AI 이미지 보정 · 후순위</h3>
+                    <p>내부 베타에서는 수동 썸네일 편집만 검증하고, AI 보정은 후속 로드맵에서 다시 활성화합니다.</p>
                   </div>
                 </div>
                 <div class="form-grid thumb-ai-grid">
                   <div class="field">
                     <label for="thumb-ai-preset-select">AI 프리셋</label>
                     <div class="select-wrap">
-                      <select id="thumb-ai-preset-select" name="thumbAiPreset">
+                      <select id="thumb-ai-preset-select" name="thumbAiPreset" disabled>
                         <option value="none">사용 안 함</option>
                         <option value="basic">기본 보정</option>
                         <option value="vivid">강렬 보정</option>
@@ -1390,13 +1509,14 @@
                       name="thumbAiPrompt"
                       rows="3"
                       maxlength="1500"
+                      disabled
                       placeholder="예: 인물은 유지하고 배경 대비를 높여 주세요."
                     ></textarea>
                   </div>
                 </div>
                 <div class="form-actions thumb-ai-actions">
-                  <p class="action-note">AI 설정 탭에서 먼저 공급자와 API 키를 설정해 주세요.</p>
-                  <button id="thumb-ai-run-btn" class="primary-button" type="button">AI 보정 실행</button>
+                  <p class="action-note">내부 베타 범위 밖 기능입니다. 기존 코드는 유지하되 베타 UI에서는 비활성화합니다.</p>
+                  <button id="thumb-ai-run-btn" class="primary-button" type="button" disabled>AI 보정 실행</button>
                 </div>
                 <div class="history-block">
                   <div class="history-heading">
@@ -1421,6 +1541,30 @@
 
               <div class="range-field">
                 <div class="range-label-row">
+                  <label for="thumb-zoom-input">확대</label>
+                  <output class="range-value" for="thumb-zoom-input" data-value-for="thumb-zoom-input">100%</output>
+                </div>
+                <input id="thumb-zoom-input" name="thumbZoom" type="range" min="100" max="400" step="1" value="100" />
+              </div>
+              <div class="range-field">
+                <div class="range-label-row">
+                  <label for="thumb-offset-x-input">좌우 이동</label>
+                  <output class="range-value" for="thumb-offset-x-input" data-value-for="thumb-offset-x-input">0%</output>
+                </div>
+                <input id="thumb-offset-x-input" name="thumbOffsetX" type="range" min="-100" max="100" step="1" value="0" />
+              </div>
+              <div class="range-field">
+                <div class="range-label-row">
+                  <label for="thumb-offset-y-input">상하 이동</label>
+                  <output class="range-value" for="thumb-offset-y-input" data-value-for="thumb-offset-y-input">0%</output>
+                </div>
+                <input id="thumb-offset-y-input" name="thumbOffsetY" type="range" min="-100" max="100" step="1" value="0" />
+              </div>
+
+              <div class="section-divider"></div>
+
+              <div class="range-field">
+                <div class="range-label-row">
                   <label for="thumb-brightness-input">밝기</label>
                   <output class="range-value" for="thumb-brightness-input" data-value-for="thumb-brightness-input">100%</output>
                 </div>
@@ -1439,6 +1583,35 @@
                   <output class="range-value" for="thumb-saturation-input" data-value-for="thumb-saturation-input">100%</output>
                 </div>
                 <input id="thumb-saturation-input" name="thumbSaturation" type="range" min="0" max="200" step="1" value="100" />
+              </div>
+
+              <div class="section-divider"></div>
+
+              <div class="form-grid compact-form-grid">
+                <div class="field field-span-2">
+                  <label for="thumb-title-input">제목 텍스트</label>
+                  <input id="thumb-title-input" name="thumbTitle" type="text" maxlength="120" placeholder="썸네일 제목을 입력하세요" />
+                </div>
+                <div class="field">
+                  <label for="thumb-title-color">제목 색상</label>
+                  <input id="thumb-title-color" name="thumbTitleColor" type="color" value="#ffffff" />
+                </div>
+                <div class="field">
+                  <label for="thumb-title-size-input">제목 크기</label>
+                  <input id="thumb-title-size-input" name="thumbTitleSize" type="number" min="12" max="180" step="1" value="78" />
+                </div>
+                <div class="field field-span-2">
+                  <label for="thumb-badge-input">배지 텍스트</label>
+                  <input id="thumb-badge-input" name="thumbBadge" type="text" maxlength="60" placeholder="예: Shorts, 핵심요약" />
+                </div>
+                <div class="field">
+                  <label for="thumb-badge-color">배지 글자</label>
+                  <input id="thumb-badge-color" name="thumbBadgeColor" type="color" value="#111111" />
+                </div>
+                <div class="field">
+                  <label for="thumb-badge-background-color">배지 배경</label>
+                  <input id="thumb-badge-background-color" name="thumbBadgeBackgroundColor" type="color" value="#facc15" />
+                </div>
               </div>
 
               <div class="section-divider"></div>
@@ -1649,6 +1822,11 @@
                 <p>현재 패키지의 네트워크 권한은 api.openai.com으로 제한되어 있으며 API 키는 다른 도메인으로 전송되지 않습니다.</p>
               </div>
             </div>
+            <label class="checkbox-row ai-consent-row" for="ai-consent-checkbox">
+              <input id="ai-consent-checkbox" type="checkbox" />
+              <span class="custom-checkbox" aria-hidden="true"></span>
+              <span>선택한 이미지·음성·대본·자막·프롬프트가 OpenAI API로 전송될 수 있으며, 필요한 권리와 개인정보 동의를 확보했고 AI 생성 음성은 최종 콘텐츠에서 고지하겠습니다.</span>
+            </label>
 
             <div class="form-actions ai-settings-actions">
               <button id="ai-test-btn" class="secondary-button" type="button">연결 테스트</button>

@@ -2,6 +2,9 @@ export const OPENAI_API_KEY_STORAGE_KEY = "shortflow.openai.apiKey";
 export const MAX_TTS_CHARACTERS = 4_096;
 export const MAX_STT_BYTES = 25 * 1024 * 1024;
 export const MAX_TRANSCRIPT_SEGMENTS = 10_000;
+export const MAX_TRANSCRIPT_CHARACTERS = 1_000_000;
+export const MAX_TRANSCRIPT_SEGMENT_CHARACTERS = 4_000;
+export const MAX_TRANSCRIPT_SRT_CHARACTERS = 5_000_000;
 
 export const TTS_MODELS = Object.freeze([
   "gpt-4o-mini-tts",
@@ -221,6 +224,83 @@ function mimeForTts(format: TtsFormat): string {
   return "audio/mpeg";
 }
 
+function asciiHeader(bytes: Uint8Array, start: number, length: number): string {
+  if (bytes.byteLength < start + length) return "";
+  let result = "";
+  for (let index = start; index < start + length; index += 1) {
+    result += String.fromCharCode(bytes[index] ?? 0);
+  }
+  return result;
+}
+
+function looksLikeTtsAudio(format: TtsFormat, bytes: Uint8Array): boolean {
+  if (format === "wav") {
+    return bytes.byteLength >= 44 && asciiHeader(bytes, 0, 4) === "RIFF" && asciiHeader(bytes, 8, 4) === "WAVE";
+  }
+  if (format === "mp3") {
+    return bytes.byteLength >= 3 && (
+      asciiHeader(bytes, 0, 3) === "ID3" ||
+      ((bytes[0] ?? 0) === 0xff && (((bytes[1] ?? 0) & 0xe0) === 0xe0))
+    );
+  }
+  if (format === "flac") {
+    return bytes.byteLength >= 4 && asciiHeader(bytes, 0, 4) === "fLaC";
+  }
+  if (format === "aac") {
+    return bytes.byteLength >= 4 && (
+      ((bytes[0] ?? 0) === 0xff && (((bytes[1] ?? 0) & 0xf0) === 0xf0)) ||
+      asciiHeader(bytes, 4, 4) === "ftyp"
+    );
+  }
+  return false;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** Applies the same binary/format boundary to injected providers as the live API client. */
+export function validateTtsResult(value: unknown, request?: TtsRequest): TtsResult {
+  const record = recordValue(value);
+  if (!record) throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 형식이 올바르지 않습니다.");
+  if (!(record.bytes instanceof Uint8Array) || record.bytes.byteLength === 0) {
+    throw new SpeechApiError("EMPTY_RESPONSE", "AI가 빈 음성 파일을 반환했습니다.");
+  }
+  const extension = record.extension;
+  const model = record.model;
+  const voice = record.voice;
+  if (!TTS_MODELS.includes(model as TtsModel)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 모델이 올바르지 않습니다.");
+  }
+  if (!TTS_VOICES.includes(voice as TtsVoice)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 목소리가 올바르지 않습니다.");
+  }
+  if (!["wav", "mp3", "aac", "flac"].includes(String(extension))) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 파일 형식이 올바르지 않습니다.");
+  }
+  const format = extension as TtsFormat;
+  const mimeType = typeof record.mimeType === "string" ? record.mimeType.trim().toLocaleLowerCase("en-US") : "";
+  if (mimeType !== mimeForTts(format)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 MIME 형식과 파일 확장자가 일치하지 않습니다.");
+  }
+  const bytes = record.bytes.slice();
+  if (!looksLikeTtsAudio(format, bytes)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답 오디오 데이터가 요청한 파일 형식과 일치하지 않습니다.");
+  }
+  if (request && (format !== request.format || model !== request.model || voice !== request.voice)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "TTS 응답이 요청한 모델, 목소리 또는 파일 형식과 일치하지 않습니다.");
+  }
+  return {
+    bytes,
+    mimeType,
+    extension: format,
+    model: model as TtsModel,
+    voice: voice as TtsVoice,
+  };
+}
+
 function cleanResponseMessage(message: string): string {
   return message
     .replace(/bearer\s+[^\s"']+/giu, "Bearer [숨김]")
@@ -255,9 +335,11 @@ async function responseError(response: SpeechResponseLike, secret = ""): Promise
 function normalizeSegment(value: unknown): TranscriptSegment | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  const start = Number(record.start);
-  const end = Number(record.end);
-  const text = typeof record.text === "string" ? record.text.trim().slice(0, 4_000) : "";
+  const start = typeof record.start === "number" ? record.start : Number.NaN;
+  const end = typeof record.end === "number" ? record.end : Number.NaN;
+  const text = typeof record.text === "string"
+    ? record.text.trim().slice(0, MAX_TRANSCRIPT_SEGMENT_CHARACTERS)
+    : "";
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || !text) return null;
   const speaker = cleanSpeakerLabel(record.speaker);
   return speaker ? { start, end, text, speaker } : { start, end, text };
@@ -326,6 +408,37 @@ export function transcriptToSrt(segments: readonly TranscriptSegment[]): string 
     .join("\n");
 }
 
+/** Normalizes ordering and limits before controller/file output or callback publication. */
+export function validateSttResult(value: unknown, expectedModel?: SttModel): SttResult {
+  const record = recordValue(value);
+  if (!record) throw new SpeechApiError("INVALID_RESPONSE", "STT 응답 형식이 올바르지 않습니다.");
+  const model = record.model;
+  if (!STT_MODELS.includes(model as SttModel) || (expectedModel !== undefined && model !== expectedModel)) {
+    throw new SpeechApiError("INVALID_RESPONSE", "STT 응답 모델이 요청과 일치하지 않습니다.");
+  }
+  const text = typeof record.text === "string" ? record.text.trim() : "";
+  if (!text) throw new SpeechApiError("EMPTY_RESPONSE", "AI가 빈 원고를 반환했습니다.");
+  if (text.length > MAX_TRANSCRIPT_CHARACTERS) {
+    throw new SpeechApiError("INVALID_RESPONSE", "STT 원고 응답이 허용된 크기를 초과했습니다.");
+  }
+  if (typeof record.srt !== "string") {
+    throw new SpeechApiError("INVALID_RESPONSE", "STT SRT 응답 형식이 올바르지 않습니다.");
+  }
+  if (record.srt.length > MAX_TRANSCRIPT_SRT_CHARACTERS) {
+    throw new SpeechApiError("INVALID_RESPONSE", "STT SRT 응답이 허용된 크기를 초과했습니다.");
+  }
+  const segments = (Array.isArray(record.segments) ? record.segments : [])
+    .slice(0, MAX_TRANSCRIPT_SEGMENTS)
+    .map(normalizeSegment)
+    .filter((item): item is TranscriptSegment => Boolean(item))
+    .sort((left, right) => left.start - right.start || left.end - right.end || left.text.localeCompare(right.text, "en-US"));
+  const srt = transcriptToSrt(segments);
+  if (srt.length > MAX_TRANSCRIPT_SRT_CHARACTERS) {
+    throw new SpeechApiError("INVALID_RESPONSE", "정규화된 STT SRT가 허용된 크기를 초과했습니다.");
+  }
+  return { text, segments, srt, model: model as SttModel };
+}
+
 export class SpeechApiClient {
   readonly endpoint: string;
   private readonly apiKeyProvider: () => Promise<string>;
@@ -370,8 +483,13 @@ export class SpeechApiClient {
     }, request.signal);
     if (!response.ok) throw await responseError(response);
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength === 0) throw new SpeechApiError("EMPTY_RESPONSE", "AI가 빈 음성 파일을 반환했습니다.");
-    return { bytes, mimeType: mimeForTts(request.format), extension: request.format, model: request.model, voice: request.voice };
+    return validateTtsResult({
+      bytes,
+      mimeType: mimeForTts(request.format),
+      extension: request.format,
+      model: request.model,
+      voice: request.voice,
+    }, request);
   }
 
   async transcribe(request: SttRequest): Promise<SttResult> {
@@ -412,18 +530,12 @@ export class SpeechApiClient {
     try { payload = await response.json?.(); } catch { payload = null; }
     if (!payload || typeof payload !== "object") throw new SpeechApiError("INVALID_RESPONSE", "STT 응답 형식이 올바르지 않습니다.");
     const record = payload as Record<string, unknown>;
-    const text = typeof record.text === "string" ? record.text.trim() : "";
-    if (!text) throw new SpeechApiError("EMPTY_RESPONSE", "AI가 빈 원고를 반환했습니다.");
-    if (text.length > 1_000_000) {
-      throw new SpeechApiError("INVALID_RESPONSE", "STT 원고 응답이 허용된 크기를 초과했습니다.");
-    }
-    const segments = Array.isArray(record.segments)
-      ? record.segments
-        .slice(0, MAX_TRANSCRIPT_SEGMENTS)
-        .map(normalizeSegment)
-        .filter((item): item is TranscriptSegment => Boolean(item))
-      : [];
-    return { text, segments, srt: transcriptToSrt(segments), model: request.model };
+    return validateSttResult({
+      text: record.text,
+      segments: record.segments,
+      srt: typeof record.srt === "string" ? record.srt : "",
+      model: request.model,
+    }, request.model);
   }
 
   private async authorizedFetch(

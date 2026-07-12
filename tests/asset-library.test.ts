@@ -5,13 +5,20 @@ import {
   ASSET_LIBRARY_TOKEN_KEY,
   AssetLibrary,
   AssetLibraryError,
+  applyAssetOrder,
+  audioAssetCategoryRoot,
   createAssetDragPayload,
+  parseAudioAssetDragPayload,
   parseAssetDragPayload,
+  listAudioAssetCategories,
+  reorderAssetIds,
+  resolveAudioAssetDragTarget,
   type AssetItem,
   type AssetLibraryAdapter,
   classifyAsset,
   filterAssets,
   isSupportedAsset,
+  normalizeAssetOrder,
   normalizeNativePath,
   sortAssets,
 } from "../src/asset-library";
@@ -197,6 +204,42 @@ describe("asset drag payload", () => {
       kind: "audio",
     })), null);
   });
+
+  it("accepts only audio payloads for the Music/SFX drop boundary", () => {
+    const audio = createAssetDragPayload(asset("Hook.wav", "audio", "C:/Assets/Music/Hook.wav"));
+    const image = createAssetDragPayload(asset("Cover.png", "image", "C:/Assets/References/Cover.png"));
+    assert.equal(parseAudioAssetDragPayload(audio)?.kind, "audio");
+    assert.equal(parseAudioAssetDragPayload(image), null);
+  });
+
+  it("resolves audio drops only against the current synced library snapshot", () => {
+    const current = [
+      asset("Hook.wav", "audio", "C:/Assets/Music/Hook.wav"),
+      asset("Pop.wav", "audio", "C:/Assets/SFX/Pop.wav"),
+      asset("Cover.png", "image", "C:/Assets/References/Cover.png"),
+    ];
+    assert.equal(
+      resolveAudioAssetDragTarget(current, createAssetDragPayload(current[0]!))?.name,
+      "Hook.wav",
+    );
+    assert.equal(
+      resolveAudioAssetDragTarget(current, createAssetDragPayload(asset("Old.wav", "audio", "C:/Assets/Music/Old.wav"))),
+      null,
+    );
+    assert.equal(
+      resolveAudioAssetDragTarget(current, createAssetDragPayload(current[2]!)),
+      null,
+    );
+  });
+
+  it("rejects stale audio drops when the path no longer matches the synced asset id", () => {
+    const current = [asset("Hook.wav", "audio", "D:/Assets/Music/Hook.wav", {
+      id: "c:/assets/music/hook.wav",
+      normalizedPath: "c:/assets/music/hook.wav",
+    })];
+    const stale = createAssetDragPayload(asset("Hook.wav", "audio", "C:/Assets/Music/Hook.wav"));
+    assert.equal(resolveAudioAssetDragTarget(current, stale), null);
+  });
 });
 
 describe("filterAssets and sortAssets", () => {
@@ -259,6 +302,79 @@ describe("filterAssets and sortAssets", () => {
         (item) => item.modifiedAt,
       ),
       [40, 30, 20, 10],
+    );
+  });
+});
+
+describe("audio asset categories", () => {
+  it("derives music and SFX folder categories with counts", () => {
+    const items = [
+      asset("intro.wav", "audio", "C:/Assets/Music/Intro/intro.wav", { folderPath: "Music/Intro" }),
+      asset("loop.wav", "audio", "C:/Assets/Music/Intro/loop.wav", { folderPath: "Music/Intro" }),
+      asset("whoosh.wav", "audio", "C:/Assets/SFX/Transitions/whoosh.wav", { folderPath: "SFX/Transitions" }),
+      asset("cover.png", "image", "C:/Assets/References/cover.png", { folderPath: "References/Images" }),
+      asset("voice.wav", "audio", "C:/Assets/Voice/voice.wav", { folderPath: "Voice" }),
+    ];
+
+    assert.deepEqual(
+      listAudioAssetCategories(items).map((category) => [
+        category.id,
+        category.label,
+        category.root,
+        category.count,
+      ]),
+      [
+        ["Music/Intro", "음악 / Intro", "music", 2],
+        ["SFX/Transitions", "효과음 / Transitions", "sfx", 1],
+      ],
+    );
+  });
+
+  it("normalizes audio category roots case-insensitively", () => {
+    assert.equal(audioAssetCategoryRoot("music/Chill"), "music");
+    assert.equal(audioAssetCategoryRoot("SFX\\Hits"), "sfx");
+    assert.equal(audioAssetCategoryRoot("References/Images"), null);
+  });
+});
+
+describe("asset custom order", () => {
+  const items = [
+    asset("a.wav", "audio", "C:/Assets/SFX/a.wav"),
+    asset("b.wav", "audio", "C:/Assets/SFX/b.wav"),
+    asset("c.wav", "audio", "C:/Assets/SFX/c.wav"),
+  ];
+
+  it("normalizes user order ids and drops duplicates or unknown ids", () => {
+    assert.deepEqual(
+      normalizeAssetOrder([
+        " C:\\Assets\\SFX\\B.wav ",
+        "c:/assets/sfx/b.wav",
+        "C:/Assets/SFX/C.wav",
+        "",
+        "../outside.wav",
+      ], items.map((item) => item.id)),
+      ["c:/assets/sfx/b.wav", "c:/assets/sfx/c.wav"],
+    );
+  });
+
+  it("applies custom order without mutating the source list", () => {
+    const before = [...items];
+    assert.deepEqual(
+      applyAssetOrder(items, ["c:/assets/sfx/c.wav", "c:/assets/sfx/a.wav"]).map((item) => item.name),
+      ["c.wav", "a.wav", "b.wav"],
+    );
+    assert.deepEqual(items, before);
+  });
+
+  it("moves a dragged id before the target inside the visible scope", () => {
+    assert.deepEqual(
+      reorderAssetIds(
+        ["c:/assets/sfx/c.wav", "c:/assets/sfx/a.wav"],
+        items.map((item) => item.id),
+        "c:/assets/sfx/c.wav",
+        "c:/assets/sfx/b.wav",
+      ),
+      ["c:/assets/sfx/a.wav", "c:/assets/sfx/c.wav", "c:/assets/sfx/b.wav"],
     );
   });
 });
@@ -469,6 +585,51 @@ describe("AssetLibrary open folder", () => {
     await library.selectRoot();
     await library.openRootFolder();
     assert.deepEqual(opened, ["C:/Assets"]);
+  });
+
+  it("opens a selected Music or SFX category folder by relative path", async () => {
+    const sfx = mockFolder("SFX", "C:/Assets/SFX", [
+      mockFolder("Transitions", "C:/Assets/SFX/Transitions"),
+    ]);
+    const root = mockFolder("Assets", "C:/Assets", [sfx]);
+    const adapter = createAdapter(root);
+    const opened: string[] = [];
+    adapter.shell = {
+      openPath: async (nativePath: string) => {
+        opened.push(nativePath);
+        return "";
+      },
+    };
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await library.openRelativeFolder("sfx/transitions");
+
+    assert.deepEqual(opened, ["C:/Assets/SFX/Transitions"]);
+  });
+
+  it("rejects missing or unsafe relative folders without opening the root", async () => {
+    const root = mockFolder("Assets", "C:/Assets", [mockFolder("Music", "C:/Assets/Music")]);
+    const adapter = createAdapter(root);
+    const opened: string[] = [];
+    adapter.shell = {
+      openPath: async (nativePath: string) => {
+        opened.push(nativePath);
+        return "";
+      },
+    };
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRelativeFolder("Music/../Secrets"),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+    await assert.rejects(
+      library.openRelativeFolder("SFX/Missing"),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+    assert.deepEqual(opened, []);
   });
 
   it("returns a friendly unsupported error when shell.openPath is unavailable", async () => {

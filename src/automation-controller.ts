@@ -1,16 +1,21 @@
 import {
+  MAX_AUTOMATION_MARKERS,
+  assertAutomationMarkerBudget,
+  createAutomationAnalysisFingerprint,
+  normalizeAutomationAnalysisSettings,
   planSilenceCuts,
   recommendPunchCues,
+  type AutomationAnalysisSettings,
   type PunchCue,
   type SilenceCutPlan,
   type TimedSpeechSegment,
 } from "./automation";
 import {
-  SAFE_ZONE_PROFILES,
   alignToSafeZone,
   assessSafeZone,
   normalizedRectToPixels,
   safeContentRect,
+  safeZoneGuideLabel,
   type NormalizedRect,
   type SafeZoneAlignment,
   type SocialPlatform,
@@ -25,13 +30,40 @@ export interface AutomationTranscript {
 
 export interface AutomationControllerOptions {
   getTranscript?: () => AutomationTranscript | null | Promise<AutomationTranscript | null>;
+  getSourceContextKey?: () => string | null | undefined | Promise<string | null | undefined>;
   onActivity?: (message: string) => void;
   onError?: (error: unknown, context: string) => void;
-  onAddMarkers?: (plan: SilenceCutPlan, cues: readonly PunchCue[]) => void | Promise<void>;
-  onApply?: (plan: SilenceCutPlan, cues: readonly PunchCue[]) => void | Promise<void>;
+  onAddMarkers?: (
+    plan: SilenceCutPlan,
+    cues: readonly PunchCue[],
+    guard: AutomationAnalysisGuard,
+  ) => void | Promise<void>;
+  onApply?: (
+    plan: SilenceCutPlan,
+    cues: readonly PunchCue[],
+    guard: AutomationAnalysisGuard,
+  ) => void | Promise<void>;
   onCreateSafeOverlay?: (platform: SocialPlatform, role: "content" | "caption") => void | Promise<void>;
-  onAlignSafeZone?: (alignment: SafeZoneAlignment, platform: SocialPlatform, role: "content" | "caption") => void | Promise<void>;
+  onAlignSafeZone?: (
+    alignment: SafeZoneAlignment,
+    platform: SocialPlatform,
+    role: "content" | "caption",
+  ) => void | SafeZoneApplyResult | Promise<void | SafeZoneApplyResult>;
 }
+
+export interface SafeZoneApplyResult {
+  selected: number;
+  changed: number;
+  skipped: number;
+  warnings: readonly string[];
+}
+
+export interface AutomationAnalysisGuard {
+  readonly fingerprint: string;
+  readonly sourceContextKey: string;
+}
+
+const STALE_ANALYSIS_MESSAGE = "자동 편집 원고·설정 또는 활성 Premiere context가 변경되었습니다. 다시 분석해 주세요.";
 
 function seconds(value: number): string {
   const safe = Math.max(0, Number.isFinite(value) ? value : 0);
@@ -63,10 +95,56 @@ function setRange(id: string, value: number): void {
   element<HTMLInputElement>(id).value = String(Math.round(value * 100));
 }
 
+function cloneTranscript(transcript: AutomationTranscript | null): AutomationTranscript | null {
+  return transcript
+    ? { ...transcript, segments: transcript.segments.map((segment) => ({ ...segment })) }
+    : null;
+}
+
+function clonePlan(plan: SilenceCutPlan): SilenceCutPlan {
+  return {
+    ...plan,
+    speech: plan.speech.map((item) => ({ ...item })),
+    cuts: plan.cuts.map((item) => ({ ...item })),
+    keeps: plan.keeps.map((item) => ({ ...item })),
+    warnings: [...plan.warnings],
+  };
+}
+
+function clonePunchCues(cues: readonly PunchCue[]): PunchCue[] {
+  return cues.map((cue) => ({ ...cue }));
+}
+
+function sameTranscript(left: AutomationTranscript | null, right: AutomationTranscript | null): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.name !== right.name || !Object.is(left.duration, right.duration)) return false;
+  if (left.segments.length !== right.segments.length) return false;
+  return left.segments.every((segment, index) => {
+    const other = right.segments[index];
+    return Boolean(
+      other && Object.is(segment.start, other.start) && Object.is(segment.end, other.end) &&
+      segment.text === other.text && segment.speaker === other.speaker,
+    );
+  });
+}
+
+function sameAnalysisSettings(left: AutomationAnalysisSettings, right: AutomationAnalysisSettings): boolean {
+  return left.minSilence === right.minSilence && left.padding === right.padding &&
+    left.trimLeading === right.trimLeading && left.trimTrailing === right.trimTrailing &&
+    left.punchEnabled === right.punchEnabled && left.punchScale === right.punchScale &&
+    left.punchCount === right.punchCount && left.keywords.length === right.keywords.length &&
+    left.keywords.every((keyword, index) => keyword === right.keywords[index]);
+}
+
 export class AutomationController {
   private transcript: AutomationTranscript | null = null;
   private planValue: SilenceCutPlan | null = null;
   private cuesValue: PunchCue[] = [];
+  private transcriptRevision = 0;
+  private settingsRevision = 0;
+  private analysisGuardValue: AutomationAnalysisGuard | null = null;
+  private invalidationMessage = "";
+  private busyAction = "";
 
   constructor(private readonly options: AutomationControllerOptions = {}) {}
 
@@ -79,19 +157,40 @@ export class AutomationController {
 
   get plan(): SilenceCutPlan | null { return this.planValue; }
   get cues(): readonly PunchCue[] { return [...this.cuesValue]; }
+  get analysisGuard(): AutomationAnalysisGuard | null {
+    return this.analysisGuardValue ? { ...this.analysisGuardValue } : null;
+  }
+  get isBusy(): boolean { return Boolean(this.busyAction); }
 
   setTranscript(transcript: AutomationTranscript | null): void {
-    this.transcript = transcript;
+    const next = cloneTranscript(transcript);
+    if (!sameTranscript(this.transcript, next)) {
+      const hadAnalysis = Boolean(this.planValue || this.analysisGuardValue);
+      this.transcript = next;
+      this.transcriptRevision += 1;
+      this.invalidatePlan(
+        "STT 결과가 변경되어 이전 자동 편집안을 사용할 수 없습니다. 다시 분석해 주세요.",
+        hadAnalysis,
+      );
+    }
     this.renderTranscriptStatus();
   }
 
   private bindEvents(): void {
-    bind("auto-analyze-btn", "click", () => this.guard(() => this.analyze(), "자동 편집 분석 실패"));
-    bind("auto-markers-btn", "click", () => this.guard(() => this.addMarkers(), "추천 마커 추가 실패"));
-    bind("auto-apply-btn", "click", () => this.guard(() => this.apply(), "자동 편집 적용 실패"));
-    bind("safe-check-btn", "click", () => this.checkSafeZone());
-    bind("safe-align-btn", "click", () => this.guard(() => this.alignSafeZone(), "Safe Zone 자동 정렬 실패"));
-    bind("safe-overlay-btn", "click", () => this.guard(() => this.createSafeOverlay(), "Safe Zone 가이드 생성 실패"));
+    bind("auto-analyze-btn", "click", () => this.runAutomation("자동 편집 분석", () => this.analyze(), "자동 편집 분석 실패"));
+    bind("auto-markers-btn", "click", () => this.runAutomation("추천 마커 추가", () => this.addMarkers(), "추천 마커 추가 실패"));
+    bind("auto-apply-btn", "click", () => this.runAutomation("자동 편집 적용", () => this.apply(), "자동 편집 적용 실패"));
+    bind("safe-check-btn", "click", () => this.runAutomation("Safe Zone 확인", () => this.checkSafeZone(), "Safe Zone 확인 실패"));
+    bind("safe-align-btn", "click", () => this.runAutomation("Safe Zone 자동 정렬", () => this.alignSafeZone(), "Safe Zone 자동 정렬 실패"));
+    bind("safe-overlay-btn", "click", () => this.runAutomation("Safe Zone 가이드 생성", () => this.createSafeOverlay(), "Safe Zone 가이드 생성 실패"));
+    for (const id of [
+      "auto-min-silence-input", "auto-padding-input", "auto-punch-scale-input",
+      "auto-punch-count-input", "auto-keywords-input", "auto-trim-leading-checkbox",
+      "auto-trim-trailing-checkbox", "auto-punch-checkbox",
+    ] as const) {
+      bind(id, "input", () => this.handleAnalysisSettingChange());
+      bind(id, "change", () => this.handleAnalysisSettingChange());
+    }
     for (const id of [
       "safe-platform-select", "safe-role-select", "safe-box-x-input", "safe-box-y-input",
       "safe-box-width-input", "safe-box-height-input",
@@ -103,12 +202,29 @@ export class AutomationController {
     }
   }
 
-  private async guard(task: () => void | Promise<void>, context: string): Promise<void> {
-    try { await task(); } catch (error) { this.options.onError?.(error, context); }
+  private async runAutomation(label: string, task: () => void | Promise<void>, context: string): Promise<void> {
+    if (this.busyAction) {
+      this.options.onError?.(new Error(`${this.busyAction} 작업이 이미 진행 중입니다.`), context);
+      return;
+    }
+    this.busyAction = label;
+    this.renderAutomationControls();
+    try {
+      await task();
+    } catch (error) {
+      this.options.onError?.(error, context);
+    } finally {
+      this.busyAction = "";
+      this.renderAutomationControls();
+    }
   }
 
   private async refreshTranscriptStatus(): Promise<void> {
-    if (this.options.getTranscript) this.transcript = await this.options.getTranscript();
+    if (this.options.getTranscript) {
+      const revision = this.transcriptRevision;
+      const next = await this.options.getTranscript();
+      if (revision === this.transcriptRevision) this.setTranscript(next);
+    }
     this.renderTranscriptStatus();
   }
 
@@ -120,25 +236,95 @@ export class AutomationController {
       : "먼저 TTS·STT 탭에서 화자 구분 또는 Whisper 자막을 생성해 주세요.";
   }
 
+  private readAnalysisSettings(): AutomationAnalysisSettings {
+    return normalizeAutomationAnalysisSettings({
+      minSilence: numberOf("auto-min-silence-input", 0.42),
+      padding: numberOf("auto-padding-input", 0.08),
+      trimLeading: checkedOf("auto-trim-leading-checkbox"),
+      trimTrailing: checkedOf("auto-trim-trailing-checkbox"),
+      punchEnabled: checkedOf("auto-punch-checkbox"),
+      punchScale: numberOf("auto-punch-scale-input", 112),
+      punchCount: numberOf("auto-punch-count-input", 12),
+      keywords: valueOf("auto-keywords-input").split(","),
+    });
+  }
+
+  private handleAnalysisSettingChange(): void {
+    this.settingsRevision += 1;
+    if (!this.planValue && !this.analysisGuardValue) return;
+    this.invalidatePlan(
+      "자동 편집 설정이 변경되어 이전 분석안을 사용할 수 없습니다. 다시 분석해 주세요.",
+      true,
+    );
+  }
+
+  private async readSourceContextKey(): Promise<string> {
+    if (!this.options.getSourceContextKey) return "";
+    const value = await this.options.getSourceContextKey();
+    if (typeof value !== "string") {
+      throw new Error("활성 Premiere 프로젝트·시퀀스 context를 확인하지 못했습니다. 다시 분석해 주세요.");
+    }
+    const clean = value.trim();
+    if (!clean || clean.length > 512 || /[\u0000-\u001f\u007f]/u.test(clean)) {
+      throw new Error("활성 Premiere 프로젝트·시퀀스 context key가 올바르지 않습니다. 다시 분석해 주세요.");
+    }
+    return clean;
+  }
+
+  private fingerprint(
+    transcript: AutomationTranscript,
+    settings: AutomationAnalysisSettings,
+    sourceContextKey: string,
+  ): string {
+    return createAutomationAnalysisFingerprint({
+      transcriptName: transcript.name,
+      sourceDuration: transcript.duration,
+      segments: transcript.segments,
+      settings,
+      sourceContextKey,
+    });
+  }
+
   private async analyze(): Promise<void> {
     await this.refreshTranscriptStatus();
     if (!this.transcript || this.transcript.segments.length === 0) {
       throw new Error("타임코드가 포함된 STT 결과가 없습니다. 화자 구분 또는 Whisper SRT로 먼저 변환해 주세요.");
     }
-    this.planValue = planSilenceCuts(this.transcript.segments, this.transcript.duration, {
-      minSilence: numberOf("auto-min-silence-input", 0.42),
-      padding: numberOf("auto-padding-input", 0.08),
-      trimLeading: checkedOf("auto-trim-leading-checkbox"),
-      trimTrailing: checkedOf("auto-trim-trailing-checkbox"),
+    const transcript = this.transcript;
+    const transcriptRevision = this.transcriptRevision;
+    const settingsRevision = this.settingsRevision;
+    const settings = this.readAnalysisSettings();
+    this.invalidatePlan("새 자동 편집안을 분석하고 있습니다.", false);
+    const sourceContextKey = await this.readSourceContextKey();
+    if (
+      transcriptRevision !== this.transcriptRevision || settingsRevision !== this.settingsRevision ||
+      this.transcript !== transcript || !sameAnalysisSettings(settings, this.readAnalysisSettings())
+    ) {
+      this.rejectStaleAnalysis();
+    }
+    const plan = planSilenceCuts(transcript.segments, transcript.duration, {
+      minSilence: settings.minSilence,
+      padding: settings.padding,
+      trimLeading: settings.trimLeading,
+      trimTrailing: settings.trimTrailing,
+      maximumCuts: MAX_AUTOMATION_MARKERS,
     });
-    const keywords = valueOf("auto-keywords-input").split(",").map((value) => value.trim()).filter(Boolean);
-    this.cuesValue = checkedOf("auto-punch-checkbox")
-      ? recommendPunchCues(this.transcript.segments, this.transcript.duration, {
-        scale: numberOf("auto-punch-scale-input", 112),
-        maximumCues: numberOf("auto-punch-count-input", 12),
-        keywords,
+    const remainingMarkerBudget = MAX_AUTOMATION_MARKERS - plan.cuts.length;
+    const cues = settings.punchEnabled && remainingMarkerBudget > 0
+      ? recommendPunchCues(transcript.segments, transcript.duration, {
+        scale: settings.punchScale,
+        maximumCues: Math.min(settings.punchCount, remainingMarkerBudget),
+        keywords: settings.keywords,
       })
       : [];
+    assertAutomationMarkerBudget(plan.cuts.length, cues.length);
+    this.planValue = plan;
+    this.cuesValue = cues;
+    this.analysisGuardValue = Object.freeze({
+      fingerprint: this.fingerprint(transcript, settings, sourceContextKey),
+      sourceContextKey,
+    });
+    this.invalidationMessage = "";
     this.renderPlan();
     this.options.onActivity?.(`자동 편집안 분석 완료 · 무음 컷 ${this.planValue.cuts.length}개 · 펀치인 ${this.cuesValue.length}개`);
   }
@@ -178,18 +364,97 @@ export class AutomationController {
     }
     element<HTMLButtonElement>("auto-markers-btn").disabled = rows.length === 0;
     element<HTMLButtonElement>("auto-apply-btn").disabled = rows.length === 0;
+    this.renderAutomationControls();
+  }
+
+  private invalidatePlan(message: string, reanalysisRequired = false): void {
+    this.planValue = null;
+    this.cuesValue = [];
+    this.analysisGuardValue = null;
+    this.invalidationMessage = reanalysisRequired ? message : "";
+    const summary = optionalElement<HTMLElement>("auto-plan-summary");
+    const values = summary?.querySelectorAll<HTMLElement>("strong") ?? [];
+    if (values[0]) values[0].textContent = "—";
+    if (values[1]) values[1].textContent = "—";
+    if (values[2]) values[2].textContent = "0개";
+    const target = optionalElement<HTMLElement>("auto-cut-list");
+    if (target) {
+      target.replaceChildren();
+      const note = document.createElement("p");
+      note.className = "action-note";
+      note.textContent = message;
+      target.append(note);
+    }
+    this.renderAutomationControls();
+  }
+
+  private rejectStaleAnalysis(message = STALE_ANALYSIS_MESSAGE): never {
+    this.invalidatePlan(message, true);
+    throw new Error(message);
+  }
+
+  private async requireCurrentAnalysis(): Promise<{
+    plan: SilenceCutPlan;
+    cues: readonly PunchCue[];
+    guard: AutomationAnalysisGuard;
+  }> {
+    const plan = this.planValue;
+    const guard = this.analysisGuardValue;
+    if (!plan || !guard) {
+      throw new Error(this.invalidationMessage || "먼저 자동 편집안을 분석해 주세요.");
+    }
+    const transcriptRevision = this.transcriptRevision;
+    const transcript = this.transcript;
+    if (
+      this.planValue !== plan || this.analysisGuardValue !== guard ||
+      transcriptRevision !== this.transcriptRevision || !transcript
+    ) {
+      this.rejectStaleAnalysis(this.invalidationMessage || STALE_ANALYSIS_MESSAGE);
+    }
+    const sourceContextKey = await this.readSourceContextKey();
+    if (
+      this.planValue !== plan || this.analysisGuardValue !== guard ||
+      transcriptRevision !== this.transcriptRevision || this.transcript !== transcript
+    ) {
+      this.rejectStaleAnalysis(this.invalidationMessage || STALE_ANALYSIS_MESSAGE);
+    }
+    const fingerprint = this.fingerprint(transcript, this.readAnalysisSettings(), sourceContextKey);
+    if (fingerprint !== guard.fingerprint || sourceContextKey !== guard.sourceContextKey) {
+      this.rejectStaleAnalysis();
+    }
+    return {
+      plan: clonePlan(plan),
+      cues: clonePunchCues(this.cuesValue),
+      guard: { ...guard },
+    };
+  }
+
+  private renderAutomationControls(): void {
+    const hasActions = Boolean(this.planValue && this.planValue.cuts.length + this.cuesValue.length > 0);
+    const analyze = optionalElement<HTMLButtonElement>("auto-analyze-btn");
+    const markers = optionalElement<HTMLButtonElement>("auto-markers-btn");
+    const apply = optionalElement<HTMLButtonElement>("auto-apply-btn");
+    const safeCheck = optionalElement<HTMLButtonElement>("safe-check-btn");
+    const safeAlign = optionalElement<HTMLButtonElement>("safe-align-btn");
+    const safeOverlay = optionalElement<HTMLButtonElement>("safe-overlay-btn");
+    if (analyze) analyze.disabled = this.isBusy;
+    if (markers) markers.disabled = this.isBusy || !hasActions;
+    if (apply) apply.disabled = this.isBusy || !hasActions;
+    if (safeCheck) safeCheck.disabled = this.isBusy;
+    if (safeAlign) safeAlign.disabled = this.isBusy;
+    if (safeOverlay) safeOverlay.disabled = this.isBusy;
   }
 
   private async addMarkers(): Promise<void> {
-    if (!this.planValue) throw new Error("먼저 자동 편집안을 분석해 주세요.");
     if (!this.options.onAddMarkers) throw new Error("Premiere 추천 마커 기능이 연결되지 않았습니다.");
-    await this.options.onAddMarkers(this.planValue, this.cuesValue);
+    const current = await this.requireCurrentAnalysis();
+    await this.options.onAddMarkers(current.plan, current.cues, current.guard);
   }
 
   private async apply(): Promise<void> {
-    if (!this.planValue) throw new Error("먼저 자동 편집안을 분석해 주세요.");
     if (!this.options.onApply) throw new Error("Premiere 자동 편집 적용 기능이 연결되지 않았습니다.");
-    await this.options.onApply(this.planValue, this.cuesValue);
+    const current = await this.requireCurrentAnalysis();
+    await this.options.onApply(current.plan, current.cues, current.guard);
   }
 
   private syncRangeLabels(): void {
@@ -224,30 +489,36 @@ export class AutomationController {
     ctx.fillRect(0, safe.y + safe.height, canvas.width, canvas.height - safe.y - safe.height);
     ctx.fillRect(0, safe.y, safe.x, safe.height);
     ctx.fillRect(safe.x + safe.width, safe.y, canvas.width - safe.x - safe.width, safe.height);
-    ctx.save();
-    ctx.setLineDash([12, 8]);
+    const supportsSavedState = typeof ctx.save === "function" && typeof ctx.restore === "function";
+    if (supportsSavedState) ctx.save();
+    if (typeof ctx.setLineDash === "function") ctx.setLineDash([12, 8]);
     ctx.lineWidth = 3;
     ctx.strokeStyle = "rgba(71,215,172,.9)";
     ctx.strokeRect(safe.x, safe.y, safe.width, safe.height);
-    ctx.restore();
+    if (supportsSavedState) ctx.restore();
     ctx.fillStyle = assessment.inside ? "rgba(71,215,172,.28)" : "rgba(255,107,122,.35)";
     ctx.strokeStyle = assessment.inside ? "#47d7ac" : "#ff6b7a";
     ctx.lineWidth = 4;
     ctx.fillRect(elementRect.x, elementRect.y, elementRect.width, elementRect.height);
     ctx.strokeRect(elementRect.x, elementRect.y, elementRect.width, elementRect.height);
-    ctx.fillStyle = "rgba(255,255,255,.82)";
-    ctx.font = "24px sans-serif";
-    ctx.fillText(SAFE_ZONE_PROFILES[platform].label, 20, 38);
+    if (typeof ctx.fillText === "function") {
+      ctx.fillStyle = "rgba(255,255,255,.82)";
+      ctx.font = "22px sans-serif";
+      ctx.fillText(safeZoneGuideLabel(platform, role), 20, 38);
+    }
   }
 
   private checkSafeZone(): void {
-    const assessment = assessSafeZone(currentElementRect(), platformValue(), roleValue());
+    const platform = platformValue();
+    const role = roleValue();
+    const assessment = assessSafeZone(currentElementRect(), platform, role);
+    const guideLabel = safeZoneGuideLabel(platform, role);
     const target = element<HTMLElement>("safe-zone-result");
     target.classList.toggle("is-safe", assessment.inside);
     target.classList.toggle("is-warning", !assessment.inside);
     target.textContent = assessment.inside
-      ? "안전 영역 안에 있습니다. 플랫폼 UI와 겹칠 가능성이 낮습니다."
-      : `안전 영역 침범: 위 ${(assessment.overflow.top * 100).toFixed(1)}%, 오른쪽 ${(assessment.overflow.right * 100).toFixed(1)}%, 아래 ${(assessment.overflow.bottom * 100).toFixed(1)}%, 왼쪽 ${(assessment.overflow.left * 100).toFixed(1)}%.`;
+      ? `${guideLabel}: 안전 영역 안에 있습니다. 플랫폼 UI와 겹칠 가능성이 낮습니다.`
+      : `${guideLabel}: 안전 영역 침범 · 위 ${(assessment.overflow.top * 100).toFixed(1)}%, 오른쪽 ${(assessment.overflow.right * 100).toFixed(1)}%, 아래 ${(assessment.overflow.bottom * 100).toFixed(1)}%, 왼쪽 ${(assessment.overflow.left * 100).toFixed(1)}%.`;
     this.renderSafeZone();
   }
 
@@ -255,18 +526,33 @@ export class AutomationController {
     const platform = platformValue();
     const role = roleValue();
     const alignment = alignToSafeZone(currentElementRect(), platform, role);
+    let result: void | SafeZoneApplyResult = undefined;
+    if (alignment.changed) result = await this.options.onAlignSafeZone?.(alignment, platform, role);
     setRange("safe-box-x-input", alignment.rect.x);
     setRange("safe-box-y-input", alignment.rect.y);
     setRange("safe-box-width-input", alignment.rect.width);
     setRange("safe-box-height-input", alignment.rect.height);
     this.syncRangeLabels();
     this.checkSafeZone();
-    await this.options.onAlignSafeZone?.(alignment, platform, role);
-    this.options.onActivity?.(alignment.changed ? "요소를 Safe Zone 안으로 자동 정렬했습니다." : "요소가 이미 Safe Zone 안에 있습니다.");
+    const guideLabel = safeZoneGuideLabel(platform, role);
+    if (!alignment.changed) {
+      this.options.onActivity?.(`${guideLabel}: 요소가 이미 Safe Zone 안에 있습니다.`);
+    } else if (result) {
+      this.options.onActivity?.(
+        result.skipped > 0 || result.changed < result.selected
+          ? `${guideLabel}: 부분 적용 · 선택 ${result.selected}개 · 변경 ${result.changed}개 · 보존/건너뜀 ${result.skipped}개`
+          : `${guideLabel}: 선택 ${result.changed}개에 위치 이동${alignment.wasOversized ? "과 비례 축소" : ""}을 적용했습니다.`,
+      );
+    } else {
+      this.options.onActivity?.(`${guideLabel}: Safe Zone 정렬 요청을 완료했습니다.`);
+    }
   }
 
   private async createSafeOverlay(): Promise<void> {
     if (!this.options.onCreateSafeOverlay) throw new Error("Premiere Safe Zone 가이드 생성 기능이 연결되지 않았습니다.");
-    await this.options.onCreateSafeOverlay(platformValue(), roleValue());
+    const platform = platformValue();
+    const role = roleValue();
+    await this.options.onCreateSafeOverlay(platform, role);
+    this.options.onActivity?.(`${safeZoneGuideLabel(platform, role)} 오버레이를 만들었습니다. 내보내기 전 반드시 삭제해 주세요.`);
   }
 }

@@ -74,41 +74,63 @@ export function bind(
   });
 }
 
-export function setupTabs(): void {
+let tabsInitialized = false;
+
+function activateWorkflowTab(tab: HTMLButtonElement, focus = false): void {
   const tabs = [...document.querySelectorAll<HTMLButtonElement>(".nav-tab[data-tab]")];
   const panels = [...document.querySelectorAll<HTMLElement>(".workflow-panel[data-panel]")];
+  const id = tab.dataset.tab;
+  if (!id) return;
+  for (const candidate of tabs) {
+    const active = candidate === tab;
+    candidate.classList.toggle("is-active", active);
+    candidate.setAttribute("aria-selected", String(active));
+    candidate.tabIndex = active ? 0 : -1;
+  }
+  for (const panel of panels) {
+    const active = panel.dataset.panel === id;
+    panel.classList.toggle("is-active", active);
+    panel.hidden = !active;
+  }
+  if (focus) tab.focus();
+}
 
-  const activate = (tab: HTMLButtonElement, focus = false): void => {
-    const id = tab.dataset.tab;
-    if (!id) return;
-    for (const candidate of tabs) {
-      const active = candidate === tab;
-      candidate.classList.toggle("is-active", active);
-      candidate.setAttribute("aria-selected", String(active));
-      candidate.tabIndex = active ? 0 : -1;
-    }
-    for (const panel of panels) {
-      const active = panel.dataset.panel === id;
-      panel.classList.toggle("is-active", active);
-      panel.hidden = !active;
-    }
-    if (focus) tab.focus();
-  };
+function workflowTabFromEvent(event: Event): HTMLButtonElement | null {
+  const target = event.target;
+  if (!(target instanceof Element)) return null;
+  const tab = target.closest<HTMLButtonElement>(".nav-tab[data-tab]");
+  return tab instanceof HTMLButtonElement ? tab : null;
+}
 
-  tabs.forEach((tab, index) => {
-    tab.addEventListener("click", () => activate(tab));
-    tab.addEventListener("keydown", (event: KeyboardEvent) => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-      event.preventDefault();
-      let nextIndex = index;
-      if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
-      if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
-      if (event.key === "Home") nextIndex = 0;
-      if (event.key === "End") nextIndex = tabs.length - 1;
-      const next = tabs[nextIndex];
-      if (next) activate(next, true);
-    });
-  });
+export function setupTabs(): void {
+  if (tabsInitialized) return;
+  tabsInitialized = true;
+
+  document.addEventListener("click", (event) => {
+    const tab = workflowTabFromEvent(event);
+    if (!tab) return;
+    event.preventDefault();
+    activateWorkflowTab(tab);
+  }, true);
+
+  document.addEventListener("keydown", (event: KeyboardEvent) => {
+    const tab = workflowTabFromEvent(event);
+    if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>(".nav-tab[data-tab]")];
+    const index = tabs.indexOf(tab);
+    let nextIndex = index < 0 ? 0 : index;
+    if (event.key === "ArrowLeft") nextIndex = (nextIndex - 1 + tabs.length) % tabs.length;
+    if (event.key === "ArrowRight") nextIndex = (nextIndex + 1) % tabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = tabs.length - 1;
+    const next = tabs[nextIndex];
+    if (next) activateWorkflowTab(next, true);
+  }, true);
+
+  const initial = document.querySelector<HTMLButtonElement>(".nav-tab.is-active[data-tab]")
+    ?? document.querySelector<HTMLButtonElement>(".nav-tab[data-tab]");
+  if (initial) activateWorkflowTab(initial);
 }
 
 function clockText(date = new Date()): string {

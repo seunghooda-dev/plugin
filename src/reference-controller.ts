@@ -1,5 +1,6 @@
 import {
   MAX_IMAGE_INPUTS,
+  MAX_REFERENCE_PROMPT_ITEMS,
   REFERENCE_FILE_TYPES,
   ReferenceLibrary,
   classifyReference,
@@ -13,7 +14,7 @@ import { bind, element, renderEmptyState, valueOf } from "./ui";
 export interface ReferenceControllerOptions {
   onActivity?: (message: string) => void;
   onError?: (error: unknown, context: string) => void;
-  onSelectionChange?: (selectedImageIds: readonly string[]) => void;
+  onSelectionChange?: (selectedReferenceIds: readonly string[]) => void;
 }
 
 function entryName(entry: ReferenceFileEntry): string {
@@ -31,13 +32,17 @@ function notesWithCategory(notes: string, category: string): string {
   return clean;
 }
 
+function tagsText(tags: readonly string[]): string {
+  return tags.join(", ");
+}
+
 /**
  * 레퍼런스 보드의 DOM 수명과 UXP persistent-token 라이브러리를 연결합니다.
  * 파일 바이너리는 AI 실행 시에만 읽고, 카드에는 UXP가 제공한 URL만 사용합니다.
  */
 export class ReferenceController {
   private readonly library = new ReferenceLibrary(createDefaultReferenceAdapter());
-  private readonly selectedImageIds = new Set<string>();
+  private readonly selectedReferenceIds = new Set<string>();
   private stagedEntries: ReferenceFileEntry[] = [];
   private dragFromIndex = -1;
 
@@ -54,11 +59,14 @@ export class ReferenceController {
   }
 
   get selectedIds(): readonly string[] {
-    return [...this.selectedImageIds];
+    return [...this.selectedReferenceIds];
   }
 
   async getSelectedImageInputs(): Promise<ReferenceImageInput[]> {
-    return this.library.getImageInputs(this.selectedIds);
+    const imageIds = this.items
+      .filter((item) => item.type === "image" && this.selectedReferenceIds.has(item.id))
+      .map((item) => item.id);
+    return this.library.getImageInputs(imageIds);
   }
 
   private bindEvents(): void {
@@ -129,22 +137,33 @@ export class ReferenceController {
     const entries = [...this.stagedEntries];
     const category = valueOf("reference-type-select");
     const notes = notesWithCategory(valueOf("reference-notes-input"), category);
-    const additions = await this.library.addEntries(entries, notes);
+    const additions = await this.library.addEntries(entries, notes, {
+      source: valueOf("reference-source-input"),
+      tags: valueOf("reference-tags-input"),
+    });
     this.stagedEntries = [];
     element<HTMLTextAreaElement>("reference-notes-input").value = "";
+    element<HTMLInputElement>("reference-source-input").value = "";
+    element<HTMLInputElement>("reference-tags-input").value = "";
     this.updateStagedUI();
     this.render();
     this.options.onActivity?.(`${additions.length}개 레퍼런스를 보드에 추가했습니다.`);
   }
 
-  private setImageSelected(id: string, checked: boolean): void {
-    if (checked && !this.selectedImageIds.has(id)) {
-      if (this.selectedImageIds.size >= MAX_IMAGE_INPUTS) {
+  private setReferenceSelected(item: ReferenceItem, checked: boolean): void {
+    if (checked && !this.selectedReferenceIds.has(item.id)) {
+      if (this.selectedReferenceIds.size >= MAX_REFERENCE_PROMPT_ITEMS) {
+        throw new Error(`AI 참고 레퍼런스는 최대 ${MAX_REFERENCE_PROMPT_ITEMS}개까지 선택할 수 있습니다.`);
+      }
+      const selectedImageCount = this.items
+        .filter((candidate) => candidate.type === "image" && this.selectedReferenceIds.has(candidate.id))
+        .length;
+      if (item.type === "image" && selectedImageCount >= MAX_IMAGE_INPUTS) {
         throw new Error(`AI 입력 레퍼런스는 최대 ${MAX_IMAGE_INPUTS}개까지 선택할 수 있습니다.`);
       }
-      this.selectedImageIds.add(id);
+      this.selectedReferenceIds.add(item.id);
     } else if (!checked) {
-      this.selectedImageIds.delete(id);
+      this.selectedReferenceIds.delete(item.id);
     }
     this.options.onSelectionChange?.(this.selectedIds);
   }
@@ -194,6 +213,21 @@ export class ReferenceController {
     kind.textContent = item.type === "image" ? "AI 이미지 레퍼런스" : "AI 동영상 레퍼런스";
     copy.append(title, kind);
 
+    const meta = document.createElement("small");
+    meta.className = "reference-meta";
+    meta.textContent = [
+      item.source ? `출처: ${item.source}` : "",
+      item.tags.length > 0 ? `태그: ${tagsText(item.tags)}` : "",
+    ].filter(Boolean).join(" · ");
+    if (meta.textContent) copy.append(meta);
+
+    const source = document.createElement("input");
+    source.className = "reference-source-editor";
+    source.value = item.source;
+    source.maxLength = 512;
+    source.placeholder = "출처";
+    source.setAttribute("aria-label", `${item.name} 출처`);
+
     const notes = document.createElement("textarea");
     notes.className = "reference-notes-editor";
     notes.value = item.notes;
@@ -201,30 +235,46 @@ export class ReferenceController {
     notes.rows = 2;
     notes.placeholder = "활용 메모";
     notes.setAttribute("aria-label", `${item.name} 활용 메모`);
-    notes.addEventListener("change", () => void this.guard(async () => {
-      await this.library.updateNotes(item.id, notes.value);
-      this.options.onActivity?.(`${item.name} 메모를 저장했습니다.`);
-    }, "레퍼런스 메모 저장 실패"));
+    const tags = document.createElement("input");
+    tags.className = "reference-tags-editor";
+    tags.value = tagsText(item.tags);
+    tags.maxLength = 512;
+    tags.placeholder = "태그";
+    tags.setAttribute("aria-label", `${item.name} 태그`);
+    const saveMetadata = () => void this.guard(async () => {
+      await this.library.updateMetadata(item.id, {
+        notes: notes.value,
+        source: source.value,
+        tags: tags.value,
+      });
+      this.render();
+      this.options.onActivity?.(`${item.name} 메타데이터를 저장했습니다.`);
+    }, "레퍼런스 메타데이터 저장 실패");
+    notes.addEventListener("change", saveMetadata);
+    source.addEventListener("change", saveMetadata);
+    tags.addEventListener("change", saveMetadata);
 
     const actions = document.createElement("div");
     actions.className = "reference-card-actions";
-    if (item.type === "image" && !item.unavailable) {
+    if (!item.unavailable) {
       const selectLabel = document.createElement("label");
       selectLabel.className = "reference-ai-select";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = this.selectedImageIds.has(item.id);
-      checkbox.setAttribute("aria-label", `${item.name}을 AI 입력으로 선택`);
+      checkbox.checked = this.selectedReferenceIds.has(item.id);
+      checkbox.setAttribute("aria-label", item.type === "image"
+        ? `${item.name}을 AI 이미지 입력으로 선택`
+        : `${item.name}을 AI 프롬프트 참고로 선택`);
       checkbox.addEventListener("change", () => {
         try {
-          this.setImageSelected(item.id, checkbox.checked);
+          this.setReferenceSelected(item, checkbox.checked);
         } catch (error) {
           checkbox.checked = false;
           this.options.onError?.(error, "AI 레퍼런스 선택 실패");
         }
       });
       const labelText = document.createElement("span");
-      labelText.textContent = "AI 입력";
+      labelText.textContent = item.type === "image" ? "AI 입력" : "AI 프롬프트";
       selectLabel.append(checkbox, labelText);
       actions.append(selectLabel);
     }
@@ -235,7 +285,7 @@ export class ReferenceController {
     remove.setAttribute("aria-label", `${item.name} 레퍼런스 삭제`);
     remove.addEventListener("click", () => void this.guard(async () => {
       await this.library.remove(item.id);
-      this.selectedImageIds.delete(item.id);
+      this.selectedReferenceIds.delete(item.id);
       this.options.onSelectionChange?.(this.selectedIds);
       this.render();
       this.options.onActivity?.(`${item.name} 레퍼런스를 삭제했습니다.`);
@@ -263,7 +313,7 @@ export class ReferenceController {
     });
     card.addEventListener("dragend", () => { this.dragFromIndex = -1; });
 
-    card.append(this.previewFor(item), copy, notes, actions);
+    card.append(this.previewFor(item), copy, source, tags, notes, actions);
     return card;
   }
 
@@ -278,4 +328,3 @@ export class ReferenceController {
     items.forEach((item, index) => target.append(this.renderCard(item, index)));
   }
 }
-

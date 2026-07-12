@@ -11,15 +11,20 @@
   "scripts": {
     "clean": "rimraf dist .test-build .ai-test-build .thumbnail-test-build .job-test-build .recovery-test-build .final-qc-test-build release",
     "build": "vite build && npm run verify:dist",
+    "beta:evidence": "node scripts/collect-beta-evidence.mjs",
+    "beta:evidence:verified": "npm run check && npm run package:ccx:force && node scripts/collect-beta-evidence.mjs --verified",
     "dev": "vite build --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test:compile": "rimraf .test-build && tsc -p tsconfig.test.json",
-    "test": "npm run test:compile && node --test .test-build/tests/*.test.js",
-    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "test": "npm run test:compile && node scripts/run-tests.mjs",
+    "check": "npm run typecheck && npm run lint && npm run build && npm test",
     "verify:dist": "node scripts/verify-dist.mjs",
-    "package:ccx": "npm run build && node scripts/package-ccx.mjs",
-    "package:ccx:force": "npm run build && node scripts/package-ccx.mjs --force"
+    "verify:release": "node scripts/verify-release.mjs",
+    "verify:speech": "node scripts/verify-speech-live.mjs",
+    "verify:speech:live": "node scripts/verify-speech-live.mjs --live",
+    "package:ccx": "npm run build && node scripts/package-ccx.mjs && npm run verify:release",
+    "package:ccx:force": "npm run build && node scripts/package-ccx.mjs --force && npm run verify:release"
   },
   "devDependencies": {
     "@adobe/cc-ext-uxp-types": "^7.3.1",

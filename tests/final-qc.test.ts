@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { PROFILES } from "../src/core";
+import { createAssetRightsReport, normalizeAssetRightsRecord } from "../src/asset-rights";
 import { SAFE_ZONE_PROFILES } from "../src/safe-zone";
 import {
   FINAL_QC_PROFILES,
@@ -62,6 +63,19 @@ function healthySnapshot(): FinalQCSnapshot {
       missingFonts: [],
       missingAssets: [],
       guideOverlays: [],
+      rightsReport: createAssetRightsReport([
+        normalizeAssetRightsRecord({
+          assetId: "c:/assets/music/hook.wav",
+          assetName: "hook.wav",
+          kind: "music",
+          source: "Artlist",
+          license: "Creator Pro",
+          commercialUse: "allowed",
+          expiresAt: "2027-07-11",
+          attribution: "Music: hook.wav, Artlist, Creator Pro",
+          updatedAt: 1_750_000_000_000,
+        }),
+      ], 1_750_000_000_000),
     },
     output: {
       fileName: "ShortFlow_Final.mp4",
@@ -275,6 +289,7 @@ describe("caption checks", () => {
   it("warns when a caption violates the platform safe zone", () => {
     const value = report((snapshot) => { snapshot.captions[0]!.rect.y = 0.85; });
     assert.equal(has(value, "caption-safe-zone", "warning"), true);
+    assert.match(checks(value, "caption-safe-zone")[0]?.message ?? "", /2026-conservative/u);
     assert.equal(value.blocking, false);
   });
 
@@ -296,6 +311,7 @@ describe("safe-zone element checks", () => {
       snapshot.safeZoneElements[0]!.rect.width = 0.2;
     });
     assert.equal(has(value, "content-safe-zone", "warning"), true);
+    assert.match(checks(value, "content-safe-zone")[0]?.message ?? "", /2026-conservative/u);
   });
 
   it("reports a graphic outside the physical frame", () => {
@@ -367,6 +383,41 @@ describe("media and project hygiene", () => {
       assert.ok(value.blockingCodes.includes(code));
     });
   }
+
+  it("warns when the asset rights report is missing", () => {
+    const value = report((snapshot) => { delete snapshot.media.rightsReport; });
+    assert.equal(has(value, "asset-rights-report", "warning"), true);
+    assert.equal(value.blocking, false);
+  });
+
+  it("does not warn about attribution when no tracked assets exist", () => {
+    const value = report((snapshot) => {
+      snapshot.media.rightsReport = createAssetRightsReport([], 1_750_000_000_000);
+    });
+    assert.equal(has(value, "asset-rights-attribution", "pass"), true);
+    assert.equal(has(value, "asset-rights-attribution", "warning"), false);
+  });
+
+  it("hard-blocks forbidden or expired asset rights", () => {
+    const value = report((snapshot) => {
+      snapshot.media.rightsReport = createAssetRightsReport([
+        normalizeAssetRightsRecord({
+          assetId: "ai-hero",
+          assetName: "hero.png",
+          kind: "ai-image",
+          source: "External AI",
+          license: "Personal preview",
+          commercialUse: "forbidden",
+          expiresAt: "2024-01-01",
+          attribution: "AI image: External AI",
+          updatedAt: 1_750_000_000_000,
+        }),
+      ], 1_750_000_000_000);
+    });
+    assert.equal(has(value, "asset-rights-error", "error"), true);
+    assert.equal(checks(value, "asset-rights-error")[0]?.hardBlock, true);
+    assert.equal(value.blocking, true);
+  });
 });
 
 describe("output file checks", () => {
@@ -491,6 +542,18 @@ describe("JSON, Markdown, and redaction", () => {
     const parsed = JSON.parse(json) as FinalQCReport;
     assert.equal(parsed.schemaVersion, 1);
     assert.equal(json.includes("sk-proj"), false);
+  });
+
+  it("carries the asset rights report into JSON and Markdown exports", () => {
+    const value = report();
+    const json = finalQCReportToJSON(value);
+    const parsed = JSON.parse(json) as FinalQCReport;
+    assert.equal(parsed.rightsReport?.assets[0]?.assetName, "hook.wav");
+    assert.equal(parsed.rightsReport?.counts.error, 0);
+
+    const markdown = finalQCReportToMarkdown(value);
+    assert.match(markdown, /에셋 권리 리포트/u);
+    assert.match(markdown, /Music: hook\.wav, Artlist, Creator Pro/u);
   });
 
   it("exports a readable Markdown gate table", () => {

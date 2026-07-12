@@ -7,6 +7,9 @@ release/
 .job-test-build/
 .recovery-test-build/
 .final-qc-test-build/
+beta-evidence/
+speech-evidence/
+host-smoke-assets/
 *.log
 .DS_Store
 Thumbs.db

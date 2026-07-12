@@ -5,6 +5,7 @@ import {
   MAX_IMAGE_INPUTS,
   MAX_REFERENCE_NOTES_LENGTH,
   MAX_REFERENCE_PROMPT_CHARACTERS,
+  MAX_REFERENCE_TAGS,
   MAX_REFERENCES,
   REFERENCE_STORAGE_KEY,
   ReferenceLibrary,
@@ -16,6 +17,7 @@ import {
   buildReferencePrompt,
   deserializeReferences,
   filterReferences,
+  normalizeReferenceTags,
   normalizeReferencePath,
   reorderReferences,
   serializeReferences,
@@ -160,6 +162,8 @@ function reference(
     nativePath,
     token: `token-${id}`,
     notes: "",
+    source: "",
+    tags: [],
     createdAt: 1_700_000_000_000,
     ...extras,
   };
@@ -266,6 +270,16 @@ describe("filterReferences", () => {
     assert.deepEqual(filterReferences(items, "빨간 파스텔"), []);
   });
 
+  it("searches source and tags without mutating references", () => {
+    const sourceItems = [
+      reference("campaign", { source: "Artlist mood pack", tags: ["강렬함", "red"] }),
+      reference("owned", { source: "직접 제작", tags: ["soft"] }),
+    ];
+    assert.deepEqual(filterReferences(sourceItems, "artlist red").map((item) => item.id), ["campaign"]);
+    assert.deepEqual(filterReferences(sourceItems, "직접 soft").map((item) => item.id), ["owned"]);
+    assert.deepEqual(sourceItems[0]?.tags, ["강렬함", "red"]);
+  });
+
   it("filters by image or video type", () => {
     assert.deepEqual(
       filterReferences(items, { type: "image" }).map((item) => item.id),
@@ -298,6 +312,35 @@ describe("buildReferencePrompt", () => {
     assert.match(prompt, /Keep the title legible/u);
     assert.match(prompt, /warm cinematic lighting/u);
     assert.doesNotMatch(prompt, /C:\\Private|persistent-capability-token|<ignore/iu);
+  });
+
+  it("includes video references as untrusted prompt-only metadata", () => {
+    const prompt = buildReferencePrompt([
+      reference("motion", {
+        type: "video",
+        name: "Fast zoom.mp4",
+        notes: "카메라가 빠르게 들어오는 리듬",
+      }),
+    ]);
+    assert.match(prompt, /Reference 1 \(video\)/u);
+    assert.match(prompt, /Fast zoom\.mp4/u);
+    assert.match(prompt, /빠르게 들어오는/u);
+  });
+
+  it("includes source and tags in prompt metadata without exposing paths or tokens", () => {
+    const prompt = buildReferencePrompt([
+      reference("licensed", {
+        name: "Licensed still.png",
+        nativePath: "C:\\Private\\licensed.png",
+        token: "persistent-capability-token",
+        source: "Artlist campaign folder",
+        tags: ["강렬함", "red background"],
+        notes: "제품 뒤에 붉은 조명",
+      }),
+    ]);
+    assert.match(prompt, /source: "Artlist campaign folder"/u);
+    assert.match(prompt, /tags: "강렬함, red background"/u);
+    assert.doesNotMatch(prompt, /C:\\Private|persistent-capability-token/iu);
   });
 
   it("skips unavailable references and respects the prompt boundary", () => {
@@ -341,7 +384,7 @@ describe("reorderReferences", () => {
 
 describe("reference serialization", () => {
   it("round-trips all required ReferenceItem fields", () => {
-    const original = reference("hero", { notes: "메모", createdAt: 42 });
+    const original = reference("hero", { notes: "메모", source: "직접 제작", tags: ["강렬함"], createdAt: 42 });
     assert.deepEqual(deserializeReferences(serializeReferences([original])), [original]);
   });
 
@@ -436,6 +479,18 @@ describe("reference serialization", () => {
     assert.equal(restored[0]?.notes.length, MAX_REFERENCE_NOTES_LENGTH);
   });
 
+  it("normalizes source and tags while preserving legacy records", () => {
+    const legacy = { ...reference("legacy") };
+    delete (legacy as Partial<ReferenceItem>).source;
+    delete (legacy as Partial<ReferenceItem>).tags;
+    assert.deepEqual(deserializeReferences(JSON.stringify([legacy]))[0], reference("legacy"));
+    assert.deepEqual(
+      normalizeReferenceTags(["#강렬함", "강렬함", " red  background ", "", "x".repeat(100)]),
+      ["강렬함", "red background", "x".repeat(64)],
+    );
+    assert.equal(normalizeReferenceTags(Array.from({ length: MAX_REFERENCE_TAGS + 2 }, (_, index) => `tag${index}`)).length, MAX_REFERENCE_TAGS);
+  });
+
   it("drops persistent tokens containing control bytes", () => {
     const unsafe = reference("unsafe", { token: "opaque\ncapability" });
     assert.deepEqual(deserializeReferences(JSON.stringify([unsafe])), []);
@@ -479,11 +534,16 @@ describe("ReferenceLibrary selection and mutations", () => {
       now: () => 500,
       idFactory: (_entry, index) => `id-${index}`,
     });
-    const additions = await library.selectFiles("  제작 참고  ");
+    const additions = await library.selectFiles("  제작 참고  ", {
+      source: "직접 제작",
+      tags: "강렬함, 빨간 배경, 강렬함",
+    });
     assert.equal(state.createCount, 2);
     assert.deepEqual(additions.map((item) => item.type), ["image", "video"]);
     assert.deepEqual(additions.map((item) => item.createdAt), [500, 501]);
     assert.equal(additions[0]?.notes, "제작 참고");
+    assert.equal(additions[0]?.source, "직접 제작");
+    assert.deepEqual(additions[0]?.tags, ["강렬함", "빨간 배경"]);
     assert.equal(storage.writes, 1);
     assert.equal(deserializeReferences(storage.values.get(REFERENCE_STORAGE_KEY)).length, 2);
   });
@@ -577,6 +637,19 @@ describe("ReferenceLibrary selection and mutations", () => {
       updated.notes = "외부 변경";
     }
     assert.equal(library.items[0]?.notes, "새 메모");
+  });
+
+  it("updates source and tags metadata independently from notes", async () => {
+    const { adapter } = createHarness();
+    const library = new ReferenceLibrary(adapter, { idFactory: () => "meta" });
+    await library.addEntries([mockFile("meta.png")], "초기 메모", { source: "old", tags: "old" });
+    const updated = await library.updateMetadata("meta", {
+      source: "  새 출처  ",
+      tags: "#강렬함, red, 강렬함",
+    });
+    assert.equal(updated?.notes, "초기 메모");
+    assert.equal(updated?.source, "새 출처");
+    assert.deepEqual(updated?.tags, ["강렬함", "red"]);
   });
 
   it("returns null when updating notes for an unknown id", async () => {

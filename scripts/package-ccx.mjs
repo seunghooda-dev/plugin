@@ -1,18 +1,30 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream } from "node:fs";
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import archiver from "archiver";
+import { deflateRawSync } from "node:zlib";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = join(projectRoot, "dist");
 const releaseRoot = join(projectRoot, "release");
 const forceOverwrite = process.argv.includes("--force");
-const FIXED_ARCHIVE_DATE = new Date("1980-01-01T00:00:00.000Z");
+const FIXED_DOS_TIME = 0;
+const FIXED_DOS_DATE = 33;
+const UTF8_FLAG = 0x0800;
+const DEFLATE_METHOD = 8;
+
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  CRC32_TABLE[index] = value >>> 0;
+}
 
 function verifyDist() {
   const result = spawnSync(process.execPath, [join(projectRoot, "scripts", "verify-dist.mjs")], {
@@ -72,55 +84,123 @@ async function listArchiveFiles(directory = distRoot, prefix = "") {
   return files;
 }
 
+function crc32(buffer) {
+  let value = 0xffffffff;
+  for (const byte of buffer) {
+    value = CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function uint16(value) {
+  const buffer = Buffer.allocUnsafe(2);
+  buffer.writeUInt16LE(value);
+  return buffer;
+}
+
+function uint32(value) {
+  const buffer = Buffer.allocUnsafe(4);
+  buffer.writeUInt32LE(value >>> 0);
+  return buffer;
+}
+
+function makeLocalHeader(file) {
+  return Buffer.concat([
+    uint32(0x04034b50),
+    uint16(20),
+    uint16(UTF8_FLAG),
+    uint16(DEFLATE_METHOD),
+    uint16(FIXED_DOS_TIME),
+    uint16(FIXED_DOS_DATE),
+    uint32(file.crc),
+    uint32(file.compressed.length),
+    uint32(file.source.length),
+    uint16(file.name.length),
+    uint16(0),
+    file.name,
+  ]);
+}
+
+function makeCentralHeader(file, localHeaderOffset) {
+  return Buffer.concat([
+    uint32(0x02014b50),
+    uint16(20),
+    uint16(20),
+    uint16(UTF8_FLAG),
+    uint16(DEFLATE_METHOD),
+    uint16(FIXED_DOS_TIME),
+    uint16(FIXED_DOS_DATE),
+    uint32(file.crc),
+    uint32(file.compressed.length),
+    uint32(file.source.length),
+    uint16(file.name.length),
+    uint16(0),
+    uint16(0),
+    uint16(0),
+    uint16(0),
+    uint32(0o100644 << 16),
+    uint32(localHeaderOffset),
+    file.name,
+  ]);
+}
+
+function makeEndOfCentralDirectory(fileCount, centralDirectorySize, centralDirectoryOffset) {
+  return Buffer.concat([
+    uint32(0x06054b50),
+    uint16(0),
+    uint16(0),
+    uint16(fileCount),
+    uint16(fileCount),
+    uint32(centralDirectorySize),
+    uint32(centralDirectoryOffset),
+    uint16(0),
+  ]);
+}
+
 async function createArchive(outputPath) {
   const archiveFiles = await listArchiveFiles();
   if (archiveFiles.length === 0) {
     throw new Error("dist에 패키징할 파일이 없습니다.");
   }
+  if (archiveFiles.length > 0xffff) {
+    throw new Error("ZIP64가 필요한 파일 수는 지원하지 않습니다.");
+  }
+
+  const preparedFiles = [];
+  for (const file of archiveFiles) {
+    const source = await readFile(file.absolutePath);
+    const compressed = deflateRawSync(source, { level: 9 });
+    if (source.length > 0xffffffff || compressed.length > 0xffffffff) {
+      throw new Error(`ZIP64가 필요한 파일 크기는 지원하지 않습니다: ${file.archivePath}`);
+    }
+    preparedFiles.push({
+      name: Buffer.from(file.archivePath, "utf8"),
+      source,
+      compressed,
+      crc: crc32(source),
+    });
+  }
+
+  const outputChunks = [];
+  const centralDirectoryChunks = [];
+  let offset = 0;
+  for (const file of preparedFiles) {
+    const localHeader = makeLocalHeader(file);
+    outputChunks.push(localHeader, file.compressed);
+    centralDirectoryChunks.push(makeCentralHeader(file, offset));
+    offset += localHeader.length + file.compressed.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralDirectoryChunks);
+  const endOfCentralDirectory = makeEndOfCentralDirectory(
+    preparedFiles.length,
+    centralDirectory.length,
+    offset,
+  );
+  const archive = Buffer.concat([...outputChunks, centralDirectory, endOfCentralDirectory]);
 
   try {
-    await new Promise((resolveArchive, rejectArchive) => {
-      const output = createWriteStream(outputPath, { flags: "wx" });
-      const archive = archiver("zip", { zlib: { level: 9 } });
-      let settled = false;
-
-      const rejectOnce = (error) => {
-        if (!settled) {
-          settled = true;
-          archive.abort();
-          output.destroy();
-          rejectArchive(error);
-        }
-      };
-
-      output.on("close", () => {
-        if (!settled) {
-          settled = true;
-          resolveArchive();
-        }
-      });
-      output.on("error", rejectOnce);
-      archive.on("error", rejectOnce);
-      archive.on("warning", (error) => {
-        if (error.code === "ENOENT") {
-          rejectOnce(error);
-        } else {
-          console.warn(`CCX 압축 경고: ${error.message}`);
-        }
-      });
-
-      archive.pipe(output);
-
-      // 고정 순서와 날짜로 추가해 같은 dist가 바이트 단위로 같은 CCX를 만들게 합니다.
-      for (const file of archiveFiles) {
-        archive.file(file.absolutePath, {
-          name: file.archivePath,
-          date: FIXED_ARCHIVE_DATE,
-          mode: 0o644
-        });
-      }
-      archive.finalize().catch(rejectOnce);
-    });
+    await writeFile(outputPath, archive, { flag: "wx" });
   } catch (error) {
     await rm(outputPath, { force: true });
     throw error;

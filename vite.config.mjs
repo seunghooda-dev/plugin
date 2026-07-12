@@ -7,7 +7,7 @@ export default defineConfig({
     emptyOutDir: true,
     target: "es2020",
     minify: false,
-    sourcemap: true,
+    sourcemap: false,
     lib: {
       entry: resolve(import.meta.dirname, "index.ts"),
       formats: ["cjs"],

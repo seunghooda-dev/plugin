@@ -16,7 +16,19 @@ import type {
   ReframeScope,
   SequenceRangeMode,
 } from "./settings";
-import type { PunchCue, SilenceCutPlan } from "./automation";
+import {
+  MAX_AUTOMATION_MARKERS,
+  assertAutomationMarkerBudget,
+  type PunchCue,
+  type SilenceCutPlan,
+  type TimeRange,
+} from "./automation";
+import {
+  assertSafeZoneAlignment,
+  type SafeZoneAlignment,
+  type SafeZoneMargins,
+  type SocialPlatform,
+} from "./safe-zone";
 import type {
   Action,
   AudioClipTrackItem,
@@ -143,8 +155,19 @@ export interface InsertAssetOptions {
   videoTrackIndex: number;
   audioTrackIndex: number;
   displayName?: string;
+  /** Opaque project+sequence key captured before asynchronous generation began. */
+  expectedContextKey?: string;
   /** Optional still-image duration in seconds, used for removable guide overlays. */
   durationSeconds?: number;
+}
+
+export interface InsertAssetPreflight {
+  assetPath: string;
+  videoTrackIndex: number;
+  audioTrackIndex: number;
+  displayName: string;
+  durationSeconds?: number;
+  expectedContextKey?: string;
 }
 
 export interface AutomationMarkerResult {
@@ -160,6 +183,7 @@ export interface AutomationApplyResult extends AutomationMarkerResult {
 }
 
 export interface AutomationApplyHooks {
+  expectedContextKey?: string;
   onClonePrepared?: (details: {
     sourceGuid: string;
     cloneGuid: string;
@@ -167,11 +191,21 @@ export interface AutomationApplyHooks {
   }) => void | Promise<void>;
 }
 
+export interface AutomationMutationGuard {
+  sourceContextKey?: string;
+}
+
 export interface SafeZoneAlignResult {
   selected: number;
   changed: number;
   skipped: number;
   warnings: string[];
+}
+
+export interface SafeZoneTranslatedPoint {
+  x: number;
+  y: number;
+  space: "normalized" | "pixels";
 }
 
 export function tickTimeSeconds(value: unknown, fallback = 0): number {
@@ -278,6 +312,67 @@ export function sameMediaPath(left: string, right: string): boolean {
   return normalizedLeft !== "" && normalizedLeft === normalizePremierePath(right);
 }
 
+export function validatePremiereImportPath(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ShortFlowError("INVALID_IMPORT_PATH", "가져올 파일 경로는 문자열이어야 합니다.");
+  }
+  const path = value.trim();
+  if (!path || path.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(path)) {
+    throw new ShortFlowError("INVALID_IMPORT_PATH", "가져올 파일 경로가 비어 있거나 안전 제한을 벗어났습니다.");
+  }
+  const slashed = path.replace(/\\/gu, "/");
+  const windowsDrive = /^[a-z]:\//iu.test(slashed);
+  const unc = slashed.startsWith("//") && slashed.split("/").filter(Boolean).length >= 3;
+  const posix = slashed.startsWith("/") && !slashed.startsWith("//");
+  if (!windowsDrive && !unc && !posix) {
+    throw new ShortFlowError("INVALID_IMPORT_PATH", "가져올 파일은 절대 nativePath여야 합니다.");
+  }
+  const parts = slashed.split("/").filter(Boolean);
+  if (parts.some((part) => part === "." || part === "..") || path.endsWith("/") || path.endsWith("\\")) {
+    throw new ShortFlowError("INVALID_IMPORT_PATH", "가져올 파일 경로에 상대 경로 또는 폴더 경로를 사용할 수 없습니다.");
+  }
+  const filename = parts.at(-1) ?? "";
+  if (!filename || filename.endsWith(".") || !/\.[^./\\]+$/u.test(filename)) {
+    throw new ShortFlowError("INVALID_IMPORT_PATH", "가져올 파일 경로에 유효한 파일명과 확장자가 필요합니다.");
+  }
+  return path;
+}
+
+export function prepareInsertAssetPreflight(
+  nativePath: unknown,
+  options: InsertAssetOptions,
+): InsertAssetPreflight {
+  const assetPath = validatePremiereImportPath(nativePath);
+  if (!options || typeof options !== "object") {
+    throw new ShortFlowError("INVALID_INSERT_OPTIONS", "자산 삽입 트랙 설정이 필요합니다.");
+  }
+  const videoTrackIndex = zeroBasedTrackIndex(options.videoTrackIndex);
+  const audioTrackIndex = zeroBasedTrackIndex(options.audioTrackIndex);
+  let duration: number | undefined;
+  if (options.durationSeconds !== undefined) {
+    duration = Number(options.durationSeconds);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 86_400) {
+      throw new ShortFlowError("INVALID_ASSET_DURATION", "가이드 오버레이 길이는 0초 초과 24시간 이하여야 합니다.");
+    }
+  }
+  const displayName = String(options.displayName ?? "자산")
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 120) || "자산";
+  const preflight: InsertAssetPreflight = {
+    assetPath,
+    videoTrackIndex,
+    audioTrackIndex,
+    displayName,
+  };
+  if (duration !== undefined) preflight.durationSeconds = duration;
+  if (typeof options.expectedContextKey === "string" && options.expectedContextKey.trim()) {
+    preflight.expectedContextKey = options.expectedContextKey.trim();
+  }
+  return preflight;
+}
+
 function guidKey(value: unknown): string {
   if (typeof value === "string") {
     return value;
@@ -292,26 +387,64 @@ function guidKey(value: unknown): string {
   }
 }
 
+function contextHash(value: string, seed: number): string {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36).padStart(7, "0");
+}
+
+/** Opaque context identity; it contains no project name, path, or raw host GUID. */
+export function premiereContextKey(projectGuid: unknown, sequenceGuid: unknown): string {
+  const project = guidKey(projectGuid).trim();
+  const sequence = guidKey(sequenceGuid).trim();
+  if (!project || !sequence) {
+    throw new ShortFlowError("INVALID_HOST_CONTEXT", "프로젝트·시퀀스 식별자를 확인하지 못했습니다.");
+  }
+  const source = `${project}\u0000${sequence}`;
+  return `ctx_${contextHash(source, 0x811c9dc5)}_${contextHash(source, 0x9e3779b9)}`;
+}
+
+function expectedContextKey(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || !/^ctx_[a-z0-9]{7}_[a-z0-9]{7}$/u.test(value)) {
+    throw new ShortFlowError("INVALID_HOST_CONTEXT", "Host context key 형식이 올바르지 않습니다.");
+  }
+  return value;
+}
+
 function wait(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-function commitActions(project: Project, actions: readonly Action[], undoLabel: string): boolean {
-  if (actions.length === 0) {
+type ActionFactory = () => Action | readonly Action[];
+
+function actionArray(value: Action | readonly Action[]): readonly Action[] {
+  return Array.isArray(value) ? value : [value];
+}
+
+function commitActionFactories(project: Project, factories: readonly ActionFactory[], undoLabel: string): boolean {
+  if (factories.length === 0) {
     return true;
-  }
-  if (actions.some((action) => !action)) {
-    return false;
   }
   let committed = false;
   let allAdded = true;
   try {
     project.lockedAccess(() => {
       committed = project.executeTransaction((compoundAction) => {
-        for (const action of actions) {
-          if (compoundAction.addAction(action) === false) {
+        for (const factory of factories) {
+          const actions = actionArray(factory());
+          if (actions.length === 0 || actions.some((action) => !action)) {
             allAdded = false;
-            throw new Error("Premiere rejected an action in the compound transaction.");
+            throw new Error("Premiere returned an empty or invalid action.");
+          }
+          for (const action of actions) {
+            if (compoundAction.addAction(action) === false) {
+              allAdded = false;
+              throw new Error("Premiere rejected an action in the compound transaction.");
+            }
           }
         }
       }, undoLabel);
@@ -344,10 +477,15 @@ function assertShortDuration(value: number): void {
 }
 
 export function getRuntimeInfo(): { hostVersion: string; uxpVersion: string } {
-  return {
-    hostVersion: String(uxp.host?.version ?? "unknown"),
-    uxpVersion: String(uxp.versions?.uxp ?? uxp.version ?? "unknown"),
-  };
+  try {
+    return {
+      hostVersion: String(uxp.host?.version ?? "unknown"),
+      uxpVersion: String(uxp.versions?.uxp ?? uxp.version ?? "unknown"),
+    };
+  } catch {
+    // Mock Host and static verification run outside Premiere UXP.
+    return { hostVersion: "unknown", uxpVersion: "unknown" };
+  }
 }
 
 export async function getActiveContext(): Promise<PremiereContext> {
@@ -362,6 +500,32 @@ export async function getActiveContext(): Promise<PremiereContext> {
   return { project, sequence };
 }
 
+function contextKeyOf(context: PremiereContext): string {
+  return premiereContextKey(context.project.guid, context.sequence.guid);
+}
+
+async function getExpectedActiveContext(expectedValue?: string): Promise<PremiereContext & { contextKey: string }> {
+  const expected = expectedContextKey(expectedValue);
+  const context = await getActiveContext();
+  const contextKey = contextKeyOf(context);
+  if (expected && contextKey !== expected) {
+    throw new ShortFlowError("HOST_CONTEXT_CHANGED", "작업 중 활성 프로젝트 또는 시퀀스가 변경되었습니다.");
+  }
+  return { ...context, contextKey };
+}
+
+async function assertActiveContextKey(expected: string): Promise<void> {
+  const context = await getActiveContext();
+  if (contextKeyOf(context) !== expected) {
+    throw new ShortFlowError("HOST_CONTEXT_CHANGED", "작업 중 활성 프로젝트 또는 시퀀스가 변경되었습니다.");
+  }
+}
+
+/** Reads an opaque project+sequence identity without mutating Premiere state. */
+export async function readActiveContextKey(): Promise<string> {
+  return contextKeyOf(await getActiveContext());
+}
+
 export async function setSequencePlayerPosition(seconds: number): Promise<void> {
   if (!Number.isFinite(seconds) || seconds < 0 || seconds > 86_400) {
     throw new ShortFlowError("INVALID_PLAYHEAD", "이동할 재생 위치가 올바르지 않습니다.");
@@ -371,14 +535,16 @@ export async function setSequencePlayerPosition(seconds: number): Promise<void> 
   if (!moved) throw new ShortFlowError("PLAYHEAD_MOVE_FAILED", "Premiere 재생 헤드를 이동하지 못했습니다.");
 }
 
-export async function removeVerifiedClonedSequence(sourceGuid: string, cloneGuid: string): Promise<void> {
+export async function removeVerifiedClonedSequenceFromProject(
+  project: Project,
+  sourceGuid: string,
+  cloneGuid: string,
+): Promise<void> {
   const sourceKey = sourceGuid.trim();
   const cloneKey = cloneGuid.trim();
   if (!sourceKey || !cloneKey || sourceKey === cloneKey) {
     throw new ShortFlowError("INVALID_CLONE_ID", "원본과 복제 시퀀스 식별자가 올바르지 않습니다.");
   }
-  const project = await ppro.Project.getActiveProject();
-  if (!project) throw new ShortFlowError("NO_ACTIVE_PROJECT", "활성 Premiere Pro 프로젝트가 없습니다.");
   const sequences = await project.getSequences();
   const source = sequences.find((sequence) => guidKey(sequence.guid) === sourceKey);
   const clone = sequences.find((sequence) => guidKey(sequence.guid) === cloneKey);
@@ -387,10 +553,15 @@ export async function removeVerifiedClonedSequence(sourceGuid: string, cloneGuid
   await project.setActiveSequence(source);
   const item = await clone.getProjectItem();
   const parent = item.getParentBin();
-  const action = parent.createRemoveItemAction(item);
-  if (!commitActions(project, [action], "ShortFlow: 실패한 복제 시퀀스 제거")) {
+  if (!commitActionFactories(project, [() => parent.createRemoveItemAction(item)], "ShortFlow: 실패한 복제 시퀀스 제거")) {
     throw new ShortFlowError("CLONE_REMOVE_FAILED", "실패한 복제 시퀀스를 제거하지 못했습니다.");
   }
+}
+
+export async function removeVerifiedClonedSequence(sourceGuid: string, cloneGuid: string): Promise<void> {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new ShortFlowError("NO_ACTIVE_PROJECT", "활성 Premiere Pro 프로젝트가 없습니다.");
+  await removeVerifiedClonedSequenceFromProject(project, sourceGuid, cloneGuid);
 }
 
 export async function readPlayerPositionSeconds(): Promise<number> {
@@ -407,6 +578,94 @@ function isVideoTrackItem(item: unknown): item is VideoClipTrackItem {
   );
 }
 
+async function trackItemIsSelected(item: unknown): Promise<boolean> {
+  if (!item || typeof item !== "object" || !("getIsSelected" in item)) {
+    return false;
+  }
+  const getIsSelected = (item as { getIsSelected?: unknown }).getIsSelected;
+  if (typeof getIsSelected !== "function") {
+    return false;
+  }
+  try {
+    return Boolean(await getIsSelected.call(item));
+  } catch {
+    return false;
+  }
+}
+
+function premiereClipTrackItemType(): unknown {
+  try {
+    return ppro.Constants?.TrackItemType?.CLIP;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeTrackItems(items: unknown): Array<VideoClipTrackItem | AudioClipTrackItem> {
+  return Array.isArray(items) ? items as Array<VideoClipTrackItem | AudioClipTrackItem> : [];
+}
+
+async function getClipTrackItems(track: unknown): Promise<Array<VideoClipTrackItem | AudioClipTrackItem>> {
+  if (!track || typeof track !== "object" || !("getTrackItems" in track)) {
+    return [];
+  }
+  const getTrackItems = (track as { getTrackItems?: unknown }).getTrackItems;
+  if (typeof getTrackItems !== "function") {
+    return [];
+  }
+  const clipType = premiereClipTrackItemType();
+  if (clipType !== undefined) {
+    try {
+      return normalizeTrackItems(await getTrackItems.call(track, clipType, false));
+    } catch {
+      // Some test doubles and Host shims expose a no-argument getTrackItems.
+    }
+  }
+  try {
+    return normalizeTrackItems(await getTrackItems.call(track));
+  } catch {
+    return [];
+  }
+}
+
+async function scanSelectedTrackItems(sequence: Sequence): Promise<Array<VideoClipTrackItem | AudioClipTrackItem>> {
+  const selected: Array<VideoClipTrackItem | AudioClipTrackItem> = [];
+  const scanTracks = async (
+    countMethod: "getVideoTrackCount" | "getAudioTrackCount",
+    trackMethod: "getVideoTrack" | "getAudioTrack",
+  ): Promise<void> => {
+    const countFn = (sequence as unknown as Record<string, unknown>)[countMethod];
+    const trackFn = (sequence as unknown as Record<string, unknown>)[trackMethod];
+    if (typeof countFn !== "function" || typeof trackFn !== "function") {
+      return;
+    }
+    let count = 0;
+    try {
+      count = Math.max(0, Math.min(200, Math.floor(Number(await countFn.call(sequence)) || 0)));
+    } catch {
+      return;
+    }
+    for (let index = 0; index < count; index += 1) {
+      let track: unknown;
+      try {
+        track = await trackFn.call(sequence, index);
+      } catch {
+        continue;
+      }
+      for (const item of await getClipTrackItems(track)) {
+        if (await trackItemIsSelected(item)) {
+          selected.push(item);
+        }
+      }
+    }
+  };
+  await Promise.all([
+    scanTracks("getVideoTrackCount", "getVideoTrack"),
+    scanTracks("getAudioTrackCount", "getAudioTrack"),
+  ]);
+  return selected;
+}
+
 async function readSelectionRange(sequence: Sequence): Promise<{
   count: number;
   videoCount: number;
@@ -415,21 +674,44 @@ async function readSelectionRange(sequence: Sequence): Promise<{
   items: Array<VideoClipTrackItem | AudioClipTrackItem>;
 }> {
   try {
-    const selection = await sequence.getSelection();
-    const items = selection ? await selection.getTrackItems() : [];
+    let items: Array<VideoClipTrackItem | AudioClipTrackItem> = [];
+    try {
+      const selection = await sequence.getSelection();
+      items = selection ? normalizeTrackItems(await selection.getTrackItems()) : [];
+    } catch {
+      items = [];
+    }
+    if (items.length === 0) {
+      items = await scanSelectedTrackItems(sequence);
+    }
+    const itemRanges = await Promise.all(items.map(async (item) => {
+      const video = isVideoTrackItem(item);
+      if (typeof item?.getStartTime !== "function" || typeof item?.getEndTime !== "function") {
+        return { video, start: Number.NaN, end: Number.NaN };
+      }
+      try {
+        const [startTime, endTime] = await Promise.all([
+          item.getStartTime(),
+          item.getEndTime(),
+        ]);
+        return {
+          video,
+          start: tickTimeSeconds(startTime, Number.NaN),
+          end: tickTimeSeconds(endTime, Number.NaN),
+        };
+      } catch {
+        return { video, start: Number.NaN, end: Number.NaN };
+      }
+    }));
     let start = Number.POSITIVE_INFINITY;
     let end = Number.NEGATIVE_INFINITY;
     let videoCount = 0;
-    for (const item of items) {
-      if (isVideoTrackItem(item)) {
+    for (const range of itemRanges) {
+      if (range.video) {
         videoCount += 1;
       }
-      if (typeof item?.getStartTime === "function" && typeof item?.getEndTime === "function") {
-        const itemStart = tickTimeSeconds(await item.getStartTime(), Number.NaN);
-        const itemEnd = tickTimeSeconds(await item.getEndTime(), Number.NaN);
-        if (Number.isFinite(itemStart)) start = Math.min(start, itemStart);
-        if (Number.isFinite(itemEnd)) end = Math.max(end, itemEnd);
-      }
+      if (Number.isFinite(range.start)) start = Math.min(start, range.start);
+      if (Number.isFinite(range.end)) end = Math.max(end, range.end);
     }
     return {
       count: items.length,
@@ -458,29 +740,68 @@ async function safeTime(
   }
 }
 
-export async function readSequenceStatus(context?: PremiereContext): Promise<SequenceStatus> {
-  const { project, sequence } = context ?? await getActiveContext();
-  const frame = await sequence.getFrameSize();
-  const sequenceEnd = await safeTime(sequence, "getEndTime", 0);
-  const inPoint = await safeTime(sequence, "getInPoint", 0);
-  const outPoint = await safeTime(sequence, "getOutPoint", sequenceEnd);
-  const playerPosition = await safeTime(sequence, "getPlayerPosition", 0);
-  const selection = await readSelectionRange(sequence);
+async function safeFrameRate(sequence: Sequence): Promise<number> {
+  try {
+    return Number((await sequence.getSettings()).getVideoFrameRate().value) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export interface ReadSequenceStatusOptions {
+  /** Selection details are unnecessary for basic QC and can be expensive on large selections. */
+  includeSelection?: boolean;
+  /** The basic QC panel does not use the playhead position. */
+  includePlayerPosition?: boolean;
+  /** Reject the read if the active project/sequence changed after the caller captured its context. */
+  expectedContextKey?: string;
+}
+
+export async function readSequenceStatus(
+  context?: PremiereContext,
+  options: ReadSequenceStatusOptions = {},
+): Promise<SequenceStatus> {
+  const { project, sequence } = context ?? await getExpectedActiveContext(options.expectedContextKey);
+  const includeSelection = options.includeSelection !== false;
+  const includePlayerPosition = options.includePlayerPosition !== false;
+  // Premiere UXP calls cross the Host boundary. These values are independent,
+  // read-only snapshots, so start them together instead of accumulating one
+  // bridge round-trip per field.
+  const [
+    frame,
+    sequenceEnd,
+    inPoint,
+    rawOutPoint,
+    playerPosition,
+    selection,
+    rawVideoTrackCount,
+    rawAudioTrackCount,
+    rawCaptionTrackCount,
+    frameRate,
+  ] = await Promise.all([
+    sequence.getFrameSize(),
+    safeTime(sequence, "getEndTime", 0),
+    safeTime(sequence, "getInPoint", 0),
+    safeTime(sequence, "getOutPoint", Number.NaN),
+    includePlayerPosition ? safeTime(sequence, "getPlayerPosition", 0) : Promise.resolve(0),
+    includeSelection
+      ? readSelectionRange(sequence)
+      : Promise.resolve({ count: 0, videoCount: 0, start: null, end: null, items: [] }),
+    sequence.getVideoTrackCount(),
+    sequence.getAudioTrackCount(),
+    sequence.getCaptionTrackCount(),
+    safeFrameRate(sequence),
+  ]);
+  const outPoint = Number.isFinite(rawOutPoint) ? rawOutPoint : sequenceEnd;
   const effective = resolveTimeRange({
     mode: "inout",
     sequenceEnd,
     inPoint,
     outPoint,
   });
-  const videoTrackCount = Number(await sequence.getVideoTrackCount()) || 0;
-  const audioTrackCount = Number(await sequence.getAudioTrackCount()) || 0;
-  const captionTrackCount = Number(await sequence.getCaptionTrackCount()) || 0;
-  let frameRate = 0;
-  try {
-    frameRate = Number((await sequence.getSettings()).getVideoFrameRate().value) || 0;
-  } catch {
-    frameRate = 0;
-  }
+  const videoTrackCount = Number(rawVideoTrackCount) || 0;
+  const audioTrackCount = Number(rawAudioTrackCount) || 0;
+  const captionTrackCount = Number(rawCaptionTrackCount) || 0;
 
   return {
     hostVersion: getRuntimeInfo().hostVersion,
@@ -515,22 +836,49 @@ export interface SequenceMediaQCStatus {
   truncated: boolean;
 }
 
+export interface SequenceMediaQCScanOptions {
+  context?: PremiereContext;
+  concurrency?: number;
+}
+
+const MEDIA_QC_SCAN_CONCURRENCY = 16;
+
+function mediaQCConcurrency(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return MEDIA_QC_SCAN_CONCURRENCY;
+  return Math.min(32, Math.max(1, Math.round(value)));
+}
+
+async function forEachLimited<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const runner = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await worker(items[index]!, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => runner()));
+}
+
 /** Scans timeline-backed project items without exposing native media paths. */
-export async function scanSequenceMediaQC(maximumItems = 10_000): Promise<SequenceMediaQCStatus> {
-  const { sequence } = await getActiveContext();
+export async function scanSequenceMediaQC(
+  maximumItems = 10_000,
+  options: SequenceMediaQCScanOptions = {},
+): Promise<SequenceMediaQCStatus> {
+  const { sequence } = options.context ?? await getActiveContext();
   const limit = Math.min(10_000, Math.max(1, Math.round(maximumItems)));
+  const concurrency = mediaQCConcurrency(options.concurrency);
   const offlineMedia = new Set<string>();
   const guideOverlays = new Set<string>();
   const seenProjectItems = new Set<string>();
-  let scannedItems = 0;
+  const itemsToInspect: Array<VideoClipTrackItem | AudioClipTrackItem> = [];
   let truncated = false;
 
   const inspect = async (item: VideoClipTrackItem | AudioClipTrackItem): Promise<void> => {
-    if (scannedItems >= limit) {
-      truncated = true;
-      return;
-    }
-    scannedItems += 1;
     const name = String(await item.getName()).slice(0, 260);
     if (name.includes("__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__")) guideOverlays.add(name);
     const projectItem = await item.getProjectItem();
@@ -544,28 +892,35 @@ export async function scanSequenceMediaQC(maximumItems = 10_000): Promise<Sequen
     }
   };
 
+  const enqueue = (item: VideoClipTrackItem | AudioClipTrackItem): boolean => {
+    if (itemsToInspect.length >= limit) {
+      truncated = true;
+      return false;
+    }
+    itemsToInspect.push(item);
+    return true;
+  };
   const videoTracks = Number(await sequence.getVideoTrackCount()) || 0;
   for (let index = 0; index < videoTracks && !truncated; index += 1) {
     const track = await sequence.getVideoTrack(index);
-    const items = track?.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) ?? [];
+    const items = await getClipTrackItems(track);
     for (const item of items) {
-      await inspect(item);
-      if (truncated) break;
+      if (!enqueue(item)) break;
     }
   }
   const audioTracks = Number(await sequence.getAudioTrackCount()) || 0;
   for (let index = 0; index < audioTracks && !truncated; index += 1) {
     const track = await sequence.getAudioTrack(index);
-    const items = track?.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) ?? [];
+    const items = await getClipTrackItems(track);
     for (const item of items) {
-      await inspect(item);
-      if (truncated) break;
+      if (!enqueue(item)) break;
     }
   }
+  await forEachLimited(itemsToInspect, concurrency, inspect);
   return {
     offlineMedia: [...offlineMedia],
     guideOverlays: [...guideOverlays],
-    scannedItems,
+    scannedItems: itemsToInspect.length,
     truncated,
   };
 }
@@ -575,7 +930,10 @@ export async function runSequenceQC(
   expectedHeight: number,
   maxDuration: number,
 ): Promise<{ status: SequenceStatus; items: QCItem[] }> {
-  const status = await readSequenceStatus();
+  const status = await readSequenceStatus(undefined, {
+    includeSelection: false,
+    includePlayerPosition: false,
+  });
   return {
     status,
     items: validateShort({
@@ -616,16 +974,22 @@ async function renameSequence(project: Project, sequence: Sequence, requestedNam
   if (!projectItem || typeof projectItem.createSetNameAction !== "function") {
     return String(sequence.name ?? name);
   }
-  if (!commitActions(project, [projectItem.createSetNameAction(name)], "ShortFlow: 시퀀스 이름 변경")) {
+  if (!commitActionFactories(project, [() => projectItem.createSetNameAction(name)], "ShortFlow: 시퀀스 이름 변경")) {
     throw new ShortFlowError("RENAME_FAILED", "복제된 시퀀스의 이름을 변경하지 못했습니다.");
   }
   return name;
 }
 
-async function cloneSequence(project: Project, source: Sequence, name: string): Promise<Sequence> {
+async function cloneSequence(
+  project: Project,
+  source: Sequence,
+  name: string,
+  beforeCommit?: () => void | Promise<void>,
+): Promise<Sequence> {
   const before = await project.getSequences();
   const beforeGuids = new Set(before.map((sequence) => guidKey(sequence.guid)));
-  if (!commitActions(project, [source.createCloneAction()], "ShortFlow: 원본 시퀀스 복제")) {
+  await beforeCommit?.();
+  if (!commitActionFactories(project, [() => source.createCloneAction()], "ShortFlow: 원본 시퀀스 복제")) {
     throw new ShortFlowError("CLONE_FAILED", "원본 시퀀스를 복제하지 못했습니다.");
   }
 
@@ -699,7 +1063,7 @@ async function setSequenceFrame(
     warnings.push("필드 순서는 기존 값을 유지했습니다.");
   }
 
-  if (!commitActions(project, [sequence.createSetSettingsAction(settings)], "ShortFlow: 숏폼 프레임 설정")) {
+  if (!commitActionFactories(project, [() => sequence.createSetSettingsAction(settings)], "ShortFlow: 숏폼 프레임 설정")) {
     throw new ShortFlowError("FRAME_COMMIT_FAILED", "숏폼 프레임 설정을 시퀀스에 적용하지 못했습니다.");
   }
   const verified = await sequence.getFrameSize();
@@ -755,9 +1119,9 @@ function setSequenceRange(project: Project, sequence: Sequence, range: ResolvedT
   }
   const start = ppro.TickTime.createWithSeconds(range.start);
   const end = ppro.TickTime.createWithSeconds(range.end);
-  if (!commitActions(
+  if (!commitActionFactories(
     project,
-    [sequence.createSetInPointAction(start), sequence.createSetOutPointAction(end)],
+    [() => sequence.createSetInPointAction(start), () => sequence.createSetOutPointAction(end)],
     "ShortFlow: 숏폼 인/아웃 설정",
   )) {
     throw new ShortFlowError("RANGE_COMMIT_FAILED", "시퀀스 인/아웃 구간을 적용하지 못했습니다.");
@@ -780,8 +1144,8 @@ async function allVideoItems(sequence: Sequence, scope: ReframeScope): Promise<V
   for (let trackIndex = 0; trackIndex < trackLimit; trackIndex += 1) {
     const track = await sequence.getVideoTrack(trackIndex);
     if (!track) continue;
-    const trackItems = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-    items.push(...trackItems);
+    const trackItems = await getClipTrackItems(track);
+    items.push(...trackItems.filter(isVideoTrackItem));
   }
   return items;
 }
@@ -870,7 +1234,7 @@ async function buildReframeActions(
   targetHeight: number,
   mode: ReframeMode,
   center: boolean,
-): Promise<{ actions: Action[]; warning?: string }> {
+): Promise<{ actions: ActionFactory[]; warning?: string }> {
   if (typeof item.isAdjustmentLayer === "function" && await item.isAdjustmentLayer()) {
     return { actions: [], warning: "조정 레이어는 건너뛰었습니다." };
   }
@@ -879,7 +1243,7 @@ async function buildReframeActions(
     return { actions: [], warning: "Motion 구성 요소를 찾지 못한 클립을 건너뛰었습니다." };
   }
   const params = await motionParams(component);
-  const actions: Action[] = [];
+  const actions: ActionFactory[] = [];
   const warnings: string[] = [];
 
   if (mode !== "none" && params.scale) {
@@ -899,8 +1263,10 @@ async function buildReframeActions(
           targetHeight,
           mode,
         );
-        const keyframe = params.scale.createKeyframe(nextScale);
-        actions.push(params.scale.createSetValueAction(keyframe, true));
+        actions.push(() => {
+          const keyframe = params.scale!.createKeyframe(nextScale);
+          return params.scale!.createSetValueAction(keyframe, true);
+        });
       }
     }
   }
@@ -912,9 +1278,11 @@ async function buildReframeActions(
       const current: Keyframe = await params.position.getStartValue();
       const centered = centeredPosition(keyframeValue(current), targetWidth, targetHeight);
       if (centered) {
-        const point: PointF = ppro.PointF(centered.x, centered.y);
-        const keyframe = params.position.createKeyframe(point);
-        actions.push(params.position.createSetValueAction(keyframe, true));
+        actions.push(() => {
+          const point: PointF = ppro.PointF(centered.x, centered.y);
+          const keyframe = params.position!.createKeyframe(point);
+          return params.position!.createSetValueAction(keyframe, true);
+        });
       } else {
         warnings.push("위치 값 형식을 인식하지 못한 클립이 있습니다.");
       }
@@ -943,7 +1311,7 @@ async function reframeSequence(
     if (await overlapsRange(item, range)) items.push(item);
   }
   const limited = items.slice(0, 500);
-  const actions: Action[] = [];
+  const actions: ActionFactory[] = [];
   const warnings: string[] = [];
   let changed = 0;
   for (const item of limited) {
@@ -969,7 +1337,7 @@ async function reframeSequence(
   if (items.length > limited.length) {
     warnings.push(`안전 제한 때문에 ${items.length - limited.length}개 클립은 건너뛰었습니다.`);
   }
-  if (actions.length > 0 && !commitActions(project, actions, "ShortFlow: 클립 리프레임")) {
+  if (actions.length > 0 && !commitActionFactories(project, actions, "ShortFlow: 클립 리프레임")) {
     throw new ShortFlowError("REFRAME_COMMIT_FAILED", "클립 리프레임 작업을 적용하지 못했습니다.");
   }
   return {
@@ -1105,12 +1473,12 @@ export async function addStoryMarkers(hookSeconds: number, ctaSeconds: number): 
     throw new ShortFlowError("EMPTY_RANGE", "마커를 배치할 유효한 구간이 없습니다.");
   }
   const markerCollection = await ppro.Markers.getMarkers(sequence);
-  const actions: Action[] = [];
+  const actions: ActionFactory[] = [];
   const commentMarkerType = ppro.Marker.MARKER_TYPE_COMMENT;
   const hookDuration = Math.min(Math.max(0, hookSeconds), range.duration);
   const ctaDuration = Math.min(Math.max(0, ctaSeconds), range.duration);
   if (hookDuration > 0) {
-    actions.push(markerCollection.createAddMarkerAction(
+    actions.push(() => markerCollection.createAddMarkerAction(
       "HOOK",
       commentMarkerType,
       ppro.TickTime.createWithSeconds(range.start),
@@ -1119,7 +1487,7 @@ export async function addStoryMarkers(hookSeconds: number, ctaSeconds: number): 
     ));
   }
   if (ctaDuration > 0) {
-    actions.push(markerCollection.createAddMarkerAction(
+    actions.push(() => markerCollection.createAddMarkerAction(
       "CTA",
       commentMarkerType,
       ppro.TickTime.createWithSeconds(Math.max(range.start, range.end - ctaDuration)),
@@ -1130,18 +1498,95 @@ export async function addStoryMarkers(hookSeconds: number, ctaSeconds: number): 
   if (actions.length === 0) {
     throw new ShortFlowError("NO_MARKERS_TO_ADD", "훅 또는 CTA 길이를 0초보다 크게 설정해 주세요.");
   }
-  if (!commitActions(project, actions, "ShortFlow: HOOK/CTA 마커 추가")) {
+  if (!commitActionFactories(project, actions, "ShortFlow: HOOK/CTA 마커 추가")) {
     throw new ShortFlowError("MARKER_COMMIT_FAILED", "스토리 마커를 추가하지 못했습니다.");
   }
   return actions.length;
 }
 
-function assertAutomationPlan(plan: SilenceCutPlan, cues: readonly PunchCue[]): void {
-  if (!plan || !Array.isArray(plan.cuts) || !Array.isArray(cues)) {
+function assertAutomationRanges(
+  ranges: readonly TimeRange[],
+  label: string,
+  sourceDuration: number,
+): number {
+  let previousEnd = 0;
+  let total = 0;
+  for (let index = 0; index < ranges.length; index += 1) {
+    const item = ranges[index];
+    if (
+      !item || !Number.isFinite(item.start) || !Number.isFinite(item.end) || !Number.isFinite(item.duration) ||
+      item.start < 0 || item.end <= item.start || item.end > sourceDuration ||
+      Math.abs(item.duration - (item.end - item.start)) > 1e-6 ||
+      (index > 0 && item.start < previousEnd - 1e-6)
+    ) {
+      throw new ShortFlowError("INVALID_AUTOMATION_PLAN", `${label} ${index + 1}번 시간 범위가 올바르지 않습니다.`);
+    }
+    previousEnd = item.end;
+    total += item.duration;
+  }
+  return total;
+}
+
+export function assertAutomationPlan(plan: SilenceCutPlan, cues: readonly PunchCue[]): void {
+  if (
+    !plan || !Array.isArray(plan.cuts) || !Array.isArray(plan.keeps) ||
+    !Array.isArray(plan.speech) || !Array.isArray(cues)
+  ) {
     throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 편집안 데이터가 올바르지 않습니다.");
   }
-  if (plan.cuts.length + cues.length > 500) {
-    throw new ShortFlowError("TOO_MANY_AUTOMATION_MARKERS", "자동 편집 마커는 한 번에 최대 500개까지 추가할 수 있습니다.");
+  if (
+    !Number.isFinite(plan.sourceDuration) || plan.sourceDuration <= 0 ||
+    !Number.isFinite(plan.outputDuration) || plan.outputDuration < 0 ||
+    !Number.isFinite(plan.removedDuration) || plan.removedDuration < 0 ||
+    !Number.isFinite(plan.compressionRatio) || plan.compressionRatio < 0 || plan.compressionRatio > 1
+  ) {
+    throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 편집안 길이 요약이 올바르지 않습니다.");
+  }
+  const removed = assertAutomationRanges(plan.cuts, "컷", plan.sourceDuration);
+  const kept = assertAutomationRanges(plan.keeps, "유지", plan.sourceDuration);
+  assertAutomationRanges(plan.speech, "발화", plan.sourceDuration);
+  if (plan.cuts.some((cut) => plan.speech.some((speech) => cut.start < speech.end && cut.end > speech.start))) {
+    throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 컷이 보호해야 할 실제 발화 구간을 침범합니다.");
+  }
+  if (
+    Math.abs(removed - plan.removedDuration) > 1e-6 ||
+    Math.abs(kept - plan.outputDuration) > 1e-6 ||
+    Math.abs(plan.removedDuration + plan.outputDuration - plan.sourceDuration) > 1e-6 ||
+    Math.abs(plan.compressionRatio - plan.outputDuration / plan.sourceDuration) > 1e-6
+  ) {
+    throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 편집안의 컷·유지 길이 합계가 원본 길이와 일치하지 않습니다.");
+  }
+  const partition = [...plan.cuts, ...plan.keeps].sort((left, right) => left.start - right.start || left.end - right.end);
+  let cursor = 0;
+  for (const item of partition) {
+    if (Math.abs(item.start - cursor) > 1e-6) {
+      throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 편집안의 컷·유지 구간에 공백 또는 겹침이 있습니다.");
+    }
+    cursor = item.end;
+  }
+  if (Math.abs(cursor - plan.sourceDuration) > 1e-6) {
+    throw new ShortFlowError("INVALID_AUTOMATION_PLAN", "자동 편집안의 컷·유지 구간이 원본 전체를 덮지 않습니다.");
+  }
+  let previousCueEnd = 0;
+  for (let index = 0; index < cues.length; index += 1) {
+    const cue = cues[index];
+    if (
+      !cue || !Number.isFinite(cue.start) || !Number.isFinite(cue.end) || !Number.isFinite(cue.scale) ||
+      cue.start < 0 || cue.end <= cue.start || cue.end > plan.sourceDuration ||
+      cue.scale < 101 || cue.scale > 150 || typeof cue.reason !== "string" || typeof cue.text !== "string" ||
+      (index > 0 && cue.start < previousCueEnd - 1e-6)
+    ) {
+      throw new ShortFlowError("INVALID_AUTOMATION_PLAN", `펀치인 ${index + 1}번 범위가 올바르지 않습니다.`);
+    }
+    previousCueEnd = cue.end;
+  }
+  try {
+    assertAutomationMarkerBudget(plan.cuts.length, cues.length);
+  } catch {
+    throw new ShortFlowError(
+      "TOO_MANY_AUTOMATION_MARKERS",
+      `자동 편집 마커는 컷과 펀치인을 합쳐 한 번에 최대 ${MAX_AUTOMATION_MARKERS}개까지 추가할 수 있습니다.`,
+    );
   }
 }
 
@@ -1150,14 +1595,15 @@ async function addAutomationMarkersToSequence(
   sequence: Sequence,
   plan: SilenceCutPlan,
   cues: readonly PunchCue[],
+  beforeCommit?: () => Promise<void>,
 ): Promise<AutomationMarkerResult> {
   assertAutomationPlan(plan, cues);
   const markerCollection = await ppro.Markers.getMarkers(sequence);
   const markerType = ppro.Marker.MARKER_TYPE_COMMENT;
-  const actions: Action[] = [];
+  const actions: ActionFactory[] = [];
   for (const [index, cut] of plan.cuts.entries()) {
     if (!Number.isFinite(cut.start) || !Number.isFinite(cut.duration) || cut.duration <= 0) continue;
-    actions.push(markerCollection.createAddMarkerAction(
+    actions.push(() => markerCollection.createAddMarkerAction(
       `SF CUT ${String(index + 1).padStart(2, "0")}`,
       markerType,
       ppro.TickTime.createWithSeconds(Math.max(0, cut.start)),
@@ -1168,7 +1614,7 @@ async function addAutomationMarkersToSequence(
   const cutMarkers = actions.length;
   for (const [index, cue] of cues.entries()) {
     if (!Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end <= cue.start) continue;
-    actions.push(markerCollection.createAddMarkerAction(
+    actions.push(() => markerCollection.createAddMarkerAction(
       `SF ZOOM ${String(index + 1).padStart(2, "0")}`,
       markerType,
       ppro.TickTime.createWithSeconds(Math.max(0, cue.start)),
@@ -1179,7 +1625,8 @@ async function addAutomationMarkersToSequence(
   if (actions.length === 0) {
     throw new ShortFlowError("NO_AUTOMATION_MARKERS", "추가할 자동 편집 추천 마커가 없습니다.");
   }
-  if (!commitActions(project, actions, "ShortFlow: 자동 컷/펀치인 추천 마커")) {
+  await beforeCommit?.();
+  if (!commitActionFactories(project, actions, "ShortFlow: 자동 컷/펀치인 추천 마커")) {
     throw new ShortFlowError("AUTOMATION_MARKER_COMMIT_FAILED", "자동 편집 추천 마커를 추가하지 못했습니다.");
   }
   return { cutMarkers, punchMarkers: actions.length - cutMarkers };
@@ -1189,15 +1636,16 @@ async function addAutomationMarkersToSequence(
 export async function addAutomationMarkers(
   plan: SilenceCutPlan,
   cues: readonly PunchCue[],
+  guard: AutomationMutationGuard = {},
 ): Promise<AutomationMarkerResult> {
-  const { project, sequence } = await getActiveContext();
-  return addAutomationMarkersToSequence(project, sequence, plan, cues);
+  const { project, sequence, contextKey } = await getExpectedActiveContext(guard.sourceContextKey);
+  return addAutomationMarkersToSequence(project, sequence, plan, cues, () => assertActiveContextKey(contextKey));
 }
 
 async function buildPunchInActions(
   item: VideoClipTrackItem,
   cues: readonly PunchCue[],
-): Promise<{ actions: Action[]; changed: boolean; warning?: string }> {
+): Promise<{ actions: ActionFactory[]; changed: boolean; warning?: string }> {
   if (typeof item.isAdjustmentLayer === "function" && await item.isAdjustmentLayer()) {
     return { actions: [], changed: false, warning: "조정 레이어는 펀치인에서 제외했습니다." };
   }
@@ -1235,11 +1683,13 @@ async function buildPunchInActions(
     keyframes.set(Math.min(clipDuration, localEnd + transition), startValue);
   }
   if (keyframes.size === 0) return { actions: [], changed: false };
-  const actions: Action[] = [scale.createSetTimeVaryingAction(true)];
+  const actions: ActionFactory[] = [() => scale.createSetTimeVaryingAction(true)];
   for (const [time, value] of [...keyframes.entries()].sort((left, right) => left[0] - right[0])) {
-    const keyframe = scale.createKeyframe(value);
-    keyframe.position = ppro.TickTime.createWithSeconds(time);
-    actions.push(scale.createAddKeyframeAction(keyframe));
+    actions.push(() => {
+      const keyframe = scale.createKeyframe(value);
+      keyframe.position = ppro.TickTime.createWithSeconds(time);
+      return scale.createAddKeyframeAction(keyframe);
+    });
   }
   return { actions, changed: true };
 }
@@ -1255,111 +1705,211 @@ export async function applyAutomationPlan(
   hooks: AutomationApplyHooks = {},
 ): Promise<AutomationApplyResult> {
   assertAutomationPlan(plan, cues);
-  const { project, sequence: source } = await getActiveContext();
+  const { project, sequence: source } = await getExpectedActiveContext(hooks.expectedContextKey);
+  const sourceContextKey = premiereContextKey(project.guid, source.guid);
   const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  const clone = await cloneSequence(project, source, `${String(source.name ?? "Sequence")}_ShortFlow_Auto_${timestamp}`);
-  const sequenceName = await renameSequence(project, clone, `${String(source.name ?? "Sequence")}_ShortFlow_Auto_${timestamp}`);
-  await project.setActiveSequence(clone);
-  await hooks.onClonePrepared?.({
-    sourceGuid: guidKey(source.guid),
-    cloneGuid: guidKey(clone.guid),
-    sequenceName,
-  });
-  const markerResult = await addAutomationMarkersToSequence(project, clone, plan, cues);
-  const items = await allVideoItems(clone, "video");
-  const actions: Action[] = [];
-  const warnings: string[] = [];
-  let punchedClips = 0;
-  let skippedClips = 0;
-  for (const item of items.slice(0, 500)) {
-    try {
-      const result = await buildPunchInActions(item, cues);
-      actions.push(...result.actions);
-      if (result.changed) punchedClips += 1;
-      else if (result.warning) skippedClips += 1;
-      if (result.warning) warnings.push(result.warning);
-    } catch (error) {
-      skippedClips += 1;
-      warnings.push(`펀치인 적용 실패: ${errorMessage(error)}`);
+  const clone = await cloneSequence(
+    project,
+    source,
+    `${String(source.name ?? "Sequence")}_ShortFlow_Auto_${timestamp}`,
+    () => assertActiveContextKey(sourceContextKey),
+  );
+  const sourceGuid = guidKey(source.guid);
+  const cloneGuid = guidKey(clone.guid);
+  const cloneContextKey = premiereContextKey(project.guid, clone.guid);
+  try {
+    const sequenceName = await renameSequence(project, clone, `${String(source.name ?? "Sequence")}_ShortFlow_Auto_${timestamp}`);
+    await project.setActiveSequence(clone);
+    await assertActiveContextKey(cloneContextKey);
+    await hooks.onClonePrepared?.({ sourceGuid, cloneGuid, sequenceName });
+    const markerResult = await addAutomationMarkersToSequence(project, clone, plan, cues, () => assertActiveContextKey(cloneContextKey));
+    const items = await allVideoItems(clone, "video");
+    const actions: ActionFactory[] = [];
+    const warnings: string[] = [];
+    let punchedClips = 0;
+    let skippedClips = 0;
+    for (const item of items.slice(0, 500)) {
+      try {
+        const result = await buildPunchInActions(item, cues);
+        actions.push(...result.actions);
+        if (result.changed) punchedClips += 1;
+        else if (result.warning) skippedClips += 1;
+        if (result.warning) warnings.push(result.warning);
+      } catch (error) {
+        skippedClips += 1;
+        warnings.push(`펀치인 적용 실패: ${errorMessage(error)}`);
+      }
     }
+    await assertActiveContextKey(cloneContextKey);
+    if (actions.length > 0 && !commitActionFactories(project, actions, "ShortFlow: 비파괴 펀치인 적용")) {
+      warnings.push("펀치인 키프레임 트랜잭션이 거부되어 추천 마커만 유지했습니다.");
+      punchedClips = 0;
+    }
+    if (plan.cuts.length > 0) {
+      warnings.unshift("Premiere 공개 UXP API에는 시간 지점 Razor 액션이 없어 무음 구간은 복제 시퀀스의 SF CUT 검토 마커로 남겼습니다.");
+    }
+    return {
+      ...markerResult,
+      sequenceName,
+      punchedClips,
+      skippedClips,
+      warnings: [...new Set(warnings)].slice(0, 30),
+    };
+  } catch (error) {
+    try {
+      await removeVerifiedClonedSequenceFromProject(project, sourceGuid, cloneGuid);
+    } catch (cleanupError) {
+      throw new ShortFlowError(
+        "AUTOMATION_CLONE_CLEANUP_FAILED",
+        `자동 편집 실패 후 복제 시퀀스를 정리하지 못했습니다. 원래 오류: ${errorMessage(error)} · 정리 오류: ${errorMessage(cleanupError)}`,
+      );
+    }
+    throw error;
   }
-  if (actions.length > 0 && !commitActions(project, actions, "ShortFlow: 비파괴 펀치인 적용")) {
-    warnings.push("펀치인 키프레임 트랜잭션이 거부되어 추천 마커만 유지했습니다.");
-    punchedClips = 0;
-  }
-  if (plan.cuts.length > 0) {
-    warnings.unshift("Premiere 공개 UXP API에는 시간 지점 Razor 액션이 없어 무음 구간은 복제 시퀀스의 SF CUT 검토 마커로 남겼습니다.");
-  }
-  return {
-    ...markerResult,
-    sequenceName,
-    punchedClips,
-    skippedClips,
-    warnings: [...new Set(warnings)].slice(0, 30),
-  };
 }
 
-/** Aligns the center of selected video/MOGRT items to a normalized safe-zone rectangle. */
-export async function alignSelectedVideoToSafeZone(rect: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}): Promise<SafeZoneAlignResult> {
-  const values = [rect.x, rect.y, rect.width, rect.height];
-  if (values.some((value) => !Number.isFinite(value)) || rect.width <= 0 || rect.height <= 0) {
-    throw new ShortFlowError("INVALID_SAFE_ZONE", "Safe Zone 정렬 좌표가 올바르지 않습니다.");
+export function translateSafeZonePosition(
+  value: unknown,
+  deltaX: number,
+  deltaY: number,
+  frameWidth: number,
+  frameHeight: number,
+): SafeZoneTranslatedPoint | null {
+  if (
+    !value || typeof value !== "object" ||
+    typeof deltaX !== "number" || !Number.isFinite(deltaX) ||
+    typeof deltaY !== "number" || !Number.isFinite(deltaY) ||
+    !Number.isFinite(frameWidth) || frameWidth <= 0 || !Number.isFinite(frameHeight) || frameHeight <= 0
+  ) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.x !== "number" || !Number.isFinite(candidate.x) || typeof candidate.y !== "number" || !Number.isFinite(candidate.y)) {
+    return null;
   }
-  const { project, sequence } = await getActiveContext();
+  const x = candidate.x;
+  const y = candidate.y;
+  const inUnitSquare = x >= 0 && x <= 1 && y >= 0 && y <= 1;
+  const hasFraction = Math.abs(x - Math.round(x)) > 1e-9 || Math.abs(y - Math.round(y)) > 1e-9;
+  if (inUnitSquare && !hasFraction) return null;
+  const space = inUnitSquare ? "normalized" : "pixels";
+  const nextX = x + (space === "normalized" ? deltaX : deltaX * frameWidth);
+  const nextY = y + (space === "normalized" ? deltaY : deltaY * frameHeight);
+  if (!Number.isFinite(nextX) || !Number.isFinite(nextY) || Math.abs(nextX) > frameWidth * 10 || Math.abs(nextY) > frameHeight * 10) {
+    return null;
+  }
+  return { x: nextX, y: nextY, space };
+}
+
+export async function buildSafeZoneItemAlignmentActions(
+  item: VideoClipTrackItem,
+  alignment: SafeZoneAlignment,
+  frame: { width: number; height: number },
+  pointFactory: (x: number, y: number) => PointF = (x, y) => ppro.PointF(x, y),
+): Promise<{ actions: ActionFactory[]; changed: boolean; warning?: string }> {
+  const moveNeeded = Math.abs(alignment.deltaX) > 1e-9 || Math.abs(alignment.deltaY) > 1e-9;
+  const scaleNeeded = alignment.scale < 1 - 1e-9;
+  if (!moveNeeded && !scaleNeeded) return { actions: [], changed: false };
+  try {
+    if (typeof item.isAdjustmentLayer === "function" && await item.isAdjustmentLayer()) {
+      return { actions: [], changed: false, warning: "조정 레이어는 Safe Zone 정렬에서 보존했습니다." };
+    }
+    const component = await findMotionComponent(item);
+    if (!component) return { actions: [], changed: false, warning: "Motion 속성이 없는 선택 항목을 건너뛰었습니다." };
+    const params = await motionParams(component);
+    if (moveNeeded && !params.position) return { actions: [], changed: false, warning: "Motion 위치 속성이 없는 선택 항목을 건너뛰었습니다." };
+    if (scaleNeeded && !params.scale) return { actions: [], changed: false, warning: "Motion 스케일 속성이 없는 선택 항목을 건너뛰었습니다." };
+    if (moveNeeded && params.position?.isTimeVarying()) {
+      return { actions: [], changed: false, warning: "기존 위치 키프레임이 있는 선택 항목은 보존했습니다." };
+    }
+    if (scaleNeeded && params.scale?.isTimeVarying()) {
+      return { actions: [], changed: false, warning: "기존 스케일 키프레임이 있는 선택 항목은 보존했습니다." };
+    }
+
+    let nextPosition: SafeZoneTranslatedPoint | null = null;
+    let nextScale = 0;
+    if (moveNeeded && params.position) {
+      nextPosition = translateSafeZonePosition(
+        keyframeValue(await params.position.getStartValue()),
+        alignment.deltaX,
+        alignment.deltaY,
+        frame.width,
+        frame.height,
+      );
+      if (!nextPosition) return { actions: [], changed: false, warning: "Motion 위치 좌표 공간을 안전하게 판별하지 못해 선택 항목을 보존했습니다." };
+    }
+    if (scaleNeeded && params.scale) {
+      const currentScale = keyframeValue(await params.scale.getStartValue());
+      if (typeof currentScale !== "number" || !Number.isFinite(currentScale) || currentScale <= 0) {
+        return { actions: [], changed: false, warning: "Motion 스케일 값을 안전하게 읽지 못해 선택 항목을 보존했습니다." };
+      }
+      nextScale = currentScale * alignment.scale;
+      if (!Number.isFinite(nextScale) || nextScale <= 0) {
+        return { actions: [], changed: false, warning: "Safe Zone 비례 축소 결과가 올바르지 않아 선택 항목을 보존했습니다." };
+      }
+    }
+
+    const actions: ActionFactory[] = [];
+    if (nextPosition && params.position) {
+      actions.push(() => {
+        const keyframe = params.position!.createKeyframe(pointFactory(nextPosition.x, nextPosition.y));
+        return params.position!.createSetValueAction(keyframe, true);
+      });
+    }
+    if (scaleNeeded && params.scale) {
+      actions.push(() => {
+        const keyframe = params.scale!.createKeyframe(nextScale);
+        return params.scale!.createSetValueAction(keyframe, true);
+      });
+    }
+    return { actions, changed: actions.length > 0 };
+  } catch (error) {
+    return { actions: [], changed: false, warning: `Motion 속성을 안전하게 읽지 못해 선택 항목을 보존했습니다: ${errorMessage(error)}` };
+  }
+}
+
+/** Applies one relative delta and optional proportional scale in a single public UXP transaction. */
+export async function alignSelectedVideoToSafeZone(
+  input: SafeZoneAlignment,
+  platform: SocialPlatform,
+  role: "content" | "caption",
+  customMargins?: Partial<SafeZoneMargins>,
+): Promise<SafeZoneAlignResult> {
+  let alignment: SafeZoneAlignment;
+  try {
+    alignment = assertSafeZoneAlignment(input, platform, role, customMargins);
+  } catch (error) {
+    throw new ShortFlowError("INVALID_SAFE_ZONE", errorMessage(error));
+  }
+  const { project, sequence, contextKey } = await getExpectedActiveContext();
   const selection = await readSelectionRange(sequence);
   const items = selection.items.filter(isVideoTrackItem).slice(0, 100);
   if (items.length === 0) {
     throw new ShortFlowError("NO_SELECTED_VIDEO", "Safe Zone에 정렬할 비디오 또는 그래픽 항목을 타임라인에서 선택해 주세요.");
   }
   const frame = await sequence.getFrameSize();
-  const centerX = Math.min(1, Math.max(0, rect.x + rect.width / 2));
-  const centerY = Math.min(1, Math.max(0, rect.y + rect.height / 2));
-  const actions: Action[] = [];
+  if (!Number.isFinite(Number(frame.width)) || Number(frame.width) <= 0 || !Number.isFinite(Number(frame.height)) || Number(frame.height) <= 0) {
+    throw new ShortFlowError("INVALID_FRAME_SIZE", "Safe Zone 정렬에 필요한 시퀀스 프레임 크기를 읽지 못했습니다.");
+  }
+  const actions: ActionFactory[] = [];
   const warnings: string[] = [];
   let changed = 0;
   let skipped = 0;
   for (const item of items) {
-    try {
-      const motion = await findMotionComponent(item);
-      const position = motion ? (await motionParams(motion)).position : null;
-      if (!position) {
-        skipped += 1;
-        warnings.push("Motion 위치 속성이 없는 선택 항목을 건너뛰었습니다.");
-        continue;
-      }
-      if (position.isTimeVarying()) {
-        skipped += 1;
-        warnings.push("기존 위치 키프레임이 있는 선택 항목은 보존했습니다.");
-        continue;
-      }
-      const current = keyframeValue(await position.getStartValue());
-      const normalized = Boolean(
-        current
-        && typeof current === "object"
-        && "x" in current
-        && "y" in current
-        && Math.abs(Number((current as { x: unknown }).x)) <= 2
-        && Math.abs(Number((current as { y: unknown }).y)) <= 2,
-      );
-      const point = normalized
-        ? ppro.PointF(centerX, centerY)
-        : ppro.PointF(centerX * Number(frame.width), centerY * Number(frame.height));
-      actions.push(position.createSetValueAction(position.createKeyframe(point), true));
-      changed += 1;
-    } catch (error) {
+    const result = await buildSafeZoneItemAlignmentActions(item, alignment, {
+      width: Number(frame.width),
+      height: Number(frame.height),
+    });
+    actions.push(...result.actions);
+    if (result.changed) changed += 1;
+    else if (result.warning) {
       skipped += 1;
-      warnings.push(`Safe Zone 정렬 실패: ${errorMessage(error)}`);
+      warnings.push(result.warning);
     }
   }
   if (actions.length === 0) {
-    throw new ShortFlowError("SAFE_ZONE_NOT_APPLIED", warnings[0] ?? "정렬할 수 있는 선택 항목이 없습니다.");
+    return { selected: items.length, changed: 0, skipped, warnings: [...new Set(warnings)].slice(0, 20) };
   }
-  if (!commitActions(project, actions, "ShortFlow: Safe Zone 자동 정렬")) {
+  await assertActiveContextKey(contextKey);
+  if (!commitActionFactories(project, actions, "ShortFlow: Safe Zone 자동 정렬")) {
     throw new ShortFlowError("SAFE_ZONE_COMMIT_FAILED", "Safe Zone 위치 변경을 적용하지 못했습니다.");
   }
   return { selected: items.length, changed, skipped, warnings: [...new Set(warnings)].slice(0, 20) };
@@ -1458,8 +2008,7 @@ export function joinNativePath(folderPath: string, filename: string): string {
     : `${cleanFolder}${separator}${cleanFilename}`;
 }
 
-function timestamp(): string {
-  const now = new Date();
+export function exportTimestamp(now = new Date()): string {
   const values = [
     now.getFullYear(),
     now.getMonth() + 1,
@@ -1471,6 +2020,16 @@ function timestamp(): string {
   return values.map((value, index) => index === 0 ? String(value) : String(value).padStart(2, "0"))
     .join("")
     .replace(/^(\d{8})(\d{6})$/u, "$1-$2");
+}
+
+export function buildExportFilename(
+  sequenceName: unknown,
+  extension: unknown,
+  now = new Date(),
+): string {
+  const safeExtension = normalizeExportExtension(extension);
+  const safeSequenceName = sanitizeFileName(String(sequenceName ?? "ShortFlow_Export"));
+  return sanitizeFileName(`${safeSequenceName}_${exportTimestamp(now)}.${safeExtension}`);
 }
 
 export async function exportVideo(options: ExportVideoOptions): Promise<string> {
@@ -1486,8 +2045,7 @@ export async function exportVideo(options: ExportVideoOptions): Promise<string> 
     throw new ShortFlowError("INVALID_EXPORT_PRESET", "선택한 파일이 Adobe Media Encoder .epr 프리셋이 아닙니다.");
   }
   const extensionRaw = String(await ppro.EncoderManager.getExportFileExtension(sequence, presetPath) || "mp4");
-  const extension = normalizeExportExtension(extensionRaw);
-  const filename = sanitizeFileName(`${sequence.name}_${timestamp()}.${extension}`);
+  const filename = buildExportFilename(sequence.name, extensionRaw);
   const outputPath = joinNativePath(String(options.outputFolder.nativePath), filename);
   const manager = ppro.EncoderManager.getManager();
   if (!manager) {
@@ -1524,7 +2082,7 @@ export async function exportCover(outputFolder: any): Promise<string> {
   if (!(width > 0) || !(height > 0)) {
     throw new ShortFlowError("INVALID_FRAME_SIZE", "현재 시퀀스의 프레임 크기를 확인하지 못했습니다.");
   }
-  const filename = sanitizeFileName(`${sequence.name}_cover_${timestamp()}.png`);
+  const filename = sanitizeFileName(`${sequence.name}_cover_${exportTimestamp()}.png`);
   const folderPath = String(outputFolder.nativePath);
   const success = await ppro.Exporter.exportSequenceFrame(
     sequence,
@@ -1548,8 +2106,8 @@ async function findImportedItem(
   const items = await bin.getItems();
   let existingMatch: ProjectItem | null = null;
   for (const item of items) {
-    const itemId = String(item.getId());
     try {
+      const itemId = String(item.getId());
       const clip = ppro.ClipProjectItem.cast(item);
       const path = clip ? String(await clip.getMediaFilePath()) : "";
       if (!sameMediaPath(path, nativePath)) continue;
@@ -1568,27 +2126,37 @@ async function getProjectImportBin(project: Project): Promise<{
 }> {
   try {
     const insertionItem = await project.getInsertionBin();
+    const bin = ppro.FolderItem.cast(insertionItem);
+    if (!bin || typeof bin.getItems !== "function") throw new Error("Insertion bin is unavailable.");
     return {
-      bin: ppro.FolderItem.cast(insertionItem),
+      bin,
       targetBin: insertionItem,
     };
   } catch {
-    const bin = await project.getRootItem();
-    return { bin, targetBin: ppro.ProjectItem.cast(bin) };
+    const root = await project.getRootItem();
+    const bin = root;
+    const targetBin = ppro.ProjectItem.cast(root);
+    if (!bin || typeof bin.getItems !== "function" || !targetBin) {
+      throw new ShortFlowError("PROJECT_BIN_UNAVAILABLE", "활성 프로젝트의 가져오기 bin을 확인하지 못했습니다.");
+    }
+    return { bin, targetBin };
   }
 }
 
 /** Imports generated files (notably SRT) into the active project bin only. */
-export async function importFilesToProject(paths: readonly string[]): Promise<number> {
+export async function importFilesToProject(
+  paths: readonly string[],
+  expectedContext?: string,
+): Promise<number> {
   if (!Array.isArray(paths)) {
     throw new ShortFlowError("NO_IMPORT_PATHS", "프로젝트로 가져올 파일 경로 배열이 필요합니다.");
   }
   const uniquePaths: string[] = [];
   const seen = new Set<string>();
   for (const value of paths) {
-    const path = typeof value === "string" ? value.trim() : "";
+    const path = validatePremiereImportPath(value);
     const normalized = normalizePremierePath(path);
-    if (!path || !normalized || seen.has(normalized)) continue;
+    if (seen.has(normalized)) continue;
     seen.add(normalized);
     uniquePaths.push(path);
   }
@@ -1599,67 +2167,66 @@ export async function importFilesToProject(paths: readonly string[]): Promise<nu
     throw new ShortFlowError("TOO_MANY_IMPORTS", "한 번에 최대 100개 파일까지 프로젝트로 가져올 수 있습니다.");
   }
 
-  const project = await ppro.Project.getActiveProject();
-  if (!project) {
-    throw new ShortFlowError("NO_ACTIVE_PROJECT", "파일을 가져올 활성 Premiere Pro 프로젝트가 없습니다.");
+  const { project, contextKey } = await getExpectedActiveContext(expectedContext);
+  const { bin, targetBin } = await getProjectImportBin(project);
+  const pendingPaths: string[] = [];
+  for (const path of uniquePaths) {
+    const existing = await findImportedItem(bin, path, new Set<string>());
+    if (!existing) pendingPaths.push(path);
   }
-  const { targetBin } = await getProjectImportBin(project);
-  const imported = await project.importFiles(uniquePaths, true, targetBin, false);
+  if (pendingPaths.length === 0) return 0;
+  await assertActiveContextKey(contextKey);
+  const imported = await project.importFiles(pendingPaths, true, targetBin, false);
   if (!imported) {
     throw new ShortFlowError(
       "PROJECT_IMPORT_FAILED",
       "생성된 파일을 활성 프로젝트 bin으로 가져오지 못했습니다.",
     );
   }
-  return uniquePaths.length;
+  return pendingPaths.length;
 }
 
 export async function importAndInsertAsset(
   nativePath: string,
   options: InsertAssetOptions,
 ): Promise<void> {
-  const assetPath = nativePath.trim();
-  if (!assetPath) {
-    throw new ShortFlowError("NO_ASSET_PATH", "삽입할 자산 파일 경로가 없습니다.");
-  }
-  const videoTrackIndex = zeroBasedTrackIndex(options.videoTrackIndex);
-  const audioTrackIndex = zeroBasedTrackIndex(options.audioTrackIndex);
-  const { project, sequence } = await getActiveContext();
+  const preflight = prepareInsertAssetPreflight(nativePath, options);
+  const { assetPath, videoTrackIndex, audioTrackIndex } = preflight;
+  const duration = preflight.durationSeconds;
+  const { project, sequence, contextKey } = await getExpectedActiveContext(preflight.expectedContextKey);
   const { bin, targetBin } = await getProjectImportBin(project);
   const beforeItems = await bin.getItems();
   const beforeIds = new Set<string>();
   for (const item of beforeItems) {
     beforeIds.add(String(item.getId()));
   }
-  const imported = await project.importFiles([assetPath], true, targetBin, false);
-  if (!imported) {
-    throw new ShortFlowError("ASSET_IMPORT_FAILED", `${options.displayName ?? "자산"} 파일을 프로젝트로 가져오지 못했습니다.`);
-  }
-  let projectItem: ProjectItem | null = null;
-  for (let attempt = 0; attempt < 10 && !projectItem; attempt += 1) {
-    if (attempt > 0) await wait(50);
-    projectItem = await findImportedItem(bin, assetPath, beforeIds);
+  let projectItem = await findImportedItem(bin, assetPath, new Set<string>());
+  if (!projectItem) {
+    await assertActiveContextKey(contextKey);
+    const imported = await project.importFiles([assetPath], true, targetBin, false);
+    if (!imported) {
+      throw new ShortFlowError("ASSET_IMPORT_FAILED", `${preflight.displayName} 파일을 프로젝트로 가져오지 못했습니다.`);
+    }
+    for (let attempt = 0; attempt < 10 && !projectItem; attempt += 1) {
+      if (attempt > 0) await wait(50);
+      projectItem = await findImportedItem(bin, assetPath, beforeIds);
+    }
   }
   if (!projectItem) {
     throw new ShortFlowError("IMPORTED_ITEM_NOT_FOUND", "가져온 자산의 프로젝트 아이템을 찾지 못했습니다.");
   }
+  await assertActiveContextKey(contextKey);
   const editor = ppro.SequenceEditor.getEditor(sequence);
   const insertionTime = await sequence.getPlayerPosition();
-  const action = editor.createInsertProjectItemAction(
-    projectItem,
-    insertionTime,
-    videoTrackIndex,
-    audioTrackIndex,
-    true,
-  );
-  if (!commitActions(project, [action], "ShortFlow: 음악/효과음 삽입")) {
+  await assertActiveContextKey(contextKey);
+  if (!commitActionFactories(
+    project,
+    [() => editor.createInsertProjectItemAction(projectItem, insertionTime, videoTrackIndex, audioTrackIndex, true)],
+    "ShortFlow: 음악/효과음 삽입",
+  )) {
     throw new ShortFlowError("ASSET_INSERT_FAILED", "자산을 현재 재생 위치에 삽입하지 못했습니다.");
   }
-  if (options.durationSeconds !== undefined) {
-    const duration = Number(options.durationSeconds);
-    if (!Number.isFinite(duration) || duration <= 0 || duration > 86_400) {
-      throw new ShortFlowError("INVALID_ASSET_DURATION", "가이드 오버레이 길이는 0초 초과 24시간 이하여야 합니다.");
-    }
+  if (duration !== undefined) {
     const insertedAt = tickTimeSeconds(insertionTime, 0);
     const projectItemId = String(projectItem.getId());
     let insertedItem: VideoClipTrackItem | null = null;
@@ -1667,7 +2234,7 @@ export async function importAndInsertAsset(
       if (attempt > 0) await wait(50);
       const track = await sequence.getVideoTrack(videoTrackIndex);
       if (!track) continue;
-      const candidates = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+      const candidates = (await getClipTrackItems(track)).filter(isVideoTrackItem);
       for (const candidate of candidates) {
         const start = tickTimeSeconds(await candidate.getStartTime(), Number.NaN);
         const candidateProjectItem = await candidate.getProjectItem();
@@ -1680,8 +2247,12 @@ export async function importAndInsertAsset(
     if (!insertedItem) {
       throw new ShortFlowError("INSERTED_GUIDE_NOT_FOUND", "삽입된 가이드 항목을 찾지 못해 길이를 설정하지 못했습니다.");
     }
-    const endAction = insertedItem.createSetEndAction(ppro.TickTime.createWithSeconds(insertedAt + duration));
-    if (!commitActions(project, [endAction], "ShortFlow: 가이드 오버레이 길이 설정")) {
+    await assertActiveContextKey(contextKey);
+    if (!commitActionFactories(
+      project,
+      [() => insertedItem.createSetEndAction(ppro.TickTime.createWithSeconds(insertedAt + duration))],
+      "ShortFlow: 가이드 오버레이 길이 설정",
+    )) {
       throw new ShortFlowError("GUIDE_DURATION_FAILED", "가이드 오버레이 길이를 설정하지 못했습니다.");
     }
   }

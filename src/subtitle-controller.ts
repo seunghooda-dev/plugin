@@ -21,6 +21,7 @@ import {
   subtitleSeekTime,
   validateSubtitleDocument,
   type ActiveSubtitlePosition,
+  type SubtitleCue,
   type SubtitleDocument,
 } from "./subtitles";
 
@@ -357,10 +358,6 @@ function cleanTargetLanguage(value: string): string {
   return clean;
 }
 
-function documentsEqual(left: SubtitleDocument, right: SubtitleDocument): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 function closestWithData(
   start: SubtitleDomElement | null | undefined,
   key: string,
@@ -395,8 +392,16 @@ export class SubtitleController {
   private saveQueue: Promise<void> = Promise.resolve();
   private busyAction = "";
   private initialized = false;
+  private lifecycleGeneration = 0;
+  private documentRevision = 0;
+  private projectLoadGeneration = 0;
+  private documentWordCount = 0;
+  private disabledCueCount = 0;
   private renderedCueCount = 0;
   private renderedWordCount = 0;
+  private readonly renderedCueElements = new Map<string, SubtitleDomElement>();
+  private readonly renderedWordElements = new Map<string, SubtitleDomElement>();
+  private activeDomDirty = true;
 
   constructor(private readonly options: SubtitleControllerOptions = {}) {
     this.dom = options.dom ?? defaultDom();
@@ -432,19 +437,36 @@ export class SubtitleController {
     return this.documentValue.projectKey;
   }
 
+  /** Read-only count for polling code that must not clone the full document. */
+  get cueCount(): number {
+    return this.documentValue.cues.length;
+  }
+
   get isBusy(): boolean {
     return Boolean(this.busyAction);
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    const lifecycle = ++this.lifecycleGeneration;
     this.initialized = true;
-    this.bindEvents();
-    const projectKey = cleanProjectKey(await this.options.getProjectKey?.() ?? this.projectKey);
-    await this.loadProject(projectKey, false);
+    try {
+      this.bindEvents();
+      const projectKey = cleanProjectKey(await this.options.getProjectKey?.() ?? this.projectKey);
+      if (!this.initialized || lifecycle !== this.lifecycleGeneration) return;
+      await this.loadProject(projectKey, false);
+    } catch (error) {
+      if (lifecycle === this.lifecycleGeneration) {
+        this.cleanups.splice(0).forEach((cleanup) => cleanup());
+        this.initialized = false;
+      }
+      throw error;
+    }
   }
 
   dispose(): void {
+    this.lifecycleGeneration += 1;
+    this.projectLoadGeneration += 1;
     this.cleanups.splice(0).forEach((cleanup) => cleanup());
     if (this.autosaveTimer !== null) this.clearTimer(this.autosaveTimer);
     this.autosaveTimer = null;
@@ -453,28 +475,40 @@ export class SubtitleController {
   }
 
   async loadProject(projectKey: string, flushCurrent = true): Promise<void> {
+    const generation = ++this.projectLoadGeneration;
     if (flushCurrent) await this.flushAutosave();
+    if (generation !== this.projectLoadGeneration) return;
     const clean = cleanProjectKey(projectKey);
     let next = createSubtitleDocument(clean);
+    let restoredCueCount = 0;
+    let restoreError: unknown = null;
     if (this.storage) {
       try {
         const raw = await this.storage.getItem(subtitleAutosaveKey(clean));
+        if (generation !== this.projectLoadGeneration) return;
         if (typeof raw === "string" && raw.trim()) {
           next = enforceDocumentLimits(deserializeSubtitleAutosave(raw, clean), this.maximumCues);
-          this.options.onActivity?.(`프로젝트 자막 자동 저장 ${next.cues.length}개를 복원했습니다.`);
+          restoredCueCount = next.cues.length;
         }
       } catch (error) {
-        this.reportError(error, "프로젝트 자막 복원 실패");
+        if (generation !== this.projectLoadGeneration) return;
+        restoreError = error;
       }
     }
+    if (generation !== this.projectLoadGeneration) return;
     this.documentValue = next;
     this.history = new SubtitleUndoRedo(next);
+    this.recordDocumentChange();
     this.selectedCueId = "";
     this.selectedWordId = "";
     this.activePosition = null;
     this.lastPlayheadSeconds = Number.NaN;
     this.render();
     this.emitChange();
+    if (restoredCueCount > 0) {
+      this.options.onActivity?.(`프로젝트 자막 자동 저장 ${restoredCueCount}개를 복원했습니다.`);
+    }
+    if (restoreError !== null) this.reportError(restoreError, "프로젝트 자막 복원 실패");
   }
 
   setDocument(value: SubtitleDocument, recordHistory = false): void {
@@ -488,6 +522,7 @@ export class SubtitleController {
       this.documentValue = normalized;
       this.history.reset(normalized);
     }
+    this.recordDocumentChange();
     this.selectedCueId = "";
     this.selectedWordId = "";
     this.render();
@@ -496,7 +531,7 @@ export class SubtitleController {
   }
 
   importSrtText(srt: string): SubtitleDocument {
-    const parsed = parseSrt(srt, { projectKey: this.projectKey });
+    const parsed = parseSrt(srt, { projectKey: this.projectKey, maxCueCount: this.maximumCues });
     if (parsed.cues.length === 0) throw new Error("SRT에서 유효한 자막 큐를 찾지 못했습니다.");
     this.commit(parsed, `SRT 자막 ${parsed.cues.length}개를 불러왔습니다.`);
     return this.document;
@@ -547,11 +582,13 @@ export class SubtitleController {
   }
 
   reflow(maxChars = this.maxChars()): void {
-    const next = reflowSubtitleCues(this.documentValue, maxChars);
-    if (documentsEqual(next, this.documentValue)) {
+    const needsReflow = this.documentValue.cues.some((cue) =>
+      cue.enabled && !cue.hidden && cue.text.length > maxChars);
+    if (!needsReflow) {
       this.setStatus(`${maxChars}자 기준으로 나눌 긴 자막이 없습니다.`, "ready");
       return;
     }
+    const next = reflowSubtitleCues(this.documentValue, maxChars, { maxOutputCues: this.maximumCues });
     this.commit(next, `긴 자막을 큐당 최대 ${maxChars}자로 나눴습니다.`);
   }
 
@@ -574,23 +611,38 @@ export class SubtitleController {
 
   updatePlayhead(seconds: number): ActiveSubtitlePosition | null {
     this.lastPlayheadSeconds = seconds;
+    const previousPosition = this.activePosition;
     const previousCueId = this.activePosition?.cueId;
     const previousWordId = this.activePosition?.wordId;
     this.activePosition = findActiveSubtitle(this.documentValue, seconds);
     const activeChanged = previousCueId !== this.activePosition?.cueId || previousWordId !== this.activePosition?.wordId;
-    const list = this.optional("subtitle-cue-list");
-    if (!list) return this.activePosition;
-    list.querySelectorAll("[data-word-id]").forEach((element) => {
-      const active = element.dataset.wordId === this.activePosition?.wordId && element.dataset.cueId === this.activePosition?.cueId;
-      element.classList.toggle("is-active", active);
-      if (active) {
-        element.setAttribute("aria-current", "true");
-        if (activeChanged) element.scrollIntoView?.({ block: "nearest" });
-      } else element.removeAttribute("aria-current");
-    });
-    list.querySelectorAll("[data-cue-row]").forEach((element) => {
-      element.classList.toggle("is-active", element.dataset.cueId === this.activePosition?.cueId);
-    });
+    if (!activeChanged && !this.activeDomDirty) return this.activePosition;
+
+    const previousWord = previousPosition?.wordId
+      ? this.renderedWordElements.get(this.wordElementKey(previousPosition.cueId, previousPosition.wordId))
+      : undefined;
+    const activeWord = this.activePosition?.wordId
+      ? this.renderedWordElements.get(this.wordElementKey(this.activePosition.cueId, this.activePosition.wordId))
+      : undefined;
+    if (previousWord && previousWord !== activeWord) {
+      previousWord.classList.remove("is-active");
+      previousWord.removeAttribute("aria-current");
+    }
+    if (activeWord) {
+      activeWord.classList.add("is-active");
+      activeWord.setAttribute("aria-current", "true");
+      if (activeChanged) activeWord.scrollIntoView?.({ block: "nearest" });
+    }
+
+    const previousCue = previousPosition
+      ? this.renderedCueElements.get(previousPosition.cueId)
+      : undefined;
+    const activeCue = this.activePosition
+      ? this.renderedCueElements.get(this.activePosition.cueId)
+      : undefined;
+    if (previousCue && previousCue !== activeCue) previousCue.classList.remove("is-active");
+    activeCue?.classList.add("is-active");
+    this.activeDomDirty = false;
     return this.activePosition;
   }
 
@@ -600,6 +652,8 @@ export class SubtitleController {
       const targetLanguage = action === "translate"
         ? cleanTargetLanguage(this.value("subtitle-translate-language-input"))
         : "";
+      const requestRevision = this.documentRevision;
+      const requestLoadGeneration = this.projectLoadGeneration;
       const request: SubtitleAiRequest = {
         action,
         document: this.document,
@@ -607,13 +661,20 @@ export class SubtitleController {
         ...(action === "translate" ? { targetLanguage } : {}),
       };
       const payload = await this.options.aiProvider?.(request);
+      this.assertAiRequestCurrent(requestRevision, requestLoadGeneration, request.document.projectKey);
       const defaultValidator = (value: unknown): SubtitleDocument => validateAiSubtitleResponse(value, request, { maxCueCount: this.maximumCues });
-      const provided = this.options.validateAiResponse
-        ? await this.options.validateAiResponse(payload, request, defaultValidator)
-        : defaultValidator(payload);
-      // A custom hook can enrich diagnostics, but may not bypass the strict
-      // boundary applied to untrusted provider output.
-      const result = defaultValidator(provided);
+      let result: SubtitleDocument;
+      if (this.options.validateAiResponse) {
+        const provided = await this.options.validateAiResponse(payload, request, defaultValidator);
+        this.assertAiRequestCurrent(requestRevision, requestLoadGeneration, request.document.projectKey);
+        // A custom hook can enrich diagnostics, but may not bypass the strict
+        // boundary applied to untrusted provider output.
+        result = defaultValidator(provided);
+      } else {
+        // The default path validates exactly once; large payloads must not be
+        // parsed and normalized twice when no custom hook is installed.
+        result = defaultValidator(payload);
+      }
       if (result.projectKey !== this.projectKey) {
         throw new Error("AI 자막 검증 결과의 프로젝트 키가 현재 문서와 일치하지 않습니다.");
       }
@@ -805,6 +866,7 @@ export class SubtitleController {
   private commit(next: SubtitleDocument, message: string): void {
     const safe = enforceDocumentLimits(next, this.maximumCues);
     this.documentValue = this.history.commit(safe);
+    this.recordDocumentChange();
     this.reconcileSelection();
     this.render();
     this.emitChange();
@@ -813,6 +875,7 @@ export class SubtitleController {
   }
 
   private afterHistoryChange(message: string): void {
+    this.recordDocumentChange();
     this.reconcileSelection();
     this.render();
     this.emitChange();
@@ -830,6 +893,32 @@ export class SubtitleController {
 
   private emitChange(): void {
     this.options.onChange?.(this.document);
+  }
+
+  private recordDocumentChange(): void {
+    this.documentRevision += 1;
+    let wordCount = 0;
+    let disabled = 0;
+    for (const cue of this.documentValue.cues) {
+      wordCount += cue.words.length;
+      if (!cue.enabled || cue.hidden) disabled += 1;
+    }
+    this.documentWordCount = wordCount;
+    this.disabledCueCount = disabled;
+  }
+
+  private assertAiRequestCurrent(revision: number, loadGeneration: number, projectKey: string): void {
+    if (
+      revision !== this.documentRevision ||
+      loadGeneration !== this.projectLoadGeneration ||
+      projectKey !== this.projectKey
+    ) {
+      throw new Error("AI 작업 중 자막 문서가 변경되어 이전 결과를 적용하지 않았습니다.");
+    }
+  }
+
+  private wordElementKey(cueId: string, wordId: string): string {
+    return `${cueId}\u0000${wordId}`;
   }
 
   private scheduleAutosave(): void {
@@ -880,6 +969,9 @@ export class SubtitleController {
   private render(): void {
     const list = this.required("subtitle-cue-list");
     list.replaceChildren();
+    this.renderedCueElements.clear();
+    this.renderedWordElements.clear();
+    this.activeDomDirty = true;
     this.renderedCueCount = 0;
     this.renderedWordCount = 0;
     if (this.documentValue.cues.length === 0) {
@@ -895,7 +987,7 @@ export class SubtitleController {
         const cue = this.documentValue.cues[index];
         if (!cue || (remainingWords <= 0 && cue.words.length > 0)) break;
         const wordLimit = Math.min(cue.words.length, remainingWords);
-        list.append(this.renderCue(cue.cueId, index, wordLimit));
+        list.append(this.renderCue(cue, index, wordLimit));
         this.renderedCueCount += 1;
         this.renderedWordCount += wordLimit;
         remainingWords -= wordLimit;
@@ -911,12 +1003,11 @@ export class SubtitleController {
     if (Number.isFinite(this.lastPlayheadSeconds)) this.updatePlayhead(this.lastPlayheadSeconds);
   }
 
-  private renderCue(cueId: string, index: number, wordLimit: number): SubtitleDomElement {
-    const cue = this.documentValue.cues.find((candidate) => candidate.cueId === cueId);
-    if (!cue) throw new Error(`자막 큐를 찾을 수 없습니다: ${cueId}`);
+  private renderCue(cue: SubtitleCue, index: number, wordLimit: number): SubtitleDomElement {
     const row = this.create("article", `subtitle-cue-row${cue.enabled ? "" : " is-disabled"}${cue.hidden ? " is-hidden" : ""}`);
     row.dataset.cueRow = "true";
     row.dataset.cueId = cue.cueId;
+    this.renderedCueElements.set(cue.cueId, row);
     row.setAttribute("role", "listitem");
     row.setAttribute("aria-label", `${index + 1}번 자막, ${secondsToSrtTime(cue.start)}부터 ${secondsToSrtTime(cue.end)}까지`);
 
@@ -955,6 +1046,7 @@ export class SubtitleController {
       button.setAttribute("aria-pressed", String(selectedWord));
       button.setAttribute("aria-label", `${word.t}, ${secondsToSrtTime(word.s)}${word.hidden ? ", 숨김" : ""}`);
       button.title = "클릭: 재생 위치 이동 · E/F2: 수정 · H: 숨김 · J: 뒤 단어와 붙이기 · S: 큐 나누기";
+      this.renderedWordElements.set(this.wordElementKey(cue.cueId, word.wordId), button);
       words.append(button);
     });
     if (wordLimit < cue.words.length) {
@@ -963,14 +1055,14 @@ export class SubtitleController {
       words.append(remainder);
     }
     row.append(header, words);
-    if (selectedIndex >= 0) row.append(this.renderWordEditor(cue.cueId, selectedIndex));
+    if (selectedIndex >= 0) row.append(this.renderWordEditor(cue, selectedIndex));
     return row;
   }
 
-  private renderWordEditor(cueId: string, wordIndex: number): SubtitleDomElement {
-    const cue = this.documentValue.cues.find((candidate) => candidate.cueId === cueId);
-    const word = cue?.words[wordIndex];
-    if (!cue || !word) return this.create("div");
+  private renderWordEditor(cue: SubtitleCue, wordIndex: number): SubtitleDomElement {
+    const word = cue.words[wordIndex];
+    if (!word) return this.create("div");
+    const cueId = cue.cueId;
     const editor = this.create("div", "subtitle-word-editor-row");
     const label = this.create("label", "sr-only", "선택한 단어 수정");
     const input = this.create("input", "subtitle-word-editor");
@@ -1016,8 +1108,8 @@ export class SubtitleController {
     const meta = this.optional("subtitle-meta");
     if (!meta) return;
     const cueCount = this.documentValue.cues.length;
-    const wordCount = this.documentValue.cues.reduce((sum, cue) => sum + cue.words.length, 0);
-    const disabled = this.documentValue.cues.filter((cue) => !cue.enabled || cue.hidden).length;
+    const wordCount = this.documentWordCount;
+    const disabled = this.disabledCueCount;
     meta.textContent = `${cueCount.toLocaleString("ko-KR")}개 큐 · ${wordCount.toLocaleString("ko-KR")}개 단어 · 비활성 ${disabled.toLocaleString("ko-KR")}개 · DOM 큐 ${this.renderedCueCount.toLocaleString("ko-KR")}/${cueCount.toLocaleString("ko-KR")} · 단어 ${this.renderedWordCount.toLocaleString("ko-KR")}/${wordCount.toLocaleString("ko-KR")} · 최대 ${this.maxChars()}자`;
     const truncated = this.renderedCueCount < cueCount || this.renderedWordCount < wordCount;
     meta.classList.toggle("is-warning", truncated);

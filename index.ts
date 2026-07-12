@@ -3,10 +3,15 @@ import {
   ASSET_DRAG_PAYLOAD_MIME,
   AssetLibrary,
   AssetLibraryError,
+  applyAssetOrder,
   createAssetDragPayload,
   createDefaultAssetLibraryAdapter,
   filterAssets,
-  parseAssetDragPayload,
+  listAudioAssetCategories,
+  normalizeAssetOrder,
+  normalizeNativePath,
+  reorderAssetIds,
+  resolveAudioAssetDragTarget,
   type AssetItem,
 } from "./src/asset-library";
 import {
@@ -24,6 +29,7 @@ import {
   importAndInsertAsset,
   insertMogrt,
   readSequenceStatus,
+  readActiveContextKey,
   readPlayerPositionSeconds,
   removeVerifiedClonedSequence,
   restorePersistentEntry,
@@ -58,16 +64,25 @@ import { BrandKitController } from "./src/brand-kit-controller";
 import { AIQueueController } from "./src/ai-queue-controller";
 import { deterministicHash } from "./src/job-queue";
 import { SpeechApiClient } from "./src/speech";
-import { canvasToPngBytes } from "./src/thumbnail";
 import {
-  SAFE_ZONE_PROFILES,
-  normalizedRectToPixels,
-  safeContentRect,
+  renderSafeZoneGuideBmp,
+  safeZoneGuideLabel,
   type SocialPlatform,
 } from "./src/safe-zone";
 import { FinalQCController } from "./src/final-qc-controller";
 import type { FinalQCSnapshot } from "./src/final-qc";
+import {
+  AssetRightsRegistry,
+  createAssetRightsReport,
+  createMissingAssetRightsRecord,
+  createReferenceAssetRightsRecord,
+  createTtsAssetRightsRecord,
+  normalizeAssetRightsRecord,
+  type AssetRightsInput,
+  type AssetRightsRecord,
+} from "./src/asset-rights";
 import { SubtitleController, type SubtitleAiRequest } from "./src/subtitle-controller";
+import { resolveAutomationTranscript, subtitleDocumentToAutomationTranscript } from "./src/automation-transcript";
 import { createSubtitleDocument } from "./src/subtitles";
 import { OpenAITextClient, chunkSubtitleCues } from "./src/openai-text";
 import { buildReferencePrompt, type ReferenceItem } from "./src/references";
@@ -96,6 +111,106 @@ import {
 } from "./src/ui";
 
 const { entrypoints } = require("uxp") as any;
+const ASSET_ORDER_STORAGE_KEY = "shortflow.assetOrder.v1";
+const ASSET_REORDER_MIME = "application/x-shortflow-asset-order";
+const ASSET_RIGHTS_EMPTY_STATUS = "선택한 음악·효과음·이미지·영상·AI 에셋의 권리 정보를 기록하면 최종 QC에 반영됩니다.";
+const SESSION_FALLBACK_PROJECT_KEY = "session";
+
+function encodeUtf8(value: string): Uint8Array {
+  const bytes: number[] = [];
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0xfffd;
+    if (codePoint <= 0x7f) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 0x7ff) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint <= 0xffff) {
+      bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+    } else {
+      bytes.push(
+        0xf0 | (codePoint >> 18),
+        0x80 | ((codePoint >> 12) & 0x3f),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+function decodeUtf8(input: ArrayBuffer | ArrayBufferView): string {
+  const view = input instanceof ArrayBuffer
+    ? new Uint8Array(input)
+    : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  let output = "";
+  for (let index = 0; index < view.length;) {
+    const first = view[index++] ?? 0;
+    if (first < 0x80) {
+      output += String.fromCodePoint(first);
+    } else if (first >= 0xc2 && first <= 0xdf && index < view.length) {
+      const second = view[index++] ?? 0x80;
+      output += String.fromCodePoint(((first & 0x1f) << 6) | (second & 0x3f));
+    } else if (first >= 0xe0 && first <= 0xef && index + 1 < view.length) {
+      const second = view[index++] ?? 0x80;
+      const third = view[index++] ?? 0x80;
+      output += String.fromCodePoint(((first & 0x0f) << 12) | ((second & 0x3f) << 6) | (third & 0x3f));
+    } else if (first >= 0xf0 && first <= 0xf4 && index + 2 < view.length) {
+      const second = view[index++] ?? 0x80;
+      const third = view[index++] ?? 0x80;
+      const fourth = view[index++] ?? 0x80;
+      output += String.fromCodePoint(
+        ((first & 0x07) << 18) |
+        ((second & 0x3f) << 12) |
+        ((third & 0x3f) << 6) |
+        (fourth & 0x3f),
+      );
+    } else {
+      output += "\uFFFD";
+    }
+  }
+  return output;
+}
+
+class ShortFlowTextEncoder {
+  readonly encoding = "utf-8";
+
+  encode(input = ""): Uint8Array {
+    return encodeUtf8(String(input));
+  }
+
+  encodeInto(source: string, destination: Uint8Array): TextEncoderEncodeIntoResult {
+    const encoded = this.encode(source);
+    const written = Math.min(encoded.length, destination.length);
+    destination.set(encoded.subarray(0, written));
+    return { read: source.length, written };
+  }
+}
+
+class ShortFlowTextDecoder {
+  readonly encoding = "utf-8";
+  readonly fatal = false;
+  readonly ignoreBOM = false;
+
+  decode(input?: ArrayBuffer | ArrayBufferView | null): string {
+    if (!input) return "";
+    return decodeUtf8(input);
+  }
+}
+
+function installTextEncodingPolyfill(): void {
+  const root = globalThis as typeof globalThis & {
+    TextEncoder?: typeof TextEncoder;
+    TextDecoder?: typeof TextDecoder;
+  };
+  if (typeof root.TextEncoder === "undefined") {
+    root.TextEncoder = ShortFlowTextEncoder as unknown as typeof TextEncoder;
+  }
+  if (typeof root.TextDecoder === "undefined") {
+    root.TextDecoder = ShortFlowTextDecoder as unknown as typeof TextDecoder;
+  }
+}
+
+installTextEncodingPolyfill();
 
 const activity = new ActivityLog();
 const busy = new BusyState();
@@ -103,8 +218,12 @@ let settings: PluginSettings = loadSettings();
 let initialized = false;
 let markerSegments: MarkerSegment[] = [];
 let assets: AssetItem[] = [];
+let assetOrder: string[] = [];
+let assetPreviewUrl = "";
 let selectedAssetId = "";
+const sessionGeneratedAssetRightsIdsByProject = new Map<string, Set<string>>();
 let assetLibrary: AssetLibrary | null = null;
+let assetRightsRegistry: AssetRightsRegistry | null = null;
 let referenceController: ReferenceController | null = null;
 let imageAIClient: OpenAIImageClient | null = null;
 let speechController: SpeechController | null = null;
@@ -115,6 +234,7 @@ let aiQueueController: AIQueueController | null = null;
 let finalQCController: FinalQCController | null = null;
 let subtitleController: SubtitleController | null = null;
 let subtitlePlayheadTimer: ReturnType<typeof setInterval> | null = null;
+let statusRefreshGeneration = 0;
 let recoveryManager: RecoveryManager | null = null;
 let diagnosticsReport: DiagnosticsReport | null = null;
 
@@ -145,6 +265,177 @@ function optionalNumberValue(id: string): number | undefined {
 
 function commaList(id: string): string[] {
   return valueOf(id).split(",").map((item) => item.trim()).filter(Boolean).slice(0, 500);
+}
+
+function loadAssetOrder(): string[] {
+  try {
+    return normalizeAssetOrder(JSON.parse(localStorage.getItem(ASSET_ORDER_STORAGE_KEY) ?? "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function saveAssetOrder(): void {
+  assetOrder = normalizeAssetOrder(assetOrder, assets.map((asset) => asset.normalizedPath));
+  try {
+    localStorage.setItem(ASSET_ORDER_STORAGE_KEY, JSON.stringify(assetOrder));
+  } catch (error) {
+    activity.add("warning", `자산 순서 저장 실패: ${errorMessage(error)}`);
+  }
+}
+
+function audioMimeType(asset: AssetItem): string {
+  switch (asset.extension) {
+    case ".aac": return "audio/aac";
+    case ".aif":
+    case ".aiff": return "audio/aiff";
+    case ".flac": return "audio/flac";
+    case ".m4a": return "audio/mp4";
+    case ".mp3": return "audio/mpeg";
+    case ".ogg": return "audio/ogg";
+    case ".wav": return "audio/wav";
+    case ".wma": return "audio/x-ms-wma";
+    default: return "audio/*";
+  }
+}
+
+function ensureAssetRightsRegistry(): AssetRightsRegistry {
+  if (!assetRightsRegistry) {
+    assetRightsRegistry = new AssetRightsRegistry(localStorage);
+  }
+  return assetRightsRegistry;
+}
+
+function assetRightsFor(asset: AssetItem): AssetRightsRecord {
+  return ensureAssetRightsRegistry().items.find((record) => record.assetId === asset.normalizedPath) ??
+    createMissingAssetRightsRecord(asset);
+}
+
+function rememberSessionGeneratedAssetRights(assetId: string, projectKey = SESSION_FALLBACK_PROJECT_KEY): void {
+  const key = projectKey.trim() || SESSION_FALLBACK_PROJECT_KEY;
+  const ids = sessionGeneratedAssetRightsIdsByProject.get(key) ?? new Set<string>();
+  ids.add(assetId);
+  sessionGeneratedAssetRightsIdsByProject.set(key, ids);
+}
+
+function sessionGeneratedAssetRightsIds(projectKey = SESSION_FALLBACK_PROJECT_KEY): ReadonlySet<string> {
+  return sessionGeneratedAssetRightsIdsByProject.get(projectKey.trim() || SESSION_FALLBACK_PROJECT_KEY) ?? new Set<string>();
+}
+
+function currentAssetRightsRecords(projectKey = SESSION_FALLBACK_PROJECT_KEY): AssetRightsRecord[] {
+  const registry = ensureAssetRightsRegistry();
+  const byId = new Map(registry.items.map((record) => [record.assetId, record]));
+  const libraryRecords = assets
+    .filter((asset) => asset.kind === "audio" || asset.kind === "image" || asset.kind === "video")
+    .map((asset) => byId.get(asset.normalizedPath) ?? createMissingAssetRightsRecord(asset));
+  const referenceRecords = (referenceController?.items ?? [])
+    .map((reference) => {
+      try {
+        const fallback = createReferenceAssetRightsRecord(reference);
+        const nativePath = typeof reference.nativePath === "string" ? reference.nativePath : "";
+        const normalizedReferenceId = nativePath ? normalizeNativePath(nativePath) : fallback.assetId;
+        const registryRecord = byId.get(fallback.assetId) ?? byId.get(normalizedReferenceId);
+        if (registryRecord) return registryRecord;
+        return normalizedReferenceId === fallback.assetId
+          ? fallback
+          : normalizeAssetRightsRecord({ ...fallback, assetId: normalizedReferenceId }, fallback.updatedAt);
+      } catch {
+        return null;
+      }
+    })
+    .filter((record): record is AssetRightsRecord => Boolean(record));
+  const visibleRecords = [...libraryRecords, ...referenceRecords];
+  const visibleIds = new Set(visibleRecords.map((record) => record.assetId));
+  const sessionGeneratedIds = sessionGeneratedAssetRightsIds(projectKey);
+  const registryOnlyRecords = registry.items.filter((record) => (
+    !visibleIds.has(record.assetId) && sessionGeneratedIds.has(record.assetId)
+  ));
+  return [...visibleRecords, ...registryOnlyRecords];
+}
+
+function rightsInputFor(asset: AssetItem): AssetRightsInput {
+  return {
+    assetId: asset.normalizedPath,
+    assetName: asset.name,
+    kind: valueOf("asset-rights-kind-select"),
+    source: valueOf("asset-rights-source-input"),
+    license: valueOf("asset-rights-license-input"),
+    commercialUse: valueOf("asset-rights-commercial-select"),
+    expiresAt: valueOf("asset-rights-expiry-input"),
+    attribution: valueOf("asset-rights-attribution-input"),
+    notes: valueOf("asset-rights-notes-input"),
+    updatedAt: Date.now(),
+  };
+}
+
+function renderAssetRights(asset: AssetItem | null): void {
+  const selected = Boolean(asset);
+  for (const id of [
+    "asset-rights-kind-select",
+    "asset-rights-source-input",
+    "asset-rights-license-input",
+    "asset-rights-commercial-select",
+    "asset-rights-expiry-input",
+    "asset-rights-attribution-input",
+    "asset-rights-notes-input",
+    "asset-rights-save-btn",
+  ]) {
+    const field = optionalElement<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>(id);
+    if (field) field.disabled = !selected;
+  }
+  if (!asset) {
+    setText("asset-rights-selected-name", "에셋을 선택해 주세요");
+    setValue("asset-rights-kind-select", "other");
+    setValue("asset-rights-source-input", "");
+    setValue("asset-rights-license-input", "");
+    setValue("asset-rights-commercial-select", "unknown");
+    setValue("asset-rights-expiry-input", "");
+    setValue("asset-rights-attribution-input", "");
+    setValue("asset-rights-notes-input", "");
+    setText("asset-rights-status", ASSET_RIGHTS_EMPTY_STATUS);
+    return;
+  }
+
+  const record = assetRightsFor(asset);
+  setText("asset-rights-selected-name", asset.name, asset.nativePath);
+  setValue("asset-rights-kind-select", record.kind);
+  setValue("asset-rights-source-input", record.source);
+  setValue("asset-rights-license-input", record.license);
+  setValue("asset-rights-commercial-select", record.commercialUse);
+  setValue("asset-rights-expiry-input", record.expiresAt ?? "");
+  setValue("asset-rights-attribution-input", record.attribution);
+  setValue("asset-rights-notes-input", record.notes);
+  const issueCount = createAssetRightsReport([record]).issues.length;
+  setText("asset-rights-status", issueCount === 0
+    ? "권리 정보가 충분히 기록되었습니다."
+    : `권리 정보 확인 필요 · 경고/오류 ${issueCount}개`);
+}
+
+function clearAssetPreview(): void {
+  const audio = optionalElement<HTMLAudioElement>("asset-audio-preview");
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.hidden = true;
+    audio.load();
+  }
+  if (assetPreviewUrl) {
+    URL.revokeObjectURL(assetPreviewUrl);
+    assetPreviewUrl = "";
+  }
+}
+
+async function assetBytes(asset: AssetItem): Promise<Uint8Array> {
+  const read = asset.entry?.read;
+  if (typeof read !== "function") {
+    throw new Error("동기화된 파일 entry가 없어 미리듣기를 만들 수 없습니다. 에셋을 다시 동기화해 주세요.");
+  }
+  const value = await read.call(asset.entry);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  throw new Error("오디오 파일을 바이너리로 읽지 못했습니다.");
 }
 
 function finalQCPlatform(): SocialPlatform {
@@ -219,6 +510,7 @@ async function buildFinalQCSnapshot(): Promise<FinalQCSnapshot> {
       guideOverlays: media.guideOverlays,
       missingFonts: commaList("final-qc-missing-fonts"),
       missingAssets: commaList("final-qc-missing-assets"),
+      rightsReport: createAssetRightsReport(currentAssetRightsRecords(subtitleProjectKeyFromStatus(status))),
     },
     output: {
       fileName: valueOf("final-qc-output-name"),
@@ -227,9 +519,16 @@ async function buildFinalQCSnapshot(): Promise<FinalQCSnapshot> {
   };
 }
 
-async function subtitleProjectKey(): Promise<string> {
-  const status = await readSequenceStatus();
+function subtitleProjectKeyFromStatus(status: Pick<SequenceStatus, "projectPath" | "sequenceGuid">): string {
   return `project-${deterministicHash({ path: status.projectPath, sequence: status.sequenceGuid })}`;
+}
+
+async function subtitleProjectKey(): Promise<string> {
+  try {
+    return subtitleProjectKeyFromStatus(await readSequenceStatus());
+  } catch {
+    return SESSION_FALLBACK_PROJECT_KEY;
+  }
 }
 
 async function readSrtFile(): Promise<string | null> {
@@ -252,6 +551,7 @@ async function writeSrtFile(srt: string, suggestedName: string): Promise<void> {
 }
 
 async function runSubtitleAI(request: SubtitleAiRequest): Promise<unknown> {
+  ensureAiConsent("AI 자막");
   const batches = chunkSubtitleCues(request.document.cues).length;
   const descriptor = {
     action: request.action,
@@ -279,7 +579,7 @@ function startSubtitlePlayheadTracking(): void {
   if (subtitlePlayheadTimer !== null) return;
   subtitlePlayheadTimer = setInterval(() => {
     const controller = subtitleController;
-    if (!controller || controller.document.cues.length === 0) return;
+    if (!controller || controller.cueCount === 0) return;
     void readPlayerPositionSeconds()
       .then((seconds) => controller.updatePlayhead(seconds))
       .catch(() => undefined);
@@ -421,6 +721,51 @@ function renderDiagnosticsReport(report: DiagnosticsReport | null): void {
   }
 }
 
+function localDiagnosticsContext(): Record<string, unknown> {
+  const recoveryEntries = recoveryManager?.list() ?? [];
+  const recoveryByStatus = recoveryEntries.reduce<Record<string, number>>((counts, entry) => {
+    counts[entry.status] = (counts[entry.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  return {
+    plugin: "shortflow-studio",
+    reportPurpose: "user-initiated-local-export",
+    settings: {
+      profileId: settings.profileId,
+      width: settings.width,
+      height: settings.height,
+      rangeMode: settings.rangeMode,
+      reframeMode: settings.reframeMode,
+      scope: settings.scope,
+      exportMode: settings.exportMode,
+      exportRange: settings.exportRange,
+      ttsModel: settings.ttsModel,
+      ttsFormat: settings.ttsFormat,
+      ttsSpeed: settings.ttsSpeed,
+      ttsAudioTrack: settings.ttsAudioTrack,
+      sttModel: settings.sttModel,
+      sttLanguage: settings.sttLanguage,
+      sttOutputFormat: settings.sttOutputFormat,
+      aiConsentAccepted: settings.aiConsentAccepted,
+    },
+    workspace: {
+      assetCount: assets.length,
+      audioAssetCount: assets.filter((asset) => asset.kind === "audio").length,
+      selectedAsset: Boolean(selectedAssetId),
+      referenceCount: referenceController?.items.length ?? 0,
+      thumbnailReady: Boolean(thumbnailController),
+      subtitlesReady: Boolean(subtitleController),
+      speechReady: Boolean(speechController),
+    },
+    recovery: {
+      count: recoveryEntries.length,
+      byStatus: recoveryByStatus,
+      interruptedCount: recoveryByStatus.interrupted ?? 0,
+      failedCount: (recoveryByStatus.failed ?? 0) + (recoveryByStatus["rollback-failed"] ?? 0),
+    },
+  };
+}
+
 async function collectDiagnosticsReport(): Promise<DiagnosticsReport> {
   const uxpRoot = hostModule("uxp");
   const premiere = hostModule("premierepro");
@@ -494,7 +839,10 @@ async function handleExportDiagnostics(): Promise<void> {
   if (!file?.write) throw new Error("진단 JSON을 저장할 UXP 파일 시스템을 사용할 수 없습니다.");
   const payload = diagnosticBundleToJSON({
     report,
-    context: { plugin: "shortflow-studio", reportPurpose: "user-initiated-local-export" },
+    context: {
+      ...localDiagnosticsContext(),
+      reportPurpose: "user-initiated-local-export",
+    },
   });
   await file.write(payload, { format: moduleMember(uxpRoot, "storage", "formats", "utf8") });
   activity.add("success", "개인정보를 제거한 시스템 진단 JSON을 저장했습니다.");
@@ -523,6 +871,7 @@ function applySettingsToUI(): void {
   setValue("ai-provider-select", settings.aiProvider);
   setValue("ai-endpoint-input", settings.aiEndpoint);
   setValue("ai-model-input", settings.aiModel);
+  setChecked("ai-consent-checkbox", settings.aiConsentAccepted);
   setValue("tts-model-select", settings.ttsModel);
   setValue("tts-voice-select", settings.ttsVoice);
   setValue("tts-format-select", settings.ttsFormat);
@@ -565,6 +914,7 @@ function syncSettingsFromUI(): PluginSettings {
     aiProvider: "openai",
     aiEndpoint: DEFAULT_SETTINGS.aiEndpoint,
     aiModel: valueOf("ai-model-input") || DEFAULT_SETTINGS.aiModel,
+    aiConsentAccepted: checkedOf("ai-consent-checkbox"),
     ttsModel: valueOf("tts-model-select") as PluginSettings["ttsModel"],
     ttsVoice: valueOf("tts-voice-select"),
     ttsFormat: valueOf("tts-format-select") as PluginSettings["ttsFormat"],
@@ -576,6 +926,14 @@ function syncSettingsFromUI(): PluginSettings {
   };
   saveCurrentSettings();
   return settings;
+}
+
+function ensureAiConsent(context: string): void {
+  syncSettingsFromUI();
+  if (!settings.aiConsentAccepted) {
+    optionalElement<HTMLInputElement>("ai-consent-checkbox")?.focus();
+    throw new Error(`${context} 실행 전 AI 전송·개인정보·권리·AI 음성 고지 동의가 필요합니다.`);
+  }
 }
 
 function createOptions(): CreateShortOptions {
@@ -597,24 +955,55 @@ function renderStatus(status: SequenceStatus): void {
   setText("status-sequence", status.sequenceName, status.sequenceName);
   setText("status-frame", `${status.width} × ${status.height}`);
   setText("status-duration", formatDuration(status.effectiveDuration || status.sequenceEnd));
+  setText("status-playhead", formatDuration(status.playerPosition));
+  const inOut = `${formatDuration(status.inPoint)} → ${formatDuration(status.outPoint)}`;
+  setText("status-inout", inOut, inOut);
   const selection = status.selectedItemCount > 0
-    ? `${status.selectedItemCount}개 선택 · ${formatDuration((status.selectedEnd ?? 0) - (status.selectedStart ?? 0))}`
-    : "선택된 클립 없음";
+    ? `타임라인 ${status.selectedItemCount}개 선택 · ${formatDuration((status.selectedEnd ?? 0) - (status.selectedStart ?? 0))}`
+    : "타임라인 선택 없음";
   setText("status-selection", selection, selection);
+  setText("qc-status-sequence", status.sequenceName, status.sequenceName);
+  setText("qc-status-frame", `${status.width} × ${status.height}`);
+  setText("qc-status-duration", formatDuration(status.effectiveDuration || status.sequenceEnd));
+  setText("qc-status-playhead", formatDuration(status.playerPosition));
+  setText("qc-status-selection", selection, selection);
 }
 
 async function refreshStatus(silent = false): Promise<SequenceStatus | null> {
+  const generation = ++statusRefreshGeneration;
   try {
     const status = await readSequenceStatus();
+    if (generation !== statusRefreshGeneration) return status;
     renderStatus(status);
+    const controller = subtitleController;
+    const projectKey = subtitleProjectKeyFromStatus(status);
+    if (controller && controller.projectKey !== projectKey) {
+      try {
+        await controller.loadProject(projectKey);
+      } catch (error) {
+        if (generation === statusRefreshGeneration) {
+          if (silent) activity.add("error", `자막 프로젝트 동기화 실패: ${errorMessage(error)}`);
+          else reportError(error, "자막 프로젝트 동기화 실패");
+        }
+      }
+    }
+    if (generation !== statusRefreshGeneration) return status;
     if (!silent) activity.add("info", `활성 시퀀스 확인: ${status.sequenceName}`);
     return status;
   } catch (error) {
+    if (generation !== statusRefreshGeneration) return null;
     setText("status-project", "Premiere 연결 필요");
     setText("status-sequence", "활성 시퀀스 없음");
     setText("status-frame", "—");
     setText("status-duration", "—");
+    setText("status-playhead", "—");
+    setText("status-inout", "—");
     setText("status-selection", "—");
+    setText("qc-status-sequence", "활성 시퀀스 없음");
+    setText("qc-status-frame", "—");
+    setText("qc-status-duration", "—");
+    setText("qc-status-playhead", "—");
+    setText("qc-status-selection", "—");
     if (!silent) reportError(error, "프로젝트 상태 확인 실패");
     return null;
   }
@@ -651,13 +1040,18 @@ function renderQC(items: QCItem[]): void {
 
 async function handleQC(): Promise<void> {
   const current = syncSettingsFromUI();
+  const startedAt = Date.now();
   await busy.during("시퀀스 QC를 검사하고 있습니다…", async () => {
     const result = await runSequenceQC(current.width, current.height, current.maxDuration);
     renderQC(result.items);
     renderStatus(result.status);
     const errors = result.items.filter((item) => item.level === "error").length;
     const warnings = result.items.filter((item) => item.level === "warning").length;
-    activity.add(errors ? "error" : warnings ? "warning" : "success", `QC 완료 · 오류 ${errors} · 경고 ${warnings}`);
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    activity.add(
+      errors ? "error" : warnings ? "warning" : "success",
+      `QC 완료 · 오류 ${errors} · 경고 ${warnings} · ${elapsedMs.toLocaleString("ko-KR")}ms`,
+    );
     toast(errors ? "QC 오류를 확인해 주세요." : warnings ? "QC 경고가 있습니다." : "QC를 통과했습니다.", errors ? "error" : warnings ? "warning" : "success");
   });
 }
@@ -839,10 +1233,13 @@ function setAssetRootUI(name: string, enabled: boolean): void {
   setText("asset-root-name", name || "선택되지 않음", name);
   const open = optionalElement<HTMLButtonElement>("open-asset-root-btn");
   if (open) open.disabled = !enabled;
+  const categoryOpen = optionalElement<HTMLButtonElement>("open-asset-category-btn");
+  if (categoryOpen) categoryOpen.disabled = !enabled;
 }
 
 async function initializeAssetLibrary(): Promise<void> {
   try {
+    await ensureAssetRightsRegistry().load();
     const library = ensureAssetLibrary();
     const root = await library.restoreRoot();
     if (root) {
@@ -875,27 +1272,70 @@ async function handleOpenAssetRoot(): Promise<void> {
   activity.add("info", "시스템 파일 탐색기에서 자산 폴더를 열었습니다.");
 }
 
+async function handleOpenAssetCategory(): Promise<void> {
+  const category = optionalElement<HTMLSelectElement>("asset-category-select")?.value ?? "all";
+  if (category === "all") {
+    await ensureAssetLibrary().openRootFolder();
+    activity.add("info", "시스템 파일 탐색기에서 자산 루트 폴더를 열었습니다.");
+    return;
+  }
+  await ensureAssetLibrary().openRelativeFolder(category);
+  activity.add("info", `시스템 파일 탐색기에서 선택 폴더를 열었습니다: ${category}`);
+}
+
 function filteredAudioAssets(): AssetItem[] {
   const query = valueOf("asset-search-input");
   const filter = valueOf("asset-type-select");
-  return filterAssets(assets, { query, kind: "audio" }).filter((asset) => {
+  const category = optionalElement<HTMLSelectElement>("asset-category-select")?.value ?? "all";
+  const visible = filterAssets(assets, { query, kind: "audio" }).filter((asset) => {
     const folder = asset.folderPath.toLocaleLowerCase();
     if (filter === "music") return folder === "music" || folder.startsWith("music/");
     if (filter === "sfx") return folder === "sfx" || folder.startsWith("sfx/");
     return true;
+  }).filter((asset) => {
+    if (category === "all") return true;
+    const folder = normalizeNativePath(asset.folderPath);
+    return folder === category || folder.startsWith(`${category}/`);
   });
+  return applyAssetOrder(visible, assetOrder);
+}
+
+function renderAssetCategories(): void {
+  const select = optionalElement<HTMLSelectElement>("asset-category-select");
+  if (!select) return;
+  const current = select.value || "all";
+  const filter = valueOf("asset-type-select");
+  const categories = listAudioAssetCategories(assets).filter((category) => {
+    if (filter === "music") return category.root === "music";
+    if (filter === "sfx") return category.root === "sfx";
+    return true;
+  });
+  select.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "전체 폴더";
+  select.append(all);
+  for (const category of categories) {
+    const option = document.createElement("option");
+    option.value = category.id;
+    option.textContent = `${category.label} (${category.count})`;
+    select.append(option);
+  }
+  select.disabled = categories.length === 0;
+  select.value = categories.some((category) => category.id === current) ? current : "all";
+  const openButton = optionalElement<HTMLButtonElement>("open-asset-category-btn");
+  if (openButton) openButton.disabled = !settings.assetRootName;
 }
 
 function assetFromDragPayload(dataTransfer: DataTransfer | null): AssetItem | null {
-  const payload = parseAssetDragPayload(dataTransfer?.getData(ASSET_DRAG_PAYLOAD_MIME));
-  if (!payload) return null;
-  return assets.find((candidate) => (
-    candidate.kind === payload.kind &&
-    candidate.normalizedPath === payload.id
-  )) ?? null;
+  return resolveAudioAssetDragTarget(
+    assets,
+    dataTransfer?.getData(ASSET_DRAG_PAYLOAD_MIME),
+  );
 }
 
 function renderAssets(): void {
+  renderAssetCategories();
   const target = element<HTMLElement>("asset-list");
   const visible = filteredAudioAssets();
   if (!visible.length) {
@@ -922,18 +1362,62 @@ function renderAssets(): void {
     const path = document.createElement("small");
     path.textContent = asset.relativePath;
     copy.append(title, path);
-    card.append(icon, copy);
+    const actions = document.createElement("span");
+    actions.className = "asset-card-actions";
+    const preview = document.createElement("span");
+    preview.className = "asset-preview-action";
+    preview.textContent = "미리듣기";
+    preview.setAttribute("role", "button");
+    preview.setAttribute("tabindex", "0");
+    preview.setAttribute("aria-label", `${asset.name} 미리듣기`);
+    preview.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void handlePreviewAsset(asset).catch((error) => reportError(error, "자산 미리듣기 실패"));
+    });
+    preview.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      void handlePreviewAsset(asset).catch((error) => reportError(error, "자산 미리듣기 실패"));
+    });
+    const hint = document.createElement("span");
+    hint.className = "drag-hint";
+    hint.textContent = "↕";
+    hint.title = "드래그해서 목록 순서 이동";
+    actions.append(preview, hint);
+    card.append(icon, copy, actions);
     card.addEventListener("click", () => {
       selectedAssetId = asset.id;
       renderAssets();
+      renderAssetRights(asset);
     });
     card.addEventListener("dblclick", () => void handleInsertAsset(asset));
+    card.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes(ASSET_REORDER_MIME)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    });
+    card.addEventListener("drop", (event) => {
+      const draggedId = event.dataTransfer?.getData(ASSET_REORDER_MIME);
+      if (!draggedId) return;
+      event.preventDefault();
+      assetOrder = reorderAssetIds(
+        assetOrder,
+        visible.map((item) => item.normalizedPath),
+        draggedId,
+        asset.normalizedPath,
+      );
+      saveAssetOrder();
+      renderAssets();
+      activity.add("success", "음악·효과음 목록 순서를 저장했습니다.");
+    });
     card.addEventListener("dragstart", (event) => {
       selectedAssetId = asset.id;
       card.classList.add("is-dragging");
       try {
         event.dataTransfer?.setData(ASSET_DRAG_PAYLOAD_MIME, createAssetDragPayload(asset));
-        if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer?.setData(ASSET_REORDER_MIME, asset.normalizedPath);
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "copyMove";
       } catch (error) {
         event.preventDefault();
         reportError(error, "자산 드래그 준비 실패");
@@ -946,11 +1430,43 @@ function renderAssets(): void {
 
 async function handleSyncAssets(): Promise<void> {
   assets = await busy.during("음악·효과음 폴더를 동기화하고 있습니다…", () => ensureAssetLibrary().sync());
+  assetOrder = normalizeAssetOrder(assetOrder, assets.map((asset) => asset.normalizedPath));
+  saveAssetOrder();
+  if (selectedAssetId && !assets.some((asset) => asset.id === selectedAssetId)) {
+    selectedAssetId = "";
+  }
   renderAssets();
+  renderAssetRights(assets.find((asset) => asset.id === selectedAssetId) ?? null);
   const audioCount = assets.filter((asset) => asset.kind === "audio").length;
   const stats = ensureAssetLibrary().lastSyncStats;
   activity.add(stats.truncated ? "warning" : "success", `자산 동기화 완료 · 오디오 ${audioCount}개 · 전체 ${assets.length}개${stats.truncated ? " · 안전 제한 도달" : ""}`);
   toast(`음악·효과음 ${audioCount}개를 동기화했습니다.`, stats.truncated ? "warning" : "success");
+}
+
+async function handlePreviewAsset(asset: AssetItem): Promise<void> {
+  const audio = element<HTMLAudioElement>("asset-audio-preview");
+  const bytes = await busy.during(`${asset.name} 미리듣기를 준비하고 있습니다…`, () => assetBytes(asset));
+  clearAssetPreview();
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  assetPreviewUrl = URL.createObjectURL(new Blob([buffer], { type: audioMimeType(asset) }));
+  audio.src = assetPreviewUrl;
+  audio.hidden = false;
+  audio.load();
+  await audio.play();
+  selectedAssetId = asset.id;
+  renderAssets();
+  renderAssetRights(asset);
+  activity.add("success", `미리듣기: ${asset.name}`);
+}
+
+async function handleSaveAssetRights(): Promise<void> {
+  const asset = assets.find((candidate) => candidate.id === selectedAssetId);
+  if (!asset) throw new Error("권리 정보를 저장할 에셋을 먼저 선택해 주세요.");
+  const record = await ensureAssetRightsRegistry().upsert(rightsInputFor(asset));
+  renderAssetRights(asset);
+  activity.add("success", `권리 정보 저장: ${record.assetName}`);
+  toast("에셋 권리 정보를 저장했습니다.", "success");
 }
 
 async function handleInsertAsset(asset: AssetItem): Promise<void> {
@@ -1048,6 +1564,7 @@ async function handleAISave(): Promise<void> {
 }
 
 async function handleAITest(): Promise<void> {
+  ensureAiConsent("AI 연결 테스트");
   const client = createImageAIClient();
   const input = element<HTMLInputElement>("ai-api-key-input");
   if (input.value.trim()) {
@@ -1074,8 +1591,8 @@ function selectedReferencePromptItems(selectedIds: readonly string[]): Reference
   if (!referenceController || selectedIds.length === 0) return [];
   const idSet = new Set(selectedIds);
   return referenceController.items
-    .filter((item) => item.type === "image" && !item.unavailable && idSet.has(item.id))
-    .slice(0, 3)
+    .filter((item) => !item.unavailable && idSet.has(item.id))
+    .slice(0, 8)
     .map((item) => ({ ...item }));
 }
 
@@ -1084,6 +1601,7 @@ async function handleThumbnailAI(
   preset: string,
   prompt: string,
 ): Promise<{ bytes: Uint8Array; name: string }> {
+  ensureAiConsent("썸네일 AI");
   const client = imageAIClient ?? createImageAIClient();
   const images = [{ bytes: pngBytes, filename: "shortflow-thumbnail.png", mimeType: "image/png" }];
   const selectedReferences = referenceController
@@ -1093,7 +1611,7 @@ async function handleThumbnailAI(
     activity.add("warning", "현재 썸네일을 포함해 AI 입력은 최대 4개이므로 레퍼런스 3개만 사용합니다.");
   }
   const attachedReferences = selectedReferences.slice(0, 3);
-  const promptReferences = selectedReferencePromptItems(attachedReferences.map((reference) => reference.id));
+  const promptReferences = selectedReferencePromptItems(referenceController?.selectedIds ?? []);
   const requestPrompt = promptReferences.length > 0
     ? buildReferencePrompt(promptReferences, prompt)
     : prompt;
@@ -1127,40 +1645,25 @@ async function createPremiereSafeZoneOverlay(
   platform: SocialPlatform,
   role: "content" | "caption",
 ): Promise<void> {
-  const canvas = document.createElement("canvas");
-  canvas.width = 1080;
-  canvas.height = 1920;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Safe Zone PNG를 그릴 Canvas 2D 기능을 사용할 수 없습니다.");
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  const safe = normalizedRectToPixels(safeContentRect(platform, role), canvas.width, canvas.height);
-  context.fillStyle = "rgba(255, 60, 92, 0.16)";
-  context.fillRect(0, 0, canvas.width, safe.y);
-  context.fillRect(0, safe.y + safe.height, canvas.width, canvas.height - safe.y - safe.height);
-  context.fillRect(0, safe.y, safe.x, safe.height);
-  context.fillRect(safe.x + safe.width, safe.y, canvas.width - safe.x - safe.width, safe.height);
-  context.save();
-  context.setLineDash([24, 16]);
-  context.lineWidth = 8;
-  context.strokeStyle = "rgba(71, 215, 172, 0.95)";
-  context.strokeRect(safe.x, safe.y, safe.width, safe.height);
-  context.restore();
-  context.font = "bold 38px sans-serif";
-  context.fillStyle = "rgba(255,255,255,.95)";
-  context.fillText(`SHORTFLOW GUIDE · ${SAFE_ZONE_PROFILES[platform].label} · ${role.toUpperCase()}`, 32, 58);
-  context.font = "bold 26px sans-serif";
-  context.fillStyle = "rgba(255,95,120,.95)";
-  context.fillText("EXPORT 전에 이 가이드 클립을 삭제하세요", 32, 100);
-  const bytes = await canvasToPngBytes(canvas);
+  const expectedContextKey = await readActiveContextKey();
+  const guideLabel = safeZoneGuideLabel(platform, role);
+  const guide = renderSafeZoneGuideBmp({
+    width: 1080,
+    height: 1920,
+    platform,
+    role,
+    includeRemovalWarning: true,
+  });
   const uxpRoot = require("uxp") as any;
   const fileSystem = uxpRoot?.storage?.localFileSystem;
   const dataFolder = await fileSystem?.getDataFolder?.();
   if (!dataFolder?.createFile) throw new Error("Safe Zone 가이드를 저장할 UXP 데이터 폴더를 사용할 수 없습니다.");
-  const filename = `__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__${platform}_${role}.png`;
+  const filename = `__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__${guide.suggestedFileName}`;
   const file = await dataFolder.createFile(filename, { overwrite: true });
   const binary = uxpRoot?.storage?.formats?.binary;
-  await file.write(bytes.slice().buffer, { format: binary });
-  const status = await readSequenceStatus();
+  const bytes = guide.bytes;
+  await file.write(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), { format: binary });
+  const status = await readSequenceStatus(undefined, { expectedContextKey });
   if (status.videoTrackCount >= 99) throw new Error("가이드용 비디오 트랙을 추가할 수 없습니다. 비디오 트랙 수를 줄여 주세요.");
   const duration = Math.max(0.1, status.sequenceEnd - status.playerPosition);
   await importAndInsertAsset(String(file.nativePath ?? ""), {
@@ -1168,9 +1671,10 @@ async function createPremiereSafeZoneOverlay(
     audioTrackIndex: 0,
     displayName: filename,
     durationSeconds: duration,
+    expectedContextKey,
   });
-  activity.add("warning", `Safe Zone 가이드를 최상단 트랙에 삽입했습니다. 내보내기 전 반드시 삭제하세요: ${filename}`);
-  toast("Safe Zone 가이드를 삽입했습니다. 내보내기 전 삭제해 주세요.", "warning", 7000);
+  activity.add("warning", `${guideLabel} 오버레이를 최상단 트랙에 삽입했습니다. 내보내기 전 반드시 삭제하세요: ${filename}`);
+  toast(`${guideLabel} 오버레이를 삽입했습니다. 내보내기 전 삭제해 주세요.`, "warning", 7000);
 }
 
 function guarded(handler: () => Promise<void>, context: string): () => Promise<void> {
@@ -1201,6 +1705,9 @@ function bindCoreEvents(): void {
   bind("sync-assets-btn", "click", guarded(handleSyncAssets, "자산 동기화 실패"));
   bind("asset-search-input", "input", () => renderAssets());
   bind("asset-type-select", "change", () => renderAssets());
+  bind("asset-category-select", "change", () => renderAssets());
+  bind("open-asset-category-btn", "click", guarded(handleOpenAssetCategory, "선택 폴더 열기 실패"));
+  bind("asset-rights-save-btn", "click", guarded(handleSaveAssetRights, "에셋 권리 정보 저장 실패"));
   bind("ai-save-btn", "click", guarded(handleAISave, "AI 설정 저장 실패"));
   bind("ai-test-btn", "click", guarded(handleAITest, "AI 연결 테스트 실패"));
   bind("clear-log-btn", "click", () => activity.clear());
@@ -1237,15 +1744,17 @@ function bindCoreEvents(): void {
 async function bootstrap(): Promise<void> {
   if (initialized) return;
   initialized = true;
+  assetOrder = loadAssetOrder();
   applySettingsToUI();
   bindCoreEvents();
   renderDiagnosticsReport(null);
   await initializeAssetLibrary();
+  renderAssetRights(null);
   try {
     referenceController = new ReferenceController({
       onActivity: (message) => activity.add("success", message),
       onError: (error, context) => reportError(error, context),
-      onSelectionChange: (ids) => activity.add("info", `AI 이미지 레퍼런스 ${ids.length}개 선택`),
+      onSelectionChange: (ids) => activity.add("info", `AI 참고 레퍼런스 ${ids.length}개 선택`),
     });
     await referenceController.initialize();
   } catch (error) {
@@ -1326,26 +1835,21 @@ async function bootstrap(): Promise<void> {
   try {
     automationController = new AutomationController({
       getTranscript: () => {
-        const transcript = speechController?.transcript;
-        return transcript
-          ? {
-            name: transcript.name,
-            duration: transcript.duration,
-            segments: transcript.result.segments,
-          }
-          : null;
+        return resolveAutomationTranscript(speechController?.transcript, subtitleController?.document);
       },
       onActivity: (message) => activity.add("success", message),
       onError: (error, context) => reportError(error, context),
-      onAddMarkers: async (plan, cues) => {
-        const result = await addAutomationMarkers(plan, cues);
+      getSourceContextKey: readActiveContextKey,
+      onAddMarkers: async (plan, cues, guard) => {
+        const result = await addAutomationMarkers(plan, cues, guard);
         activity.add("success", `Premiere 추천 마커 추가 · CUT ${result.cutMarkers}개 · ZOOM ${result.punchMarkers}개`);
         toast("자동 편집 추천 마커를 추가했습니다.", "success");
       },
-      onApply: async (plan, cues) => {
+      onApply: async (plan, cues, guard) => {
         let operationId = "";
         try {
           const result = await applyAutomationPlan(plan, cues, {
+            expectedContextKey: guard.sourceContextKey,
             onClonePrepared: async ({ sourceGuid, cloneGuid, sequenceName }) => {
               if (!recoveryManager) return;
               try {
@@ -1404,11 +1908,15 @@ async function bootstrap(): Promise<void> {
         }
       },
       onCreateSafeOverlay: createPremiereSafeZoneOverlay,
-      onAlignSafeZone: async (alignment) => {
+      onAlignSafeZone: async (alignment, platform, role) => {
         if (!alignment.changed) return;
-        const result = await alignSelectedVideoToSafeZone(alignment.rect);
-        activity.add("success", `Safe Zone 정렬 · 선택 ${result.selected}개 · 변경 ${result.changed}개 · 건너뜀 ${result.skipped}개`);
+        const result = await alignSelectedVideoToSafeZone(alignment, platform, role);
+        activity.add(
+          result.skipped === 0 && result.changed === result.selected ? "success" : "warning",
+          `${safeZoneGuideLabel(platform, role)} 정렬 · 선택 ${result.selected}개 · 변경 ${result.changed}개 · 보존/건너뜀 ${result.skipped}개`,
+        );
         for (const warning of result.warnings) activity.add("warning", warning);
+        return result;
       },
     });
     await automationController.initialize();
@@ -1423,6 +1931,9 @@ async function bootstrap(): Promise<void> {
       onImportSrt: readSrtFile,
       onExportSrt: writeSrtFile,
       aiProvider: runSubtitleAI,
+      onChange: (document) => {
+        automationController?.setTranscript(subtitleDocumentToAutomationTranscript(document));
+      },
       onActivity: (message) => activity.add("success", message),
       onError: (error, context) => reportError(error, context),
     });
@@ -1436,13 +1947,32 @@ async function bootstrap(): Promise<void> {
       getSettings: () => settings,
       updateSettings,
       onActivity: (message) => activity.add("success", message),
+      onWarning: (message) => activity.add("warning", message),
       onError: (error, context) => reportError(error, context),
+      onSourceChange: () => {
+        automationController?.setTranscript(null);
+      },
+      onTtsOutput: async (output, request, result) => {
+        try {
+          const record = createTtsAssetRightsRecord({
+            nativePath: output.nativePath,
+            name: output.name,
+            model: result.model || request.model,
+            voice: result.voice || request.voice,
+            format: result.extension || request.format,
+          });
+          const saved = await ensureAssetRightsRegistry().upsert(record);
+          const projectKey = await subtitleProjectKey().catch(() => SESSION_FALLBACK_PROJECT_KEY);
+          rememberSessionGeneratedAssetRights(saved.assetId, projectKey);
+          activity.add("info", `AI 음성 권리 정보 자동 기록: ${saved.assetName}`);
+        } catch (error) {
+          activity.add("warning", `AI 음성 권리 정보 자동 기록 실패: ${errorMessage(error)}`);
+        }
+      },
       onTranscript: (transcript) => {
-        automationController?.setTranscript({
-          name: transcript.name,
-          duration: transcript.duration,
-          segments: transcript.result.segments,
-        });
+        if (!subtitleController) {
+          automationController?.setTranscript(resolveAutomationTranscript(transcript, null));
+        }
         if (subtitleController && transcript.result.segments.length > 0) {
           subtitleController.setDocument(createSubtitleDocument(
             subtitleController.projectKey,
@@ -1458,9 +1988,10 @@ async function bootstrap(): Promise<void> {
               enabled: true,
               hidden: false,
             })),
-          ));
+          ), true);
         }
       },
+      ensureAiConsent: () => ensureAiConsent("TTS/STT"),
       runTts: (request) => {
         const client = new SpeechApiClient({ endpoint: settings.aiEndpoint });
         if (!aiQueueController) return client.synthesize(request);
@@ -1513,19 +2044,48 @@ async function bootstrap(): Promise<void> {
   activity.add("info", "ShortFlow Studio가 준비되었습니다.");
 }
 
+function whenDocumentReady(task: () => void): void {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", task, { once: true });
+    return;
+  }
+  task();
+}
+
+function startPanel(): void {
+  whenDocumentReady(() => {
+    setupTabs();
+    void bootstrap()
+      .then(() => startSubtitlePlayheadTracking())
+      .catch((error) => reportError(error, "플러그인 초기화 실패"));
+  });
+}
+
+function destroyPanel(): void {
+  stopSubtitlePlayheadTracking();
+  clearAssetPreview();
+  const controller = thumbnailController;
+  thumbnailController = null;
+  if (controller) {
+    void controller.dispose().catch((error) => reportError(error, "썸네일 편집기 종료 저장 실패"));
+  }
+}
+
 entrypoints.setup({
   panels: {
     shortflowPanel: {
       show() {
-        void bootstrap()
-          .then(() => startSubtitlePlayheadTracking())
-          .catch((error) => reportError(error, "플러그인 초기화 실패"));
+        startPanel();
       },
       hide() {
         stopSubtitlePlayheadTracking();
+        clearAssetPreview();
+      },
+      destroy() {
+        destroyPanel();
       },
     },
   },
 });
 
-setupTabs();
+startPanel();

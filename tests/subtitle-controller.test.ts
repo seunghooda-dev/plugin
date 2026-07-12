@@ -72,6 +72,7 @@ class FakeElement implements SubtitleDomElement {
   readonly classList: FakeClassList;
   focused = false;
   scrolled = false;
+  querySelectorAllCalls = 0;
   private readonly attributes = new Map<string, string>();
   private readonly listeners = new Map<string, Set<(event: SubtitleDomEvent) => void>>();
 
@@ -124,6 +125,7 @@ class FakeElement implements SubtitleDomElement {
   }
 
   querySelectorAll(selector: string): FakeElement[] {
+    this.querySelectorAllCalls += 1;
     const result: FakeElement[] = [];
     const visit = (element: FakeElement): void => {
       element.children.forEach((child) => {
@@ -246,6 +248,39 @@ class FakeTimers {
     const callbacks = [...this.callbacks.values()];
     this.callbacks.clear();
     callbacks.forEach((callback) => callback());
+  }
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolvePromise: (value: T) => void = () => undefined;
+  let rejectPromise: (error: unknown) => void = () => undefined;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+class DeferredReadStorage implements SubtitleStorageAdapter {
+  readonly values = new Map<string, string>();
+  readonly reads = new Map<string, Deferred<unknown>>();
+  readonly getCalls: string[] = [];
+  readonly writes: Array<{ key: string; value: string }> = [];
+
+  getItem(key: string): unknown {
+    this.getCalls.push(key);
+    return this.reads.get(key)?.promise ?? this.values.get(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+    this.writes.push({ key, value });
   }
 }
 
@@ -398,6 +433,31 @@ describe("SubtitleController initialization, rendering, and playhead", () => {
     assert.equal(dom.getElementById("subtitle-cue-list")?.querySelectorAll("[data-cue-row]").length, 2);
   });
 
+  it("does not revive rendering when disposed while getProjectKey is pending", async () => {
+    const projectKey = deferred<string>();
+    const changes: string[] = [];
+    let keyCalls = 0;
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      getProjectKey: () => {
+        keyCalls += 1;
+        return keyCalls === 1 ? projectKey.promise : "project-A";
+      },
+      onChange: (document) => changes.push(document.projectKey),
+    });
+    const initialization = controller.initialize();
+    controller.dispose();
+    projectKey.resolve("disposed-project");
+    await initialization;
+    assert.equal(controller.projectKey, "untitled-project");
+    assert.deepEqual(changes, []);
+
+    await controller.initialize();
+    assert.equal(controller.projectKey, "project-A");
+    assert.deepEqual(changes, ["project-A"]);
+  });
+
   it("renders stable cue and word IDs and enforces the DOM cue limit", async () => {
     const dom = editorDom();
     const controller = new SubtitleController({ dom, storage: null, domCueLimit: 1 });
@@ -438,9 +498,24 @@ describe("SubtitleController initialization, rendering, and playhead", () => {
     assert.deepEqual(seeks, [{ seconds: 2, cueId: "cue-1", wordId: "word-2" }]);
     const active = controller.updatePlayhead(2.5);
     assert.equal(active?.wordId, "word-2");
-    const rendered = list.querySelectorAll("[data-word-id]").find((item) => item.dataset.wordId === "word-2")!;
+    const rendered = list.querySelectorAll("[data-word-id]").find((item) =>
+      item.dataset.wordId === "word-2" && item.dataset.subtitleAction === "select-word")!;
     assert.equal(rendered.classList.contains("is-active"), true);
     assert.equal(rendered.getAttribute("aria-current"), "true");
+  });
+
+  it("does not rescan rendered DOM while the playhead remains in the same word", async () => {
+    const dom = editorDom();
+    const controller = new SubtitleController({ dom, storage: null });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    const list = dom.getElementById("subtitle-cue-list")!;
+    const callsBeforePlayhead = list.querySelectorAllCalls;
+    controller.updatePlayhead(2.1);
+    const callsAfterFirstUpdate = list.querySelectorAllCalls;
+    controller.updatePlayhead(2.8);
+    assert.equal(callsAfterFirstUpdate, callsBeforePlayhead);
+    assert.equal(list.querySelectorAllCalls, callsAfterFirstUpdate);
   });
 
   it("returns defensive document copies through setDocument and onChange", async () => {
@@ -450,11 +525,15 @@ describe("SubtitleController initialization, rendering, and playhead", () => {
     await controller.initialize();
     const source = sampleDocument();
     controller.setDocument(source);
+    assert.equal(controller.cueCount, 2);
     source.cues[0]!.text = "외부 변경";
     assert.equal(controller.document.cues[0]?.text, "안녕하세요 반갑습니다");
     assert.ok(emitted);
     (emitted as SubtitleDocument).cues[0]!.text = "콜백 변경";
     assert.equal(controller.document.cues[0]?.text, "안녕하세요 반갑습니다");
+    const copy = controller.document;
+    copy.cues.pop();
+    assert.equal(controller.cueCount, 2);
   });
 });
 
@@ -497,6 +576,30 @@ describe("SubtitleController editing and history", () => {
     controller.setDocument(sampleDocument());
     controller.reflow();
     assert.ok(controller.document.cues.every((cue) => !cue.enabled || cue.text.length <= 5));
+  });
+
+  it("enforces the controller cue ceiling during local reflow", async () => {
+    const controller = new SubtitleController({ dom: editorDom(), storage: null, maxCueCount: 2 });
+    await controller.initialize();
+    const source = sampleDocument();
+    source.cues = [source.cues[0]!];
+    controller.setDocument(source);
+    const snapshot = controller.document;
+    assert.throws(() => controller.reflow(4), /출력 큐 상한 2개/u);
+    assert.deepEqual(controller.document, snapshot);
+  });
+
+  it("preserves replacement documents in undo history when requested", async () => {
+    const controller = new SubtitleController({ dom: editorDom(), storage: null });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    const replacement = sampleDocument();
+    replacement.cues[0]!.words[0]!.t = "새STT";
+    replacement.cues[0]!.text = "새STT 반갑습니다";
+    controller.setDocument(replacement, true);
+    assert.equal(controller.document.cues[0]?.text, "새STT 반갑습니다");
+    controller.undo();
+    assert.equal(controller.document.cues[0]?.text, "안녕하세요 반갑습니다");
   });
 
   it("supports keyboard hiding and inline Enter edits", async () => {
@@ -581,6 +684,105 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     assert.match(last?.value ?? "", /"cueId":"cue-1"/u);
   });
 
+  it("keeps the newest project when overlapping project loads resolve out of order", async () => {
+    const storage = new DeferredReadStorage();
+    const timers = new FakeTimers();
+    const activities: string[] = [];
+    const changes: string[] = [];
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage,
+      setTimer: timers.set,
+      clearTimer: timers.clear,
+      onActivity: (message) => activities.push(message),
+      onChange: (document) => changes.push(document.projectKey),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+
+    const projectARead = deferred<unknown>();
+    const projectBRead = deferred<unknown>();
+    storage.reads.set(subtitleAutosaveKey("project-A"), projectARead);
+    storage.reads.set(subtitleAutosaveKey("project-B"), projectBRead);
+
+    const loadA = controller.loadProject("project-A");
+    await settle();
+    assert.ok(storage.getCalls.includes(subtitleAutosaveKey("project-A")));
+    const loadB = controller.loadProject("project-B");
+    await settle();
+    assert.ok(storage.getCalls.includes(subtitleAutosaveKey("project-B")));
+
+    projectBRead.resolve(serializeSubtitleAutosave(sampleDocument("project-B")));
+    await loadB;
+    projectARead.resolve(serializeSubtitleAutosave(sampleDocument("project-A")));
+    await loadA;
+
+    assert.equal(controller.projectKey, "project-B");
+    assert.equal(controller.document.cues[0]?.text, "안녕하세요 반갑습니다");
+    assert.equal(changes.at(-1), "project-B");
+    assert.equal(activities.filter((message) => message.includes("복원했습니다")).length, 1);
+    assert.ok(storage.values.has(subtitleAutosaveKey("untitled-project")));
+  });
+
+  it("switches to an unsaved empty target while preserving a damaged target autosave", async () => {
+    const dom = editorDom();
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    const validTarget = serializeSubtitleAutosave(sampleDocument("project-B"));
+    const damaged = JSON.parse(validTarget) as {
+      document: SubtitleDocument;
+    };
+    damaged.document.cues[0]!.words.reverse();
+    const damagedRaw = JSON.stringify(damaged);
+    storage.values.set(subtitleAutosaveKey("project-B"), damagedRaw);
+    const controller = new SubtitleController({
+      dom,
+      storage,
+      onError: (error, context) => errors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+
+    await controller.loadProject("project-B");
+    assert.equal(controller.projectKey, "project-B");
+    assert.equal(controller.cueCount, 0);
+    assert.equal(storage.values.get(subtitleAutosaveKey("project-B")), damagedRaw);
+    assert.equal(storage.writes.some((write) => write.key === subtitleAutosaveKey("project-B")), false);
+    assert.equal(dom.getElementById("subtitle-status")?.dataset.status, "error");
+    assert.match(errors.at(-1) ?? "", /프로젝트 자막 복원 실패.*정렬/u);
+
+    storage.values.set(subtitleAutosaveKey("project-B"), validTarget);
+    await controller.loadProject("project-B");
+    assert.equal(controller.projectKey, "project-B");
+  });
+
+  it("recovers the serialized autosave queue after a failed write", async () => {
+    const values = new Map<string, string>();
+    let attempts = 0;
+    const storage: SubtitleStorageAdapter = {
+      getItem: (key) => values.get(key),
+      setItem: async (key, value) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary disk failure");
+        values.set(key, value);
+      },
+    };
+    const timers = new FakeTimers();
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage,
+      setTimer: timers.set,
+      clearTimer: timers.clear,
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await assert.rejects(() => controller.flushAutosave(), /temporary disk failure/u);
+    controller.editWord("cue-1", "word-1", "복구됨");
+    await controller.flushAutosave();
+    assert.equal(attempts, 2);
+    assert.match(values.get(subtitleAutosaveKey("untitled-project")) ?? "", /복구됨/u);
+  });
+
   it("applies a provider response only after the validation hook", async () => {
     const dom = editorDom();
     let validated = false;
@@ -606,6 +808,28 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     assert.equal(controller.document.cues[0]?.text, "검토된 자막");
   });
 
+  it("parses and validates the default AI JSON path only once", async () => {
+    const originalParse = JSON.parse;
+    let parseCalls = 0;
+    JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+      parseCalls += 1;
+      return originalParse(text, reviver);
+    }) as typeof JSON.parse;
+    try {
+      const controller = new SubtitleController({
+        dom: editorDom(),
+        storage: null,
+        aiProvider: (request) => JSON.stringify(request.document),
+      });
+      await controller.initialize();
+      controller.setDocument(sampleDocument());
+      await controller.runAi("review");
+      assert.equal(parseCalls, 1);
+    } finally {
+      JSON.parse = originalParse;
+    }
+  });
+
   it("prevents duplicate AI execution while a provider is pending", async () => {
     const dom = editorDom();
     let release: ((document: SubtitleDocument) => void) | undefined;
@@ -617,6 +841,111 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     await assert.rejects(() => controller.runAi("review"), /이미 진행 중/u);
     release?.(sampleDocument());
     await first;
+    assert.equal(controller.isBusy, false);
+  });
+
+  it("discards stale AI results after STT replacement, SRT import, or manual editing", async () => {
+    const scenarios: Array<{
+      label: string;
+      mutate(controller: SubtitleController): string;
+    }> = [
+      {
+        label: "STT replacement",
+        mutate: (controller) => {
+          const latest = sampleDocument();
+          latest.cues[0]!.words[0]!.t = "최신STT";
+          latest.cues[0]!.text = "최신STT 반갑습니다";
+          controller.setDocument(latest);
+          return "최신STT 반갑습니다";
+        },
+      },
+      {
+        label: "SRT import",
+        mutate: (controller) => {
+          controller.importSrtText("1\n00:00:01,000 --> 00:00:02,000\n최신 SRT\n");
+          return "최신 SRT";
+        },
+      },
+      {
+        label: "manual edit",
+        mutate: (controller) => {
+          controller.editWord("cue-1", "word-1", "최신수정");
+          return "최신수정 반갑습니다";
+        },
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const pending = deferred<SubtitleDocument>();
+      let requestDocument: SubtitleDocument | null = null;
+      const controller = new SubtitleController({
+        dom: editorDom(),
+        storage: null,
+        aiProvider: (request) => {
+          requestDocument = request.document;
+          return pending.promise;
+        },
+      });
+      await controller.initialize();
+      controller.setDocument(sampleDocument());
+      const ai = controller.runAi("review");
+      assert.ok(requestDocument, scenario.label);
+      const expectedText = scenario.mutate(controller);
+      pending.resolve(requestDocument);
+      await assert.rejects(ai, /문서가 변경되어 이전 결과/u, scenario.label);
+      assert.equal(controller.document.cues[0]?.text, expectedText, scenario.label);
+      assert.equal(controller.isBusy, false, scenario.label);
+    }
+  });
+
+  it("discards an AI result if the document changes during asynchronous validation", async () => {
+    const validation = deferred<SubtitleDocument>();
+    let requestDocument: SubtitleDocument | null = null;
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      aiProvider: (request) => {
+        requestDocument = request.document;
+        return request.document;
+      },
+      validateAiResponse: () => validation.promise,
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    const ai = controller.runAi("review");
+    await Promise.resolve();
+    controller.editWord("cue-1", "word-1", "검증중수정");
+    assert.ok(requestDocument);
+    validation.resolve(requestDocument);
+    await assert.rejects(ai, /문서가 변경되어 이전 결과/u);
+    assert.equal(controller.document.cues[0]?.text, "검증중수정 반갑습니다");
+    assert.equal(controller.isBusy, false);
+  });
+
+  it("invalidates a pending AI request when another project is loaded", async () => {
+    const pending = deferred<SubtitleDocument>();
+    let requestDocument: SubtitleDocument | null = null;
+    const storage = new MemoryStorage();
+    storage.values.set(
+      subtitleAutosaveKey("project-B"),
+      serializeSubtitleAutosave(sampleDocument("project-B")),
+    );
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage,
+      aiProvider: (request) => {
+        requestDocument = request.document;
+        return pending.promise;
+      },
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    const ai = controller.runAi("review");
+    assert.ok(requestDocument);
+    await controller.loadProject("project-B", false);
+    pending.resolve(requestDocument);
+    await assert.rejects(ai, /문서가 변경되어 이전 결과/u);
+    assert.equal(controller.projectKey, "project-B");
     assert.equal(controller.isBusy, false);
   });
 
@@ -665,6 +994,28 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     assert.equal(controller.document.cues.length, 0);
     assert.match(errors[0] ?? "", /SRT 불러오기 실패/u);
     assert.equal(dom.getElementById("subtitle-status")?.dataset.status, "error");
+  });
+
+  it("restores controls after a failed busy AI action and reports the UI error", async () => {
+    const dom = editorDom();
+    const errors: string[] = [];
+    const controller = new SubtitleController({
+      dom,
+      storage: null,
+      aiProvider: async () => { throw new Error("provider unavailable"); },
+      onError: (error, context) => errors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    dom.getElementById("subtitle-ai-review-btn")!.emit("click");
+    await settle();
+    assert.equal(controller.isBusy, false);
+    assert.equal(dom.getElementById("subtitle-ai-review-btn")?.disabled, false);
+    assert.equal(dom.getElementById("subtitle-editor")?.getAttribute("aria-busy"), "false");
+    assert.equal(dom.getElementById("subtitle-status")?.dataset.status, "error");
+    assert.match(errors[0] ?? "", /AI 자막 검토 실패: provider unavailable/u);
+    controller.editWord("cue-1", "word-1", "오류후수정");
+    assert.equal(controller.document.cues[0]?.text, "오류후수정 반갑습니다");
   });
 
   it("can start from an explicit empty document without storage", async () => {

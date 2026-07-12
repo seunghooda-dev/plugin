@@ -1,4 +1,9 @@
-import { importAndInsertAsset, importFilesToProject } from "./premiere";
+import {
+  importAndInsertAsset,
+  importFilesToProject,
+  readActiveContextKey,
+  type InsertAssetOptions,
+} from "./premiere";
 import {
   SpeechApiClient,
   STT_MODELS,
@@ -12,6 +17,8 @@ import {
   type TtsRequest,
   type TtsResult,
   type TtsVoice,
+  validateSttResult,
+  validateTtsResult,
 } from "./speech";
 import {
   SpeechFileError,
@@ -19,6 +26,7 @@ import {
   createDefaultSpeechFileAdapter,
   type SpeechInputFile,
   type SpeechOutputFolder,
+  type SpeechWriteResult,
 } from "./speech-files";
 import type { PluginSettings } from "./settings";
 import { bind, checkedOf, element, numberOf, setText, valueOf } from "./ui";
@@ -29,17 +37,46 @@ export interface SpeechControllerTranscript {
   result: SttResult;
 }
 
+export interface SpeechHostAdapter {
+  getContextKey(): Promise<string>;
+  importAndInsertAsset(nativePath: string, options: InsertAssetOptions): Promise<void>;
+  importFilesToProject(paths: readonly string[], expectedContextKey?: string): Promise<number>;
+}
+
 export interface SpeechControllerOptions {
   getSettings: () => PluginSettings;
   updateSettings: (patch: Partial<PluginSettings>) => void;
   onActivity?: (message: string) => void;
+  onWarning?: (message: string) => void;
   onError?: (error: unknown, context: string) => void;
   onTranscript?: (transcript: SpeechControllerTranscript) => void;
+  onTtsOutput?: (output: SpeechWriteResult, request: TtsRequest, result: TtsResult) => void | Promise<void>;
+  onSourceChange?: () => void;
   fileManager?: SpeechFileManager;
   createClient?: (settings: PluginSettings) => SpeechApiClient;
+  ensureAiConsent?: () => void | Promise<void>;
   runTts?: (request: TtsRequest) => Promise<TtsResult>;
   runStt?: (request: SttRequest) => Promise<SttResult>;
+  hostAdapter?: SpeechHostAdapter;
   now?: () => number;
+}
+
+interface TtsOperationSnapshot {
+  request: TtsRequest;
+  insert: boolean;
+  audioTrackIndex: number;
+  outputBasename: string;
+  outputFolder: SpeechOutputFolder | null;
+}
+
+interface SttOperationSnapshot {
+  request: SttRequest;
+  sourceName: string;
+  sourceRevision: number;
+  sourceSelectionRevision: number;
+  outputMode: "both" | "srt" | "text";
+  importSrt: boolean;
+  outputFolder: SpeechOutputFolder | null;
 }
 
 const LEGACY_TTS_VOICES = new Set<TtsVoice>([
@@ -110,45 +147,111 @@ function durationFromResult(result: SttResult): number {
   return result.segments.reduce((maximum, segment) => Math.max(maximum, segment.end), 0);
 }
 
+function cloneSttResult(result: SttResult): SttResult {
+  return {
+    ...result,
+    segments: result.segments.map((segment) => ({ ...segment })),
+  };
+}
+
+function cloneTranscript(transcript: SpeechControllerTranscript): SpeechControllerTranscript {
+  return {
+    ...transcript,
+    result: cloneSttResult(transcript.result),
+  };
+}
+
+function uiAudioTrackIndex(): number {
+  const trackNumber = Number(valueOf("tts-audio-track-input"));
+  if (!Number.isInteger(trackNumber) || trackNumber < 1 || trackNumber > 99) {
+    throw new Error("TTS 오디오 트랙 번호는 1~99 범위의 정수여야 합니다.");
+  }
+  return trackNumber - 1;
+}
+
 function outputMode(): "both" | "srt" | "text" {
   const value = valueOf("stt-output-format-select");
   return value === "srt" || value === "text" ? value : "both";
 }
 
+function errorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : "";
+}
+
 export class SpeechController {
   private readonly files: SpeechFileManager;
+  private readonly host: SpeechHostAdapter;
   private readonly now: () => number;
+  private readonly outputFolders = new Map<"tts" | "stt", SpeechOutputFolder>();
   private source: SpeechInputFile | null = null;
   private transcriptValue: SpeechControllerTranscript | null = null;
   private previewObjectUrl = "";
   private ttsRunning = false;
   private sttRunning = false;
+  private disposed = false;
+  private lifecycleRevision = 1;
+  private sourceRevision = 0;
+  private sourceSelectionRevision = 0;
 
   constructor(private readonly options: SpeechControllerOptions) {
     this.files = options.fileManager ?? new SpeechFileManager(createDefaultSpeechFileAdapter());
+    this.host = options.hostAdapter ?? {
+      getContextKey: readActiveContextKey,
+      importAndInsertAsset,
+      importFilesToProject,
+    };
     this.now = options.now ?? (() => Date.now());
   }
 
   get transcript(): SpeechControllerTranscript | null {
-    return this.transcriptValue
-      ? { ...this.transcriptValue, result: {
-        ...this.transcriptValue.result,
-        segments: this.transcriptValue.result.segments.map((segment) => ({ ...segment })),
-      } }
-      : null;
+    return this.transcriptValue ? cloneTranscript(this.transcriptValue) : null;
   }
 
   async initialize(): Promise<void> {
+    if (this.disposed) throw new Error("종료된 음성 컨트롤러는 다시 초기화할 수 없습니다.");
     this.bindEvents();
     this.syncTtsIndicators();
-    await Promise.all([this.restoreFolder("tts"), this.restoreFolder("stt")]);
+    await Promise.all([
+      this.guard(() => this.restoreFolder("tts"), "TTS 출력 폴더 복원 실패"),
+      this.guard(() => this.restoreFolder("stt"), "STT 출력 폴더 복원 실패"),
+    ]);
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.lifecycleRevision += 1;
+    this.sourceSelectionRevision += 1;
     if (this.previewObjectUrl && globalThis.URL?.revokeObjectURL) {
       globalThis.URL.revokeObjectURL(this.previewObjectUrl);
     }
     this.previewObjectUrl = "";
+  }
+
+  private operationIsCurrent(lifecycleRevision: number): boolean {
+    return !this.disposed && lifecycleRevision === this.lifecycleRevision;
+  }
+
+  private async captureContextKey(): Promise<string> {
+    const contextKey = (await this.host.getContextKey()).trim();
+    if (!contextKey) throw new Error("활성 프로젝트·시퀀스 context를 확인하지 못했습니다.");
+    return contextKey;
+  }
+
+  private async contextIsCurrent(expected: string, lifecycleRevision: number): Promise<boolean> {
+    if (!this.operationIsCurrent(lifecycleRevision)) return false;
+    try {
+      return (await this.host.getContextKey()) === expected && this.operationIsCurrent(lifecycleRevision);
+    } catch {
+      return false;
+    }
+  }
+
+  private sttSourceIsCurrent(snapshot: SttOperationSnapshot): boolean {
+    return snapshot.sourceRevision === this.sourceRevision
+      && snapshot.sourceSelectionRevision === this.sourceSelectionRevision;
   }
 
   private client(): SpeechApiClient {
@@ -176,7 +279,7 @@ export class SpeechController {
     bind("stt-copy-btn", "click", () => this.guard(() => this.copyTranscript(), "원고 복사 실패"));
   }
 
-  private async guard(task: () => void | Promise<void>, context: string): Promise<void> {
+  private async guard(task: () => unknown | Promise<unknown>, context: string): Promise<void> {
     try { await task(); } catch (error) {
       if (error instanceof SpeechFileError && error.code === "CANCELLED") return;
       this.options.onError?.(error, context);
@@ -200,7 +303,8 @@ export class SpeechController {
   }
 
   private syncTtsIndicators(): void {
-    setText("tts-character-count", String(element<HTMLTextAreaElement>("tts-text-input").value.length));
+    const text = element<HTMLTextAreaElement>("tts-text-input").value;
+    setText("tts-character-count", String((typeof text === "string" ? text : "").length));
     setText("tts-speed-output", `${numberOf("tts-speed-input", 1).toFixed(2)}×`);
     this.persistControls();
   }
@@ -226,6 +330,8 @@ export class SpeechController {
   }
 
   private showFolder(kind: "tts" | "stt", folder: SpeechOutputFolder | null): void {
+    if (folder) this.outputFolders.set(kind, { ...folder });
+    else this.outputFolders.delete(kind);
     const name = folder?.name || "선택되지 않음";
     setText(`${kind}-output-name`, name, folder?.nativePath || name);
     this.options.updateSettings(kind === "tts"
@@ -233,62 +339,145 @@ export class SpeechController {
       : { sttOutputName: folder?.name ?? "", sttOutputToken: folder?.token ?? "" });
   }
 
-  private async chooseFolder(kind: "tts" | "stt"): Promise<void> {
+  private outputFolderSnapshot(kind: "tts" | "stt"): SpeechOutputFolder | null {
+    const folder = this.outputFolders.get(kind);
+    return folder ? { ...folder } : null;
+  }
+
+  private async chooseFolder(kind: "tts" | "stt"): Promise<SpeechOutputFolder> {
     const folder = await this.files.selectOutputFolder(kind);
     this.showFolder(kind, folder);
     this.options.onActivity?.(`${kind.toUpperCase()} 출력 폴더를 선택했습니다: ${folder.name}`);
+    return folder;
   }
 
-  private async ensureFolder(kind: "tts" | "stt"): Promise<void> {
+  private async ensureFolder(kind: "tts" | "stt"): Promise<SpeechOutputFolder> {
     const restored = await this.files.restoreOutputFolder(kind);
     if (restored) {
       this.showFolder(kind, restored);
-      return;
+      return restored;
     }
-    await this.chooseFolder(kind);
+    return this.chooseFolder(kind);
   }
 
   private async chooseSttSource(): Promise<void> {
-    this.source = await this.files.selectSttInput();
+    if (this.disposed) return;
+    const selectionRevision = ++this.sourceSelectionRevision;
+    const lifecycleRevision = this.lifecycleRevision;
+    const selected = await this.files.selectSttInput();
+    if (!this.operationIsCurrent(lifecycleRevision) || selectionRevision !== this.sourceSelectionRevision) return;
+    this.source = {
+      ...selected,
+      bytes: selected.bytes.slice(),
+    };
+    this.sourceRevision += 1;
+    this.transcriptValue = null;
+    element<HTMLTextAreaElement>("stt-result-output").value = "";
+    element<HTMLButtonElement>("stt-copy-btn").disabled = true;
     setText("stt-source-name", `${this.source.name} · ${(this.source.size / 1_048_576).toFixed(1)}MB`, this.source.nativePath);
     setText("stt-result-meta", "입력 파일이 준비되었습니다. 원고·자막 생성을 실행해 주세요.");
+    this.options.onSourceChange?.();
     this.options.onActivity?.(`STT 입력 선택: ${this.source.name}`);
   }
 
+  private ttsSnapshot(): TtsOperationSnapshot {
+    const model = valueOf("tts-model-select");
+    const voice = valueOf("tts-voice-select");
+    const format = valueOf("tts-format-select");
+    if (!isTtsModel(model) || !isTtsVoice(voice) || !isTtsFormat(format)) {
+      throw new Error("TTS 모델, 목소리 또는 파일 형식 설정이 올바르지 않습니다.");
+    }
+    const insert = checkedOf("tts-insert-checkbox");
+    return {
+      request: {
+        text: valueOf("tts-text-input"),
+        model,
+        voice,
+        format,
+        speed: numberOf("tts-speed-input", 1),
+        instructions: valueOf("tts-instructions-input"),
+      },
+      insert,
+      audioTrackIndex: insert ? uiAudioTrackIndex() : 0,
+      outputBasename: `ShortFlow_TTS_${stamp(this.now())}`,
+      outputFolder: this.outputFolderSnapshot("tts"),
+    };
+  }
+
+  private sttSnapshot(): SttOperationSnapshot {
+    const source = this.source;
+    if (!source) throw new Error("먼저 STT 음성·영상 파일을 선택해 주세요.");
+    const model = valueOf("stt-model-select");
+    if (!isSttModel(model)) throw new Error("STT 모델 설정이 올바르지 않습니다.");
+    return {
+      request: {
+        bytes: source.bytes.slice(),
+        filename: source.name,
+        mimeType: source.mimeType,
+        model,
+        language: valueOf("stt-language-input"),
+        prompt: valueOf("stt-prompt-input"),
+      },
+      sourceName: source.name,
+      sourceRevision: this.sourceRevision,
+      sourceSelectionRevision: this.sourceSelectionRevision,
+      outputMode: outputMode(),
+      importSrt: checkedOf("stt-import-checkbox"),
+      outputFolder: this.outputFolderSnapshot("stt"),
+    };
+  }
+
   private async generateTts(): Promise<void> {
-    if (this.ttsRunning) return;
+    if (this.disposed || this.ttsRunning) return;
     this.ttsRunning = true;
+    const lifecycleRevision = this.lifecycleRevision;
     const button = element<HTMLButtonElement>("tts-generate-btn");
     button.disabled = true;
     try {
       this.enforceVoiceCompatibility();
       this.persistControls();
-      await this.ensureFolder("tts");
-      const modelValue = valueOf("tts-model-select");
-      const voiceValue = valueOf("tts-voice-select");
-      const formatValue = valueOf("tts-format-select");
-      if (!isTtsModel(modelValue) || !isTtsVoice(voiceValue) || !isTtsFormat(formatValue)) {
-        throw new Error("TTS 모델, 목소리 또는 파일 형식 설정이 올바르지 않습니다.");
-      }
-      const request: TtsRequest = {
-        text: valueOf("tts-text-input"),
-        model: modelValue,
-        voice: voiceValue,
-        format: formatValue,
-        speed: numberOf("tts-speed-input", 1),
-        instructions: valueOf("tts-instructions-input"),
-      };
-      const result = await (this.options.runTts?.(request) ?? this.client().synthesize(request));
-      const written = await this.files.writeTtsAudio(result.bytes, `ShortFlow_TTS_${stamp(this.now())}`, result.extension);
+      const snapshot = this.ttsSnapshot();
+      const contextKey = snapshot.insert ? await this.captureContextKey() : "";
+      await this.options.ensureAiConsent?.();
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const outputFolder = snapshot.outputFolder ?? await this.ensureFolder("tts");
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const providerRequest: TtsRequest = { ...snapshot.request };
+      const provided = await (this.options.runTts?.(providerRequest) ?? this.client().synthesize(providerRequest));
+      const result = validateTtsResult(provided, snapshot.request);
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const written = await this.files.writeTtsAudio(
+        result.bytes,
+        snapshot.outputBasename,
+        result.extension,
+        outputFolder,
+      );
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
       this.setAudioPreview(result.bytes, result.mimeType);
-      if (checkedOf("tts-insert-checkbox")) {
-        await importAndInsertAsset(written.nativePath, {
-          videoTrackIndex: 0,
-          audioTrackIndex: Math.max(0, Math.round(numberOf("tts-audio-track-input", 2)) - 1),
-          displayName: written.name,
-        });
+      await this.options.onTtsOutput?.(written, snapshot.request, result);
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      if (snapshot.insert) {
+        if (!await this.contextIsCurrent(contextKey, lifecycleRevision)) {
+          this.options.onWarning?.("활성 프로젝트 또는 시퀀스가 변경되어 TTS 파일과 미리듣기만 보존하고 타임라인 삽입은 건너뛰었습니다.");
+          return;
+        }
+        try {
+          await this.host.importAndInsertAsset(written.nativePath, {
+            videoTrackIndex: 0,
+            audioTrackIndex: snapshot.audioTrackIndex,
+            displayName: written.name,
+            expectedContextKey: contextKey,
+          });
+        } catch (error) {
+          if (errorCode(error) === "HOST_CONTEXT_CHANGED") {
+            this.options.onWarning?.("활성 프로젝트 또는 시퀀스가 변경되어 TTS 파일과 미리듣기만 보존하고 타임라인 삽입은 건너뛰었습니다.");
+            return;
+          }
+          throw error;
+        }
       }
-      this.options.onActivity?.(`TTS 생성 완료: ${written.name}${checkedOf("tts-insert-checkbox") ? " · 타임라인 삽입" : ""}`);
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      this.options.onActivity?.(`TTS 생성 완료: ${written.name}${snapshot.insert ? " · 타임라인 삽입" : ""}`);
     } finally {
       button.disabled = false;
       this.ttsRunning = false;
@@ -296,62 +485,110 @@ export class SpeechController {
   }
 
   private setAudioPreview(bytes: Uint8Array, mimeType: string): void {
-    if (this.previewObjectUrl && globalThis.URL?.revokeObjectURL) globalThis.URL.revokeObjectURL(this.previewObjectUrl);
-    const preview = previewUrl(bytes, mimeType);
-    this.previewObjectUrl = preview.revoke ? preview.url : "";
     const audio = element<HTMLAudioElement>("tts-audio-preview");
-    audio.src = preview.url;
-    audio.hidden = false;
-    audio.load();
+    const previousObjectUrl = this.previewObjectUrl;
+    const preview = previewUrl(bytes, mimeType);
+    try {
+      audio.src = preview.url;
+      audio.hidden = false;
+      audio.load();
+      this.previewObjectUrl = preview.revoke ? preview.url : "";
+      if (previousObjectUrl && globalThis.URL?.revokeObjectURL) {
+        globalThis.URL.revokeObjectURL(previousObjectUrl);
+      }
+    } catch (error) {
+      if (preview.revoke && globalThis.URL?.revokeObjectURL) globalThis.URL.revokeObjectURL(preview.url);
+      throw error;
+    }
   }
 
   private async runStt(): Promise<void> {
-    if (this.sttRunning) return;
+    if (this.disposed || this.sttRunning) return;
     if (!this.source) throw new Error("먼저 STT 음성·영상 파일을 선택해 주세요.");
     this.sttRunning = true;
+    const lifecycleRevision = this.lifecycleRevision;
     const button = element<HTMLButtonElement>("stt-run-btn");
     button.disabled = true;
     try {
       this.persistControls();
-      await this.ensureFolder("stt");
-      const modelValue = valueOf("stt-model-select");
-      if (!isSttModel(modelValue)) throw new Error("STT 모델 설정이 올바르지 않습니다.");
-      const request: SttRequest = {
-        bytes: this.source.bytes,
-        filename: this.source.name,
-        mimeType: this.source.mimeType,
-        model: modelValue,
-        language: valueOf("stt-language-input"),
-        prompt: valueOf("stt-prompt-input"),
-      };
-      const result = await (this.options.runStt?.(request) ?? this.client().transcribe(request));
-      const basename = `${stripExtension(this.source.name)}_ShortFlow`;
-      const mode = outputMode();
+      const snapshot = this.sttSnapshot();
+      const contextKey = await this.captureContextKey();
+      await this.options.ensureAiConsent?.();
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const outputFolder = snapshot.outputFolder ?? await this.ensureFolder("stt");
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const providerRequest: SttRequest = { ...snapshot.request, bytes: snapshot.request.bytes.slice() };
+      const provided = await (this.options.runStt?.(providerRequest) ?? this.client().transcribe(providerRequest));
+      const result = validateSttResult(provided, snapshot.request.model);
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      const basename = `${stripExtension(snapshot.sourceName)}_ShortFlow`;
       const writtenPaths: string[] = [];
-      if (mode === "both" || mode === "text") {
-        const textFile = await this.files.writeTranscript(result.text, basename, "txt");
+      let srtProjectImportSucceeded = false;
+      if (snapshot.outputMode === "both" || snapshot.outputMode === "text") {
+        const textFile = await this.files.writeTranscript(result.text, basename, "txt", outputFolder);
         writtenPaths.push(textFile.nativePath);
       }
-      if (mode === "both" || mode === "srt") {
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      if (snapshot.outputMode === "both" || snapshot.outputMode === "srt") {
         if (!result.srt) {
-          if (mode === "srt") throw new Error("선택한 STT 모델은 타임코드 SRT를 만들지 않습니다. 화자 구분 또는 Whisper SRT를 선택해 주세요.");
+          if (snapshot.outputMode === "srt") throw new Error("선택한 STT 모델은 타임코드 SRT를 만들지 않습니다. 화자 구분 또는 Whisper SRT를 선택해 주세요.");
           this.options.onActivity?.("선택한 STT 모델에는 타임코드가 없어 TXT만 저장했습니다.");
         } else {
-          const srtFile = await this.files.writeTranscript(result.srt, basename, "srt");
+          const srtFile = await this.files.writeTranscript(result.srt, basename, "srt", outputFolder);
           writtenPaths.push(srtFile.nativePath);
-          if (checkedOf("stt-import-checkbox")) await importFilesToProject([srtFile.nativePath]);
+          if (snapshot.importSrt) {
+            if (!this.sttSourceIsCurrent(snapshot)) {
+              this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 새 입력 선택이 시작되어 이전 결과의 프로젝트 가져오기와 화면 적용을 건너뛰었습니다.`);
+              return;
+            }
+            if (!await this.contextIsCurrent(contextKey, lifecycleRevision)) {
+              this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 활성 프로젝트 또는 시퀀스가 변경되어 SRT 가져오기와 화면 적용을 건너뛰었습니다.`);
+              return;
+            }
+            if (!this.sttSourceIsCurrent(snapshot)) {
+              this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 새 입력 선택이 시작되어 이전 SRT 가져오기를 건너뛰었습니다.`);
+              return;
+            }
+            try {
+              await this.host.importFilesToProject([srtFile.nativePath], contextKey);
+              srtProjectImportSucceeded = true;
+            } catch (error) {
+              if (errorCode(error) === "HOST_CONTEXT_CHANGED") {
+                this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 프로젝트 context가 변경되어 SRT 가져오기와 화면 적용을 건너뛰었습니다.`);
+                return;
+              }
+              if (!await this.contextIsCurrent(contextKey, lifecycleRevision)) {
+                this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 프로젝트 context가 변경되어 SRT 가져오기와 화면 적용을 건너뛰었습니다.`);
+                return;
+              }
+              this.options.onWarning?.("SRT를 프로젝트 bin으로 가져오지 못했지만 로컬 TXT/SRT와 STT 원고는 보존했습니다.");
+            }
+          }
         }
+      }
+      if (!this.operationIsCurrent(lifecycleRevision)) return;
+      if (!this.sttSourceIsCurrent(snapshot)) {
+        this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 새 입력 선택이 시작되어 이전 결과는 화면에 적용하지 않았습니다.`);
+        return;
+      }
+      if (!await this.contextIsCurrent(contextKey, lifecycleRevision)) {
+        this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 활성 프로젝트 또는 시퀀스가 변경되어 화면과 자막 문서에 적용하지 않았습니다.`);
+        return;
+      }
+      if (!this.sttSourceIsCurrent(snapshot)) {
+        this.options.onWarning?.(`STT 저장 완료: ${snapshot.sourceName} · 새 입력 선택이 시작되어 이전 결과는 화면에 적용하지 않았습니다.`);
+        return;
       }
       element<HTMLTextAreaElement>("stt-result-output").value = result.text;
       element<HTMLButtonElement>("stt-copy-btn").disabled = false;
-      setText("stt-result-meta", `${result.segments.length}개 타임코드 · ${writtenPaths.length}개 파일 저장${checkedOf("stt-import-checkbox") && result.srt ? " · SRT 프로젝트 가져오기" : ""}`);
+      setText("stt-result-meta", `${result.segments.length}개 타임코드 · ${writtenPaths.length}개 파일 저장${srtProjectImportSucceeded ? " · SRT 프로젝트 가져오기" : ""}`);
       this.transcriptValue = {
-        name: this.source.name,
+        name: snapshot.sourceName,
         duration: durationFromResult(result),
-        result,
+        result: cloneSttResult(result),
       };
-      this.options.onTranscript?.(this.transcriptValue);
-      this.options.onActivity?.(`STT 완료: ${this.source.name} · ${result.segments.length}개 타임코드`);
+      this.options.onTranscript?.(cloneTranscript(this.transcriptValue));
+      this.options.onActivity?.(`STT 완료: ${snapshot.sourceName} · ${result.segments.length}개 타임코드`);
     } finally {
       button.disabled = false;
       this.sttRunning = false;

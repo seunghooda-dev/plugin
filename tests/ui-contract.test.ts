@@ -57,6 +57,21 @@ const FEATURE_IDS = {
     "final-qc-json-btn",
     "final-qc-md-btn",
   ],
+  assetRights: [
+    "asset-rights-status",
+    "asset-rights-selected-name",
+    "asset-rights-kind-select",
+    "asset-rights-commercial-select",
+    "asset-rights-source-input",
+    "asset-rights-license-input",
+    "asset-rights-expiry-input",
+    "asset-rights-attribution-input",
+    "asset-rights-notes-input",
+    "asset-rights-save-btn",
+    "asset-audio-preview",
+    "asset-category-select",
+    "open-asset-category-btn",
+  ],
   aiQueue: [
     "ai-queue-pause-btn",
     "ai-cache-clear-btn",
@@ -415,12 +430,40 @@ function assertOperationalSourceContracts(source: string): void {
   assert.match(source, /diagnosticBundleToJSON\(\{[\s\S]*?reportPurpose:\s*"user-initiated-local-export"/);
   assert.match(source, /getFileForSaving\?\.\([\s\S]*?ShortFlow_Diagnostics_/);
   assert.match(source, /await file\.write\(payload,/);
+  assert.match(source, /function ensureAiConsent\(/);
+  assert.match(source, /ensureAiConsent\("AI 자막"\)/);
+  assert.match(source, /ensureAiConsent\("AI 연결 테스트"\)/);
+  assert.match(source, /ensureAiConsent\("썸네일 AI"\)/);
+  assert.match(source, /ensureAiConsent:\s*\(\)\s*=>\s*ensureAiConsent\("TTS\/STT"\)/);
+  assert.match(source, /onWarning:\s*\(message\)\s*=>\s*activity\.add\("warning", message\)/);
+  assert.match(source, /onSourceChange:\s*\(\)\s*=>\s*\{[\s\S]{0,240}?automationController\?\.setTranscript\(null\);[\s\S]{0,80}?\}/);
+  assert.match(source, /onTranscript:\s*\(transcript\)\s*=>\s*\{[\s\S]{0,500}?automationController\?\.setTranscript\(/);
+  assert.match(source, /controller\.cueCount === 0/);
+  assert.match(source, /const generation = \+\+statusRefreshGeneration;[\s\S]*?controller\.projectKey !== projectKey[\s\S]*?await controller\.loadProject\(projectKey\)/);
+  assert.match(source, /subtitleController\.setDocument\(createSubtitleDocument\([\s\S]{1,1600}?\), true\);/);
+  assert.match(source, /createTtsAssetRightsRecord\(/);
+  assert.match(source, /const sessionGeneratedAssetRightsIdsByProject = new Map<string, Set<string>>\(\);/);
+  assert.match(source, /const normalizedReferenceId = nativePath \? normalizeNativePath\(nativePath\) : fallback\.assetId;/);
+  assert.match(source, /function rememberSessionGeneratedAssetRights\(assetId: string, projectKey = SESSION_FALLBACK_PROJECT_KEY\): void/);
+  assert.match(source, /const sessionGeneratedIds = sessionGeneratedAssetRightsIds\(projectKey\);/);
+  assert.match(source, /sessionGeneratedIds\.has\(record\.assetId\)/);
+  assert.match(source, /rememberSessionGeneratedAssetRights\(saved\.assetId, projectKey\);/);
+  assert.match(source, /return \[\.\.\.visibleRecords, \.\.\.registryOnlyRecords\];/);
+  assert.match(source, /function destroyPanel\(\): void/);
+  assert.match(source, /void controller\.dispose\(\)\.catch\(\(error\) => reportError\(error, "썸네일 편집기 종료 저장 실패"\)\);/);
+  assert.match(source, /destroy\(\)\s*\{[\s\S]{0,120}?destroyPanel\(\);[\s\S]{0,40}?\}/);
+
+  const thumbnailSource = readFileSync(path.join(ROOT, "src", "thumbnail-controller.ts"), "utf8");
+  assert.match(thumbnailSource, /button\.closest<HTMLElement>\("\.thumb-ai-card"\)/);
+  assert.match(thumbnailSource, /button\.disabled \|\| card\?\.hidden/);
+  assert.match(thumbnailSource, /썸네일 AI 보정은 내부 베타에서 비활성화되어 있습니다/);
 }
 
 function assertUiDefaults(document: StaticDocument): void {
   assert.deepEqual(optionValues(document, "ai-provider-select"), ["openai"]);
   assert.equal(defaultOptionValue(document, "ai-provider-select"), DEFAULT_SETTINGS.aiProvider);
   assert.equal(elementById(document, "ai-model-input").attributes.value, DEFAULT_SETTINGS.aiModel);
+  assert.ok(!hasAttribute(elementById(document, "ai-consent-checkbox"), "checked"));
   const endpoint = elementById(document, "ai-endpoint-input");
   assert.equal(endpoint.attributes.value, "https://api.openai.com/v1");
   assert.ok(hasAttribute(endpoint, "readonly"), "the fixed OpenAI endpoint must be readonly");
@@ -451,6 +494,23 @@ function assertUiDefaults(document: StaticDocument): void {
 
   assert.equal(defaultOptionValue(document, "final-qc-platform-select"), "youtube-shorts");
   assert.equal(elementById(document, "final-qc-output-name").attributes.value, "ShortFlow_Export.mp4");
+  assert.deepEqual(optionValues(document, "asset-rights-kind-select"), [
+    "music",
+    "sfx",
+    "image",
+    "video",
+    "ai-audio",
+    "ai-image",
+    "ai-video",
+    "other",
+  ]);
+  assert.equal(defaultOptionValue(document, "asset-rights-commercial-select"), "unknown");
+  const thumbnailAiCard = document.elements.find((element) => classNames(element).has("thumb-ai-card"));
+  assert.ok(thumbnailAiCard, "thumbnail AI card must remain in DOM for deferred roadmap wiring");
+  assert.ok(hasAttribute(thumbnailAiCard, "hidden"), "thumbnail AI card must stay hidden in the internal beta UI");
+  assert.ok(hasAttribute(elementById(document, "thumb-ai-preset-select"), "disabled"));
+  assert.ok(hasAttribute(elementById(document, "thumb-ai-prompt-input"), "disabled"));
+  assert.ok(hasAttribute(elementById(document, "thumb-ai-run-btn"), "disabled"));
   assert.equal(elementById(document, "ai-queue-concurrency-input").attributes.value, "2");
   assert.equal(elementById(document, "ai-request-limit-input").attributes.value, "100");
   assert.equal(elementById(document, "ai-cost-limit-input").attributes.value, "100");
@@ -481,9 +541,29 @@ function assertInitialDisabledStates(document: StaticDocument): void {
 
 function assertCssContracts(css: string): void {
   assert.match(css, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important\s*;/s);
+  assert.match(css, /html,\s*body\s*\{[^}]*height:\s*100%\s*;[^}]*min-height:\s*100%\s*;/s);
+  assert.match(css, /body\s*\{[^}]*overflow:\s*hidden\s*;/s);
+  assert.match(css, /\.app-shell\s*\{[^}]*display:\s*flex\s*;[^}]*flex-direction:\s*column\s*;[^}]*height:\s*100vh\s*;[^}]*overflow:\s*hidden\s*;/s);
+  assert.match(css, /\.workspace\s*\{[^}]*flex:\s*1\s+1\s+auto\s*;[^}]*min-height:\s*0\s*;[^}]*overflow-y:\s*auto\s*;/s);
+  assert.match(css, /\.two-column-layout\s*\{[^}]*display:\s*flex\s*;[^}]*flex-wrap:\s*wrap\s*;/s);
+  assert.match(css, /\.two-column-layout\s*>\s*\*\s*\{[^}]*flex:\s*1\s+1\s+260px\s*;[^}]*min-width:\s*0\s*;/s);
+  assert.match(css, /\.automation-workspace\s*\{[^}]*display:\s*flex\s*;[^}]*flex-wrap:\s*wrap\s*;/s);
+  assert.match(css, /\.automation-card\s*\{[^}]*flex:\s*1\s+1\s+300px\s*;[^}]*min-width:\s*0\s*;/s);
+  assert.match(css, /\.asset-workspace\s*\{[^}]*display:\s*flex\s*;[^}]*flex-wrap:\s*wrap\s*;/s);
+  assert.match(css, /\.asset-sidebar\s*\{[^}]*flex:\s*1\s+1\s+260px\s*;/s);
+  assert.match(css, /\.asset-browser\s*\{[^}]*flex:\s*2\s+1\s+320px\s*;/s);
+  assert.match(css, /\.speech-workspace\s*\{[^}]*display:\s*flex\s*;[^}]*flex-wrap:\s*wrap\s*;/s);
+  assert.match(css, /\.speech-card\s*\{[^}]*flex:\s*1\s+1\s+320px\s*;[^}]*min-width:\s*0\s*;/s);
+  assert.match(css, /@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.asset-browser\s*\{[^}]*order:\s*-1\s*;/s);
+  assert.match(css, /@media\s*\(max-width:\s*500px\)\s*\{[\s\S]*?\.app-header\s*\{[^}]*min-height:\s*48px\s*;[^}]*padding-top:\s*8px\s*;[^}]*padding-bottom:\s*8px\s*;/s);
+  assert.match(css, /@media\s*\(max-width:\s*500px\)\s*\{[\s\S]*?\.sequence-status\s*\{[^}]*padding-top:\s*7px\s*;[^}]*padding-bottom:\s*7px\s*;/s);
+  assert.match(css, /@media\s*\(max-width:\s*500px\)\s*\{[\s\S]*?\.status-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)\s*;[^}]*row-gap:\s*6px\s*;/s);
+  assert.match(css, /@media\s*\(max-width:\s*360px\)\s*\{[\s\S]*?\.app-header\s*\{[^}]*min-height:\s*42px\s*;[^}]*padding-top:\s*6px\s*;[^}]*padding-bottom:\s*6px\s*;/s);
   for (const selector of [
     ".nav-tab[aria-selected=\"true\"]",
     ".workflow-panel",
+    ".qc-status-strip",
+    ".qc-status-item",
     ".final-qc-card",
     ".final-qc-results",
     ".final-qc-row.is-error",
@@ -606,6 +686,34 @@ describe("UXP visual state contract", () => {
   it("styles hidden panels, selected tabs, and integrated feature states", () => {
     assertCssContracts(readFileSync(PUBLIC_CSS_PATH, "utf8"));
   });
+
+  it("binds workflow tabs only after the UXP panel DOM is ready", () => {
+    const source = readFileSync(path.join(ROOT, "index.ts"), "utf8");
+    const uiSource = readFileSync(path.join(ROOT, "src", "ui.ts"), "utf8");
+    assert.match(source, /function whenDocumentReady\(task: \(\) => void\): void/u);
+    assert.match(source, /document\.readyState === "loading"/u);
+    assert.match(source, /document\.addEventListener\("DOMContentLoaded", task, \{ once: true \}\)/u);
+    assert.match(source, /function startPanel\(\): void \{[\s\S]*setupTabs\(\);[\s\S]*bootstrap\(\)/u);
+    assert.doesNotMatch(source, /\nsetupTabs\(\);\nstartPanel\(\);/u);
+    assert.match(uiSource, /let tabsInitialized = false;/u);
+    assert.match(uiSource, /function activateWorkflowTab\(tab: HTMLButtonElement/u);
+    assert.match(uiSource, /function workflowTabFromEvent\(event: Event\): HTMLButtonElement \| null/u);
+    assert.match(uiSource, /document\.addEventListener\("click"[\s\S]*activateWorkflowTab\(tab\);[\s\S]*true\);/u);
+    assert.match(uiSource, /document\.addEventListener\("keydown"[\s\S]*activateWorkflowTab\(next, true\);[\s\S]*true\);/u);
+    assert.match(uiSource, /tabsInitialized = true;/u);
+  });
+
+  it("keeps Premiere Safe Zone overlays on the Host-compatible BMP renderer", () => {
+    const source = readFileSync(path.join(ROOT, "index.ts"), "utf8");
+    const overlayFunction = /async function createPremiereSafeZoneOverlay[\s\S]*?\n\}\n\nfunction guarded/u.exec(source)?.[0] ?? "";
+    assert.match(overlayFunction, /const expectedContextKey = await readActiveContextKey\(\);/u);
+    assert.match(overlayFunction, /renderSafeZoneGuideBmp/u);
+    assert.match(overlayFunction, /__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__/u);
+    assert.match(overlayFunction, /readSequenceStatus\(undefined, \{ expectedContextKey \}\)/u);
+    assert.match(overlayFunction, /expectedContextKey,/u);
+    assert.doesNotMatch(overlayFunction, /document\.createElement\("canvas"\)/u);
+    assert.doesNotMatch(overlayFunction, /canvasToPngBytes/u);
+  });
 });
 
 describe("built UXP artifact contract", () => {
@@ -622,5 +730,17 @@ describe("built UXP artifact contract", () => {
   it("preserves recovery and diagnostics contracts after rebuilding dist", { skip: !distHasOperationalUi }, () => {
     assertOperationalUiContracts(documentFromFile(DIST_HTML_PATH));
     assertOperationalCssContracts(readFileSync(DIST_CSS_PATH, "utf8"));
+  });
+});
+
+describe("internal beta packaging contract", () => {
+  it("keeps production source maps out of dist and CCX candidates", () => {
+    const viteConfig = readFileSync(path.join(ROOT, "vite.config.mjs"), "utf8");
+    const verifyDist = readFileSync(path.join(ROOT, "scripts", "verify-dist.mjs"), "utf8");
+    const verifyRelease = readFileSync(path.join(ROOT, "scripts", "verify-release.mjs"), "utf8");
+    assert.match(viteConfig, /sourcemap:\s*false/);
+    assert.match(verifyDist, /source map을 포함하지 않습니다/);
+    assert.match(verifyDist, /sourceMappingURL을 포함하지 않습니다/);
+    assert.match(verifyRelease, /source map을 포함하지 않습니다/);
   });
 });

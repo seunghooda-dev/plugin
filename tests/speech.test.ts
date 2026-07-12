@@ -3,16 +3,33 @@ import { describe, it } from "node:test";
 
 import {
   MAX_STT_BYTES,
+  MAX_TRANSCRIPT_CHARACTERS,
+  MAX_TRANSCRIPT_SRT_CHARACTERS,
   MAX_TTS_CHARACTERS,
   OPENAI_API_KEY_STORAGE_KEY,
   SpeechApiClient,
   SpeechApiError,
   readOpenAIApiKey,
   transcriptToSrt,
+  validateSttResult,
   validateSpeechEndpoint,
+  validateTtsResult,
   type SpeechFetch,
   type SpeechResponseLike,
 } from "../src/speech";
+
+function audioBytes(format: "wav" | "mp3" | "aac" | "flac"): Uint8Array {
+  if (format === "wav") {
+    const bytes = new Uint8Array(44);
+    bytes.set([82, 73, 70, 70], 0); // RIFF
+    bytes.set([36, 0, 0, 0], 4);
+    bytes.set([87, 65, 86, 69], 8); // WAVE
+    return bytes;
+  }
+  if (format === "flac") return Uint8Array.from([102, 76, 97, 67, 0, 0, 0, 0]); // fLaC
+  if (format === "aac") return Uint8Array.from([0xff, 0xf1, 0x50, 0x80]);
+  return Uint8Array.from([0xff, 0xfb, 0x90, 0x64]);
+}
 
 function response(options: {
   ok?: boolean;
@@ -20,7 +37,7 @@ function response(options: {
   bytes?: Uint8Array;
   payload?: unknown;
 } = {}): SpeechResponseLike {
-  const bytes = options.bytes ?? new Uint8Array([1, 2, 3]);
+  const bytes = options.bytes ?? audioBytes("mp3");
   return {
     ok: options.ok ?? true,
     status: options.status ?? 200,
@@ -116,6 +133,80 @@ describe("transcriptToSrt", () => {
   });
 });
 
+describe("injected speech result boundaries", () => {
+  it("copies valid TTS bytes and rejects empty or MIME/extension mismatches", () => {
+    const request = { text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 } as const;
+    const bytes = audioBytes("mp3");
+    const result = validateTtsResult({ bytes, mimeType: "audio/mpeg", extension: "mp3", model: "tts-1", voice: "alloy" }, request);
+    bytes[0] = 9;
+    assert.notEqual(result.bytes[0], 9);
+    assert.throws(
+      () => validateTtsResult({ bytes: new Uint8Array(), mimeType: "audio/mpeg", extension: "mp3", model: "tts-1", voice: "alloy" }, request),
+      /빈 음성/u,
+    );
+    assert.throws(
+      () => validateTtsResult({ bytes: Uint8Array.from([1]), mimeType: "audio/wav", extension: "mp3", model: "tts-1", voice: "alloy" }, request),
+      /MIME/u,
+    );
+    assert.throws(
+      () => validateTtsResult({ bytes: audioBytes("wav"), mimeType: "audio/wav", extension: "wav", model: "tts-1", voice: "alloy" }, request),
+      /요청한/u,
+    );
+  });
+
+  it("rejects TTS bytes that do not match the requested audio container", () => {
+    assert.throws(
+      () => validateTtsResult({
+        bytes: audioBytes("mp3"),
+        mimeType: "audio/wav",
+        extension: "wav",
+        model: "gpt-4o-mini-tts",
+        voice: "marin",
+      }),
+      /오디오 데이터/u,
+    );
+    for (const format of ["wav", "mp3", "aac", "flac"] as const) {
+      assert.equal(validateTtsResult({
+        bytes: audioBytes(format),
+        mimeType: format === "wav" ? "audio/wav" : format === "aac" ? "audio/aac" : format === "flac" ? "audio/flac" : "audio/mpeg",
+        extension: format,
+        model: "gpt-4o-mini-tts",
+        voice: "marin",
+      }).extension, format);
+    }
+  });
+
+  it("sorts and sanitizes STT segments before rebuilding SRT", () => {
+    const result = validateSttResult({
+      text: "원고",
+      model: "whisper-1",
+      srt: "untrusted order",
+      segments: [
+        { start: 2, end: 3, text: "later" },
+        { start: "0", end: 1, text: "coerced" },
+        { start: 0, end: 1, text: "first" },
+      ],
+    }, "whisper-1");
+    assert.deepEqual(result.segments.map((segment) => segment.text), ["first", "later"]);
+    assert.match(result.srt, /^1\n00:00:00,000 --> 00:00:01,000\nfirst/u);
+  });
+
+  it("rejects oversized transcript text and SRT before file output", () => {
+    assert.throws(() => validateSttResult({
+      text: "x".repeat(MAX_TRANSCRIPT_CHARACTERS + 1),
+      model: "whisper-1",
+      srt: "",
+      segments: [],
+    }, "whisper-1"), /원고 응답/u);
+    assert.throws(() => validateSttResult({
+      text: "ok",
+      model: "whisper-1",
+      srt: "x".repeat(MAX_TRANSCRIPT_SRT_CHARACTERS + 1),
+      segments: [],
+    }, "whisper-1"), /SRT 응답/u);
+  });
+});
+
 describe("SpeechApiClient TTS", () => {
   it("sends official speech fields and returns audio bytes", async () => {
     let capturedUrl = "";
@@ -123,7 +214,7 @@ describe("SpeechApiClient TTS", () => {
     const client = clientWith(async (url, init) => {
       capturedUrl = url;
       captured = init;
-      return response({ bytes: new Uint8Array([9, 8, 7]) });
+      return response({ bytes: audioBytes("wav") });
     });
     const result = await client.synthesize({
       text: "안녕하세요",
@@ -144,7 +235,7 @@ describe("SpeechApiClient TTS", () => {
       speed: 1.15,
       instructions: "따뜻하고 또렷하게",
     });
-    assert.deepEqual([...result.bytes], [9, 8, 7]);
+    assert.equal(result.bytes.byteLength, 44);
     assert.equal(result.mimeType, "audio/wav");
   });
 

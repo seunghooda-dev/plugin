@@ -2,9 +2,11 @@ import { PROFILES, sanitizeFileName, validateShort } from "./core";
 import {
   SAFE_ZONE_PROFILES,
   assessSafeZone,
+  safeZoneGuideLabel,
   type NormalizedRect,
   type SocialPlatform,
 } from "./safe-zone";
+import type { AssetRightsReport } from "./asset-rights";
 
 export const FINAL_QC_SCHEMA_VERSION = 1 as const;
 export const MAX_QC_SNAPSHOT_BYTES = 5 * 1024 * 1024;
@@ -20,6 +22,7 @@ export type FinalQCCategory =
   | "safe-zone"
   | "audio"
   | "media"
+  | "rights"
   | "output";
 
 export interface FinalQCProfile {
@@ -114,6 +117,7 @@ export interface MediaQCSnapshot {
   missingFonts: readonly string[];
   missingAssets: readonly string[];
   guideOverlays: readonly string[];
+  rightsReport?: AssetRightsReport;
 }
 
 export interface OutputQCSnapshot {
@@ -168,6 +172,7 @@ export interface FinalQCReport {
   blockingCodes: string[];
   acceptedWaivers: QCWaiver[];
   rejectedWaivers: Array<QCWaiver & { reasonRejected: string }>;
+  rightsReport?: AssetRightsReport;
 }
 
 export type FinalQCErrorCode =
@@ -202,6 +207,7 @@ const HARD_BLOCK_CODES = new Set([
   "missing-font",
   "missing-asset",
   "guide-overlay",
+  "asset-rights-error",
   "output-filename",
   "output-path",
 ]);
@@ -275,6 +281,7 @@ function validateInput(snapshot: FinalQCSnapshot, waivers: readonly QCWaiver[]):
     { value: snapshot.media?.missingFonts, max: MAX_QC_MEDIA_ITEMS, label: "missingFonts" },
     { value: snapshot.media?.missingAssets, max: MAX_QC_MEDIA_ITEMS, label: "missingAssets" },
     { value: snapshot.media?.guideOverlays, max: MAX_QC_MEDIA_ITEMS, label: "guideOverlays" },
+    { value: snapshot.media?.rightsReport?.issues ?? [], max: MAX_QC_MEDIA_ITEMS, label: "rightsIssues" },
     { value: waivers, max: MAX_QC_WAIVERS, label: "waivers" },
   ];
   for (const item of arrays) {
@@ -379,14 +386,15 @@ function addCaptionChecks(
       ? check("caption-cps", "caption", "pass", "캡션 읽기 속도가 기준 안입니다.", false)
       : check("caption-cps", "caption", "error", `최대 ${profile.maxCaptionCps} CPS를 초과한 캡션이 있습니다.`, false));
 
+    const guideLabel = safeZoneGuideLabel(snapshot.platform, "caption");
     if (outOfFrame(caption.rect)) {
-      checks.push(check("caption-outside-frame", "caption", "error", "화면 밖으로 나간 캡션이 있습니다."));
+      checks.push(check("caption-outside-frame", "caption", "error", `${guideLabel}: 화면 밖으로 나간 캡션이 있습니다.`));
     } else {
       checks.push(check("caption-outside-frame", "caption", "pass", "캡션이 출력 프레임 안에 있습니다."));
       const assessment = assessSafeZone(caption.rect, snapshot.platform, "caption");
       checks.push(assessment.inside
-        ? check("caption-safe-zone", "safe-zone", "pass", "캡션이 플랫폼 안전영역 안에 있습니다.", false)
-        : check("caption-safe-zone", "safe-zone", "warning", "플랫폼 UI에 가려질 수 있는 캡션이 있습니다.", false));
+        ? check("caption-safe-zone", "safe-zone", "pass", `${guideLabel}: 캡션이 안전영역 안에 있습니다.`, false)
+        : check("caption-safe-zone", "safe-zone", "warning", `${guideLabel}: 플랫폼 UI에 가려질 수 있는 캡션이 있습니다.`, false));
     }
     if (previous && caption.start < previous.end - 1e-6) {
       checks.push(check("caption-overlap", "caption", "error", "시간이 겹치는 캡션이 있습니다.", false));
@@ -401,14 +409,15 @@ function addSafeZoneChecks(snapshot: FinalQCSnapshot, checks: MutableCheck[]): v
     return;
   }
   for (const element of snapshot.safeZoneElements) {
+    const guideLabel = safeZoneGuideLabel(snapshot.platform, "content");
     if (outOfFrame(element.rect)) {
-      checks.push(check("content-outside-frame", "safe-zone", "error", "화면 밖으로 나간 그래픽 요소가 있습니다.", false));
+      checks.push(check("content-outside-frame", "safe-zone", "error", `${guideLabel}: 화면 밖으로 나간 그래픽 요소가 있습니다.`, false));
       continue;
     }
     const assessment = assessSafeZone(element.rect, snapshot.platform, "content");
     checks.push(assessment.inside
-      ? check("content-safe-zone", "safe-zone", "pass", "그래픽 요소가 플랫폼 안전영역 안에 있습니다.", false)
-      : check("content-safe-zone", "safe-zone", "warning", "플랫폼 UI 안전영역을 침범한 그래픽 요소가 있습니다.", false));
+      ? check("content-safe-zone", "safe-zone", "pass", `${guideLabel}: 그래픽 요소가 안전영역 안에 있습니다.`, false)
+      : check("content-safe-zone", "safe-zone", "warning", `${guideLabel}: 플랫폼 UI 안전영역을 침범한 그래픽 요소가 있습니다.`, false));
   }
 }
 
@@ -470,6 +479,22 @@ function addMediaChecks(snapshot: FinalQCSnapshot, checks: MutableCheck[]): void
   countCheck(checks, "missing-font", "누락 폰트", snapshot.media.missingFonts);
   countCheck(checks, "missing-asset", "누락 에셋", snapshot.media.missingAssets);
   countCheck(checks, "guide-overlay", "남아 있는 가이드 오버레이", snapshot.media.guideOverlays);
+  const rightsReport = snapshot.media.rightsReport;
+  if (!rightsReport) {
+    checks.push(check("asset-rights-report", "rights", "warning", "에셋 권리 리포트가 없습니다. 내보내기 전 출처와 라이선스를 확인해 주세요.", false));
+    return;
+  }
+  checks.push(rightsReport.counts.error === 0
+    ? check("asset-rights-error", "rights", "pass", "상업 사용 금지 또는 만료된 에셋이 없습니다.")
+    : check("asset-rights-error", "rights", "error", `권리 문제로 차단해야 하는 에셋 ${rightsReport.counts.error}개가 있습니다.`));
+  checks.push(rightsReport.counts.warning === 0
+    ? check("asset-rights-warning", "rights", "pass", "권리 정보 경고가 없습니다.", false)
+    : check("asset-rights-warning", "rights", "warning", `권리 정보 확인이 필요한 에셋 경고 ${rightsReport.counts.warning}개가 있습니다.`, false));
+  checks.push(rightsReport.assets.length === 0
+    ? check("asset-rights-attribution", "rights", "pass", "추적 대상 에셋이 없어 출처 표기가 필요하지 않습니다.", false)
+    : rightsReport.attributionLines.length > 0
+      ? check("asset-rights-attribution", "rights", "pass", "출처 표기 문구를 내보낼 수 있습니다.", false)
+      : check("asset-rights-attribution", "rights", "warning", "출처 표기 문구가 비어 있습니다.", false));
 }
 
 function addOutputChecks(
@@ -586,6 +611,7 @@ export function evaluateFinalQC(
     blockingCodes: [...new Set(blockingChecks.map((item) => item.code))],
     acceptedWaivers: [...acceptedByCode.values()],
     rejectedWaivers,
+    ...(safeSnapshot.media.rightsReport ? { rightsReport: safeSnapshot.media.rightsReport } : {}),
   };
 }
 
@@ -614,6 +640,30 @@ export function finalQCReportToMarkdown(report: FinalQCReport): string {
   ];
   for (const item of safe.checks) {
     lines.push(`| ${item.level} | ${markdownCell(item.code)} | ${item.category} | ${item.waived ? "waived" : item.hardBlock ? "hard-block" : "-"} | ${markdownCell(item.message)} |`);
+  }
+  if (safe.rightsReport) {
+    lines.push(
+      "",
+      "## 에셋 권리 리포트",
+      "",
+      `- 에셋: ${safe.rightsReport.assets.length}개`,
+      `- 오류: ${safe.rightsReport.counts.error}개`,
+      `- 경고: ${safe.rightsReport.counts.warning}개`,
+      "",
+      "| 수준 | 코드 | 에셋 | 내용 |",
+      "|---|---|---|---|",
+    );
+    if (safe.rightsReport.issues.length === 0) {
+      lines.push("| pass | rights-ok | 전체 | 권리 정보 문제가 없습니다. |");
+    } else {
+      for (const issue of safe.rightsReport.issues) {
+        lines.push(`| ${issue.level} | ${markdownCell(issue.code)} | ${markdownCell(issue.assetName)} | ${markdownCell(issue.message)} |`);
+      }
+    }
+    if (safe.rightsReport.attributionLines.length > 0) {
+      lines.push("", "### 출처 표기", "");
+      for (const line of safe.rightsReport.attributionLines) lines.push(`- ${markdownCell(line)}`);
+    }
   }
   if (safe.acceptedWaivers.length > 0) {
     lines.push("", "## 승인된 Waiver", "");

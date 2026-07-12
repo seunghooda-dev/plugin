@@ -36,11 +36,47 @@ export interface ThumbnailOverlay {
   readonly glowColor: string;
 }
 
+export interface ThumbnailTransform {
+  readonly zoom: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
+}
+
+export type ThumbnailTextAlign = "left" | "center" | "right";
+
+export interface ThumbnailTextOverlay {
+  readonly text: string;
+  readonly x: number;
+  readonly y: number;
+  readonly fontSize: number;
+  readonly color: string;
+  readonly shadow: number;
+  readonly glow: number;
+  readonly shadowColor: string;
+  readonly glowColor: string;
+  readonly align: ThumbnailTextAlign;
+  readonly maxWidthRatio: number;
+}
+
+export interface ThumbnailBadgeOverlay {
+  readonly text: string;
+  readonly x: number;
+  readonly y: number;
+  readonly fontSize: number;
+  readonly color: string;
+  readonly backgroundColor: string;
+  readonly paddingX: number;
+  readonly paddingY: number;
+  readonly radius: number;
+  readonly visible: boolean;
+}
+
 export interface ThumbnailLayer {
   readonly id: string;
   readonly source: string;
   readonly adjustments: ThumbnailAdjustments;
   readonly overlay: ThumbnailOverlay;
+  readonly transform: ThumbnailTransform;
 }
 
 export interface ThumbnailState {
@@ -50,6 +86,8 @@ export interface ThumbnailState {
   readonly layers: readonly ThumbnailLayer[];
   readonly selectedLayerId: string | null;
   readonly backgroundColor: string;
+  readonly textOverlay: ThumbnailTextOverlay;
+  readonly badgeOverlay: ThumbnailBadgeOverlay;
 }
 
 export interface ThumbnailLayerInput {
@@ -57,6 +95,7 @@ export interface ThumbnailLayerInput {
   readonly source: string;
   readonly adjustments?: Partial<ThumbnailAdjustments>;
   readonly overlay?: Partial<ThumbnailOverlay>;
+  readonly transform?: Partial<ThumbnailTransform>;
 }
 
 export interface CreateThumbnailStateOptions {
@@ -66,6 +105,8 @@ export interface CreateThumbnailStateOptions {
   readonly layers?: readonly (ThumbnailLayerInput | string)[];
   readonly selectedLayerId?: string | null;
   readonly backgroundColor?: string;
+  readonly textOverlay?: Partial<ThumbnailTextOverlay>;
+  readonly badgeOverlay?: Partial<ThumbnailBadgeOverlay>;
 }
 
 export interface LayoutRect {
@@ -98,6 +139,9 @@ export interface CanvasContextLike {
   shadowColor?: string;
   shadowOffsetX?: number;
   shadowOffsetY?: number;
+  font?: string;
+  textAlign?: CanvasTextAlign;
+  textBaseline?: CanvasTextBaseline;
   imageSmoothingEnabled?: boolean;
   imageSmoothingQuality?: "low" | "medium" | "high";
   save?: () => void;
@@ -108,6 +152,8 @@ export interface CanvasContextLike {
   rect?: (x: number, y: number, width: number, height: number) => void;
   clip?: () => void;
   strokeRect?: (x: number, y: number, width: number, height: number) => void;
+  measureText?: (text: string) => { width: number };
+  fillText?: (text: string, x: number, y: number, maxWidth?: number) => void;
   drawImage: (
     image: unknown,
     sourceX: number,
@@ -131,13 +177,28 @@ export interface CanvasBlobLike {
 }
 
 export interface PngCanvasLike {
-  convertToBlob?: (options?: { type?: string }) => Promise<CanvasBlobLike | Uint8Array>;
+  convertToBlob?: (options?: { type?: string; quality?: number }) => Promise<CanvasBlobLike | Uint8Array>;
   toBlob?: (
     callback: (blob: CanvasBlobLike | null) => void,
     type?: string,
+    quality?: number,
   ) => void;
   toDataURL?: (type?: string) => string;
 }
+
+export type ThumbnailExportFormat = "png" | "jpg";
+
+export interface ThumbnailSvgOptions {
+  readonly title?: string;
+  readonly resolveImageHref?: (source: string, layer: ThumbnailLayer) => string;
+}
+
+export type ThumbnailImageMimeType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/webp"
+  | "image/gif"
+  | "image/svg+xml";
 
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 720;
@@ -153,6 +214,36 @@ const DEFAULT_OVERLAY: ThumbnailOverlay = Object.freeze({
   color: "#ffffff",
   shadowColor: "#000000",
   glowColor: "#8b5cf6",
+});
+const DEFAULT_TRANSFORM: ThumbnailTransform = Object.freeze({
+  zoom: 1,
+  offsetX: 0,
+  offsetY: 0,
+});
+const DEFAULT_TEXT_OVERLAY: ThumbnailTextOverlay = Object.freeze({
+  text: "",
+  x: 0.5,
+  y: 0.84,
+  fontSize: 78,
+  color: "#ffffff",
+  shadow: 18,
+  glow: 0,
+  shadowColor: "#000000",
+  glowColor: "#8b5cf6",
+  align: "center",
+  maxWidthRatio: 0.9,
+});
+const DEFAULT_BADGE_OVERLAY: ThumbnailBadgeOverlay = Object.freeze({
+  text: "",
+  x: 0.08,
+  y: 0.1,
+  fontSize: 34,
+  color: "#111111",
+  backgroundColor: "#facc15",
+  paddingX: 22,
+  paddingY: 10,
+  radius: 12,
+  visible: true,
 });
 const SAFE_NAMED_COLORS = new Set([
   "black",
@@ -262,6 +353,63 @@ function normalizeOverlay(
   });
 }
 
+function normalizeTransform(
+  patch: Partial<ThumbnailTransform> | undefined,
+  base: ThumbnailTransform = DEFAULT_TRANSFORM,
+): ThumbnailTransform {
+  return Object.freeze({
+    zoom: clampNumeric(patch?.zoom, 1, 4, base.zoom),
+    offsetX: clampNumeric(patch?.offsetX, -1, 1, base.offsetX),
+    offsetY: clampNumeric(patch?.offsetY, -1, 1, base.offsetY),
+  });
+}
+
+function normalizeText(value: string | undefined, maximum: number): string {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/gu, " ").slice(0, maximum);
+}
+
+function normalizeTextAlign(value: unknown, fallback: ThumbnailTextAlign): ThumbnailTextAlign {
+  return value === "left" || value === "center" || value === "right" ? value : fallback;
+}
+
+function normalizeTextOverlay(
+  patch: Partial<ThumbnailTextOverlay> | undefined,
+  base: ThumbnailTextOverlay = DEFAULT_TEXT_OVERLAY,
+): ThumbnailTextOverlay {
+  return Object.freeze({
+    text: patch?.text === undefined ? base.text : normalizeText(patch.text, 120),
+    x: clampNumeric(patch?.x, 0, 1, base.x),
+    y: clampNumeric(patch?.y, 0, 1, base.y),
+    fontSize: Math.round(clampNumeric(patch?.fontSize, 12, 180, base.fontSize)),
+    color: normalizeColor(patch?.color, base.color),
+    shadow: clampNumeric(patch?.shadow, 0, 100, base.shadow),
+    glow: clampNumeric(patch?.glow, 0, 100, base.glow),
+    shadowColor: normalizeColor(patch?.shadowColor, base.shadowColor),
+    glowColor: normalizeColor(patch?.glowColor, base.glowColor),
+    align: normalizeTextAlign(patch?.align, base.align),
+    maxWidthRatio: clampNumeric(patch?.maxWidthRatio, 0.2, 1, base.maxWidthRatio),
+  });
+}
+
+function normalizeBadgeOverlay(
+  patch: Partial<ThumbnailBadgeOverlay> | undefined,
+  base: ThumbnailBadgeOverlay = DEFAULT_BADGE_OVERLAY,
+): ThumbnailBadgeOverlay {
+  return Object.freeze({
+    text: patch?.text === undefined ? base.text : normalizeText(patch.text, 60),
+    x: clampNumeric(patch?.x, 0, 1, base.x),
+    y: clampNumeric(patch?.y, 0, 1, base.y),
+    fontSize: Math.round(clampNumeric(patch?.fontSize, 10, 96, base.fontSize)),
+    color: normalizeColor(patch?.color, base.color),
+    backgroundColor: normalizeColor(patch?.backgroundColor, base.backgroundColor),
+    paddingX: Math.round(clampNumeric(patch?.paddingX, 0, 80, base.paddingX)),
+    paddingY: Math.round(clampNumeric(patch?.paddingY, 0, 48, base.paddingY)),
+    radius: Math.round(clampNumeric(patch?.radius, 0, 48, base.radius)),
+    visible: typeof patch?.visible === "boolean" ? patch.visible : base.visible,
+  });
+}
+
 function normalizeLayerId(value: string | undefined): string {
   const normalized = value
     ?.trim()
@@ -297,6 +445,7 @@ function normalizeLayer(
       typeof input === "string" ? undefined : input.adjustments,
     ),
     overlay: normalizeOverlay(typeof input === "string" ? undefined : input.overlay),
+    transform: normalizeTransform(typeof input === "string" ? undefined : input.transform),
   });
 }
 
@@ -345,6 +494,8 @@ export function createThumbnailState(
     layers,
     selectedLayerId,
     backgroundColor: normalizeColor(options.backgroundColor, "#111111"),
+    textOverlay: normalizeTextOverlay(options.textOverlay),
+    badgeOverlay: normalizeBadgeOverlay(options.badgeOverlay),
   });
 }
 
@@ -504,6 +655,88 @@ export function updateOverlay(
   return changed ? freezeState({ ...state, layers }) : state;
 }
 
+export function updateTransform(
+  state: ThumbnailState,
+  patch: Partial<ThumbnailTransform>,
+): ThumbnailState;
+export function updateTransform(
+  state: ThumbnailState,
+  layerId: string,
+  patch: Partial<ThumbnailTransform>,
+): ThumbnailState;
+export function updateTransform(
+  state: ThumbnailState,
+  layerIdOrPatch: string | Partial<ThumbnailTransform>,
+  explicitPatch?: Partial<ThumbnailTransform>,
+): ThumbnailState {
+  const layerId =
+    typeof layerIdOrPatch === "string" ? layerIdOrPatch : state.selectedLayerId;
+  const patch = typeof layerIdOrPatch === "string" ? explicitPatch : layerIdOrPatch;
+  if (!layerId || !patch) return state;
+
+  let changed = false;
+  const layers = state.layers.map((layer) => {
+    if (layer.id !== layerId) return layer;
+    const transform = normalizeTransform(patch, layer.transform);
+    if (
+      transform.zoom === layer.transform.zoom &&
+      transform.offsetX === layer.transform.offsetX &&
+      transform.offsetY === layer.transform.offsetY
+    ) {
+      return layer;
+    }
+    changed = true;
+    return Object.freeze({ ...layer, transform });
+  });
+
+  return changed ? freezeState({ ...state, layers }) : state;
+}
+
+export function updateTextOverlay(
+  state: ThumbnailState,
+  patch: Partial<ThumbnailTextOverlay>,
+): ThumbnailState {
+  const textOverlay = normalizeTextOverlay(patch, state.textOverlay);
+  if (
+    textOverlay.text === state.textOverlay.text &&
+    textOverlay.x === state.textOverlay.x &&
+    textOverlay.y === state.textOverlay.y &&
+    textOverlay.fontSize === state.textOverlay.fontSize &&
+    textOverlay.color === state.textOverlay.color &&
+    textOverlay.shadow === state.textOverlay.shadow &&
+    textOverlay.glow === state.textOverlay.glow &&
+    textOverlay.shadowColor === state.textOverlay.shadowColor &&
+    textOverlay.glowColor === state.textOverlay.glowColor &&
+    textOverlay.align === state.textOverlay.align &&
+    textOverlay.maxWidthRatio === state.textOverlay.maxWidthRatio
+  ) {
+    return state;
+  }
+  return freezeState({ ...state, textOverlay });
+}
+
+export function updateBadgeOverlay(
+  state: ThumbnailState,
+  patch: Partial<ThumbnailBadgeOverlay>,
+): ThumbnailState {
+  const badgeOverlay = normalizeBadgeOverlay(patch, state.badgeOverlay);
+  if (
+    badgeOverlay.text === state.badgeOverlay.text &&
+    badgeOverlay.x === state.badgeOverlay.x &&
+    badgeOverlay.y === state.badgeOverlay.y &&
+    badgeOverlay.fontSize === state.badgeOverlay.fontSize &&
+    badgeOverlay.color === state.badgeOverlay.color &&
+    badgeOverlay.backgroundColor === state.badgeOverlay.backgroundColor &&
+    badgeOverlay.paddingX === state.badgeOverlay.paddingX &&
+    badgeOverlay.paddingY === state.badgeOverlay.paddingY &&
+    badgeOverlay.radius === state.badgeOverlay.radius &&
+    badgeOverlay.visible === state.badgeOverlay.visible
+  ) {
+    return state;
+  }
+  return freezeState({ ...state, badgeOverlay });
+}
+
 function rect(x: number, y: number, width: number, height: number): LayoutRect {
   return Object.freeze({ x, y, width, height });
 }
@@ -603,6 +836,223 @@ function positiveImageDimension(...values: (number | undefined)[]): number {
   return 0;
 }
 
+function escapeXml(value: string): string {
+  return value.replace(/[&<>"']/gu, (character) => {
+    switch (character) {
+      case "&": return "&amp;";
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case "\"": return "&quot;";
+      case "'": return "&apos;";
+      default: return character;
+    }
+  });
+}
+
+function svgNumber(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return formatCssNumber(Math.round(value * 1000) / 1000);
+}
+
+function svgId(prefix: string, index: number): string {
+  return `shortflow-${prefix}-${index}`;
+}
+
+function safeSvgHref(value: string): string {
+  const trimmed = value.trim();
+  const isDataImage = /^data:image\/(?:png|jpe?g|webp|gif|svg\+xml);/iu.test(trimmed);
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > (isDataImage ? 70_000_000 : 32_768) ||
+    /[\u0000-\u001f\u007f]/u.test(trimmed)
+  ) {
+    throw new Error("SVG 이미지 경로가 유효하지 않습니다.");
+  }
+  if (/^(?:javascript|vbscript):/iu.test(trimmed)) {
+    throw new Error("SVG 이미지 경로에 실행 가능한 scheme을 사용할 수 없습니다.");
+  }
+  if (/^data:/iu.test(trimmed) && !/^data:image\/(?:png|jpe?g|webp|gif|svg\+xml);/iu.test(trimmed)) {
+    throw new Error("SVG에는 이미지 data URL만 포함할 수 있습니다.");
+  }
+  return trimmed;
+}
+
+function base64Encode(bytes: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index] ?? 0;
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    const combined = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
+    output += alphabet[(combined >> 18) & 63] ?? "";
+    output += alphabet[(combined >> 12) & 63] ?? "";
+    output += second === undefined ? "=" : (alphabet[(combined >> 6) & 63] ?? "");
+    output += third === undefined ? "=" : (alphabet[combined & 63] ?? "");
+  }
+  return output;
+}
+
+export function inferThumbnailImageMime(
+  name: string,
+  bytes?: Uint8Array,
+): ThumbnailImageMimeType {
+  const lower = name.trim().toLowerCase();
+  if (/\.(?:jpe?g)$/u.test(lower)) return "image/jpeg";
+  if (/\.webp$/u.test(lower)) return "image/webp";
+  if (/\.gif$/u.test(lower)) return "image/gif";
+  if (/\.svg$/u.test(lower)) return "image/svg+xml";
+  if (/\.png$/u.test(lower)) return "image/png";
+  if (bytes) {
+    if (
+      bytes.length >= 4 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47
+    ) return "image/png";
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) return "image/webp";
+    if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  }
+  return "image/png";
+}
+
+export function thumbnailBytesToDataUrl(
+  bytes: Uint8Array,
+  mimeType: ThumbnailImageMimeType = "image/png",
+): string {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+    throw new Error("SVG fallback에 포함할 이미지 데이터가 비어 있습니다.");
+  }
+  return `data:${mimeType};base64,${base64Encode(bytes)}`;
+}
+
+function textAnchor(align: ThumbnailTextAlign): "start" | "middle" | "end" {
+  if (align === "left") return "start";
+  if (align === "right") return "end";
+  return "middle";
+}
+
+function svgDropShadow(
+  id: string,
+  blur: number,
+  color: string,
+  offsetY: number,
+): string {
+  const deviation = Math.max(0.1, blur / 2.5);
+  return [
+    `<filter id="${id}" x="-25%" y="-25%" width="150%" height="150%">`,
+    `<feDropShadow dx="0" dy="${svgNumber(offsetY)}" stdDeviation="${svgNumber(deviation)}" flood-color="${escapeXml(color)}" flood-opacity="0.9"/>`,
+    "</filter>",
+  ].join("");
+}
+
+function badgeWidth(overlay: ThumbnailBadgeOverlay): number {
+  return Math.ceil((overlay.text.length * overlay.fontSize * 0.62) + overlay.paddingX * 2);
+}
+
+/**
+ * Canvas API가 제한된 Premiere UXP Host에서 사용할 수 있는 순수 SVG fallback 렌더러입니다.
+ * PNG/JPG 파일을 직접 생성하지는 않지만, 동일한 썸네일 상태를 외부/후속 rasterizer로 넘길 수 있는
+ * deterministic 중간 산출물을 만듭니다.
+ */
+export function renderThumbnailSvg(
+  state: ThumbnailState,
+  options: ThumbnailSvgOptions = {},
+): string {
+  const title = (options.title ?? "ShortFlow thumbnail").trim() || "ShortFlow thumbnail";
+  const resolveImageHref = options.resolveImageHref ?? ((source: string) => source);
+  const rectangles = calculateLayoutRects(
+    state.width,
+    state.height,
+    state.layers.length,
+    state.layout,
+  );
+
+  const definitions: string[] = [];
+  const body: string[] = [];
+  body.push(`<rect width="100%" height="100%" fill="${escapeXml(state.backgroundColor)}"/>`);
+
+  for (let index = 0; index < state.layers.length; index += 1) {
+    const layer = state.layers[index];
+    const target = rectangles[index];
+    if (!layer || !target) continue;
+
+    const clipId = svgId("clip", index);
+    definitions.push(
+      `<clipPath id="${clipId}"><rect x="${svgNumber(target.x)}" y="${svgNumber(target.y)}" width="${svgNumber(target.width)}" height="${svgNumber(target.height)}"/></clipPath>`,
+    );
+
+    const href = safeSvgHref(resolveImageHref(layer.source, layer));
+    const centerX = target.x + target.width / 2;
+    const centerY = target.y + target.height / 2;
+    const translateX = layer.transform.offsetX * target.width * 0.18;
+    const translateY = layer.transform.offsetY * target.height * 0.18;
+    body.push([
+      `<g clip-path="url(#${clipId})">`,
+      `<image href="${escapeXml(href)}" x="${svgNumber(target.x)}" y="${svgNumber(target.y)}" width="${svgNumber(target.width)}" height="${svgNumber(target.height)}" preserveAspectRatio="xMidYMid slice" filter="${escapeXml(buildCssFilter(layer.adjustments))}" transform="translate(${svgNumber(centerX)} ${svgNumber(centerY)}) translate(${svgNumber(translateX)} ${svgNumber(translateY)}) scale(${svgNumber(layer.transform.zoom)}) translate(${svgNumber(-centerX)} ${svgNumber(-centerY)})"/>`,
+      "</g>",
+    ].join(""));
+
+    if (layer.overlay.shadow > 0 || layer.overlay.glow > 0) {
+      const filterId = svgId("layer-filter", index);
+      const blur = Math.max(layer.overlay.shadow, layer.overlay.glow);
+      const color = layer.overlay.glow > 0 ? layer.overlay.glowColor : layer.overlay.shadowColor;
+      const offsetY = layer.overlay.shadow > 0 ? Math.max(1, layer.overlay.shadow / 4) : 0;
+      definitions.push(svgDropShadow(filterId, blur, color, offsetY));
+      body.push(`<rect x="${svgNumber(target.x + 1)}" y="${svgNumber(target.y + 1)}" width="${svgNumber(Math.max(0, target.width - 2))}" height="${svgNumber(Math.max(0, target.height - 2))}" fill="none" stroke="${escapeXml(color)}" stroke-width="2" opacity="0.88" filter="url(#${filterId})"/>`);
+    }
+  }
+
+  const badge = state.badgeOverlay;
+  if (badge.visible && badge.text.length > 0) {
+    const x = Math.round(badge.x * state.width);
+    const y = Math.round(badge.y * state.height);
+    const width = badgeWidth(badge);
+    const height = Math.ceil(badge.fontSize + badge.paddingY * 2);
+    body.push(`<rect x="${svgNumber(x)}" y="${svgNumber(y)}" width="${svgNumber(width)}" height="${svgNumber(height)}" rx="${svgNumber(badge.radius)}" fill="${escapeXml(badge.backgroundColor)}"/>`);
+    body.push(`<text x="${svgNumber(x + badge.paddingX)}" y="${svgNumber(y + height / 2)}" fill="${escapeXml(badge.color)}" font-family="sans-serif" font-size="${svgNumber(badge.fontSize)}" font-weight="700" dominant-baseline="middle">${escapeXml(badge.text)}</text>`);
+  }
+
+  const text = state.textOverlay;
+  if (text.text.length > 0) {
+    const filters: string[] = [];
+    if (text.shadow > 0) {
+      const id = "shortflow-title-shadow";
+      definitions.push(svgDropShadow(id, text.shadow, text.shadowColor, Math.max(1, text.shadow / 5)));
+      filters.push(`url(#${id})`);
+    }
+    if (text.glow > 0) {
+      const id = "shortflow-title-glow";
+      definitions.push(svgDropShadow(id, text.glow, text.glowColor, 0));
+      filters.push(`url(#${id})`);
+    }
+    const filterAttribute = filters.length > 0 ? ` filter="${filters.join(" ")}"` : "";
+    body.push(`<text x="${svgNumber(text.x * state.width)}" y="${svgNumber(text.y * state.height)}" fill="${escapeXml(text.color)}" font-family="sans-serif" font-size="${svgNumber(text.fontSize)}" font-weight="700" text-anchor="${textAnchor(text.align)}" dominant-baseline="middle"${filterAttribute}>${escapeXml(text.text)}</text>`);
+  }
+
+  const defs = definitions.length > 0 ? `<defs>${definitions.join("")}</defs>` : "";
+  return [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNumber(state.width)}" height="${svgNumber(state.height)}" viewBox="0 0 ${svgNumber(state.width)} ${svgNumber(state.height)}" role="img" aria-label="${escapeXml(title)}">`,
+    `<title>${escapeXml(title)}</title>`,
+    defs,
+    body.join(""),
+    "</svg>",
+  ].join("");
+}
+
 function applyClip(ctx: CanvasContextLike, target: LayoutRect): void {
   if (ctx.beginPath && ctx.rect && ctx.clip) {
     ctx.beginPath();
@@ -618,6 +1068,66 @@ function resetTransientCanvasState(ctx: CanvasContextLike): void {
   if ("shadowColor" in ctx) ctx.shadowColor = "rgba(0, 0, 0, 0)";
   if ("shadowOffsetX" in ctx) ctx.shadowOffsetX = 0;
   if ("shadowOffsetY" in ctx) ctx.shadowOffsetY = 0;
+}
+
+function drawTextOverlay(
+  ctx: CanvasContextLike,
+  state: ThumbnailState,
+  overlay: ThumbnailTextOverlay,
+): void {
+  if (!ctx.fillText || overlay.text.length === 0) return;
+  const x = overlay.x * state.width;
+  const y = overlay.y * state.height;
+  const maxWidth = Math.max(1, state.width * overlay.maxWidthRatio);
+  if ("font" in ctx) ctx.font = `700 ${overlay.fontSize}px sans-serif`;
+  if ("textAlign" in ctx) ctx.textAlign = overlay.align;
+  if ("textBaseline" in ctx) ctx.textBaseline = "middle";
+  if ("fillStyle" in ctx) ctx.fillStyle = overlay.color;
+
+  if (overlay.shadow > 0) {
+    if ("shadowColor" in ctx) ctx.shadowColor = overlay.shadowColor;
+    if ("shadowBlur" in ctx) ctx.shadowBlur = overlay.shadow;
+    if ("shadowOffsetX" in ctx) ctx.shadowOffsetX = 0;
+    if ("shadowOffsetY" in ctx) ctx.shadowOffsetY = Math.max(1, overlay.shadow / 5);
+  } else if (overlay.glow > 0) {
+    if ("shadowColor" in ctx) ctx.shadowColor = overlay.glowColor;
+    if ("shadowBlur" in ctx) ctx.shadowBlur = overlay.glow;
+    if ("shadowOffsetX" in ctx) ctx.shadowOffsetX = 0;
+    if ("shadowOffsetY" in ctx) ctx.shadowOffsetY = 0;
+  }
+  ctx.fillText(overlay.text, x, y, maxWidth);
+  resetTransientCanvasState(ctx);
+}
+
+function drawBadgeOverlay(
+  ctx: CanvasContextLike,
+  state: ThumbnailState,
+  overlay: ThumbnailBadgeOverlay,
+): void {
+  if (!ctx.fillText || !ctx.fillRect || !overlay.visible || overlay.text.length === 0) return;
+  if ("font" in ctx) ctx.font = `700 ${overlay.fontSize}px sans-serif`;
+  if ("textAlign" in ctx) ctx.textAlign = "left";
+  if ("textBaseline" in ctx) ctx.textBaseline = "middle";
+
+  const measured = ctx.measureText?.(overlay.text).width;
+  const textWidth = Number.isFinite(measured) && measured !== undefined
+    ? measured
+    : overlay.text.length * overlay.fontSize * 0.62;
+  const width = Math.ceil(textWidth + overlay.paddingX * 2);
+  const height = Math.ceil(overlay.fontSize + overlay.paddingY * 2);
+  const x = Math.round(overlay.x * state.width);
+  const y = Math.round(overlay.y * state.height);
+
+  if ("fillStyle" in ctx) ctx.fillStyle = overlay.backgroundColor;
+  ctx.fillRect(x, y, width, height);
+  if ("fillStyle" in ctx) ctx.fillStyle = overlay.color;
+  ctx.fillText(
+    overlay.text,
+    x + overlay.paddingX,
+    y + height / 2,
+    Math.max(1, width - overlay.paddingX * 2),
+  );
+  resetTransientCanvasState(ctx);
 }
 
 function drawCoverImage(
@@ -655,6 +1165,23 @@ function drawCoverImage(
     sourceY = (imageHeight - sourceHeight) / 2;
   }
 
+  const zoomedWidth = sourceWidth / layer.transform.zoom;
+  const zoomedHeight = sourceHeight / layer.transform.zoom;
+  const maxShiftX = Math.max(0, (sourceWidth - zoomedWidth) / 2);
+  const maxShiftY = Math.max(0, (sourceHeight - zoomedHeight) / 2);
+  const centerX = sourceX + sourceWidth / 2 + layer.transform.offsetX * maxShiftX;
+  const centerY = sourceY + sourceHeight / 2 + layer.transform.offsetY * maxShiftY;
+  sourceWidth = zoomedWidth;
+  sourceHeight = zoomedHeight;
+  sourceX = Math.min(
+    imageWidth - sourceWidth,
+    Math.max(0, centerX - sourceWidth / 2),
+  );
+  sourceY = Math.min(
+    imageHeight - sourceHeight,
+    Math.max(0, centerY - sourceHeight / 2),
+  );
+
   if ("filter" in ctx) ctx.filter = buildCssFilter(layer.adjustments);
   if ("imageSmoothingEnabled" in ctx) ctx.imageSmoothingEnabled = true;
   if ("imageSmoothingQuality" in ctx) ctx.imageSmoothingQuality = "high";
@@ -672,7 +1199,7 @@ function drawCoverImage(
   );
 }
 
-function drawSelectedOverlay(
+function drawLayerOverlay(
   ctx: CanvasContextLike,
   target: LayoutRect,
   overlay: ThumbnailOverlay,
@@ -752,15 +1279,30 @@ export async function renderThumbnail(
       if (supportsSavedState) ctx.restore?.();
     }
 
-    if (layer.id === state.selectedLayerId) {
-      if (supportsSavedState) ctx.save?.();
-      try {
-        drawSelectedOverlay(ctx, target, layer.overlay);
-      } finally {
-        resetTransientCanvasState(ctx);
-        if (supportsSavedState) ctx.restore?.();
-      }
+    if (supportsSavedState) ctx.save?.();
+    try {
+      drawLayerOverlay(ctx, target, layer.overlay);
+    } finally {
+      resetTransientCanvasState(ctx);
+      if (supportsSavedState) ctx.restore?.();
     }
+  }
+
+  const supportsSavedState = Boolean(ctx.save && ctx.restore);
+  if (supportsSavedState) ctx.save?.();
+  try {
+    drawBadgeOverlay(ctx, state, state.badgeOverlay);
+  } finally {
+    resetTransientCanvasState(ctx);
+    if (supportsSavedState) ctx.restore?.();
+  }
+
+  if (supportsSavedState) ctx.save?.();
+  try {
+    drawTextOverlay(ctx, state, state.textOverlay);
+  } finally {
+    resetTransientCanvasState(ctx);
+    if (supportsSavedState) ctx.restore?.();
   }
 }
 
@@ -795,10 +1337,23 @@ function decodeBase64(base64: string): Uint8Array {
   return Uint8Array.from(output);
 }
 
-function bytesFromDataUrl(dataUrl: string): Uint8Array {
-  const match = /^data:image\/png;base64,([a-z0-9+/=\s]+)$/iu.exec(dataUrl);
+function exportMimeType(format: ThumbnailExportFormat): string {
+  return format === "jpg" ? "image/jpeg" : "image/png";
+}
+
+function exportLabel(format: ThumbnailExportFormat): string {
+  return format === "jpg" ? "JPG" : "PNG";
+}
+
+function normalizeExportFormat(format: ThumbnailExportFormat): ThumbnailExportFormat {
+  return format === "jpg" ? "jpg" : "png";
+}
+
+function bytesFromDataUrl(dataUrl: string, format: ThumbnailExportFormat): Uint8Array {
+  const mime = format === "jpg" ? "jpe?g" : "png";
+  const match = new RegExp(`^data:image/${mime};base64,([a-z0-9+/=\\s]+)$`, "iu").exec(dataUrl);
   if (!match?.[1]) {
-    throw new Error("Canvas가 유효한 PNG data URL을 반환하지 않았습니다.");
+    throw new Error(`Canvas가 유효한 ${exportLabel(format)} data URL을 반환하지 않았습니다.`);
   }
   return decodeBase64(match[1]);
 }
@@ -806,39 +1361,46 @@ function bytesFromDataUrl(dataUrl: string): Uint8Array {
 async function bytesFromBlob(blob: CanvasBlobLike | Uint8Array): Promise<Uint8Array> {
   if (blob instanceof Uint8Array) return blob.slice();
   if (!blob || typeof blob.arrayBuffer !== "function") {
-    throw new Error("Canvas PNG Blob을 읽을 수 없습니다.");
+    throw new Error("Canvas Blob을 읽을 수 없습니다.");
   }
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-function canvasBlob(canvas: PngCanvasLike): Promise<CanvasBlobLike> {
+function canvasBlob(canvas: PngCanvasLike, format: ThumbnailExportFormat): Promise<CanvasBlobLike> {
   return new Promise((resolve, reject) => {
     try {
       canvas.toBlob?.((blob) => {
         if (blob) resolve(blob);
-        else reject(new Error("Canvas가 빈 PNG Blob을 반환했습니다."));
-      }, "image/png");
+        else reject(new Error(`Canvas가 빈 ${exportLabel(format)} Blob을 반환했습니다.`));
+      }, exportMimeType(format), format === "jpg" ? 0.92 : undefined);
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
 
-function assertPngBytes(bytes: Uint8Array): Uint8Array {
-  if (bytes.byteLength === 0) throw new Error("Canvas가 빈 PNG 데이터를 반환했습니다.");
+function assertImageBytes(bytes: Uint8Array, format: ThumbnailExportFormat): Uint8Array {
+  if (bytes.byteLength === 0) throw new Error(`Canvas가 빈 ${exportLabel(format)} 데이터를 반환했습니다.`);
   return bytes;
 }
 
-export async function canvasToPngBytes(canvas: PngCanvasLike): Promise<Uint8Array> {
+export async function canvasToImageBytes(
+  canvas: PngCanvasLike,
+  requestedFormat: ThumbnailExportFormat = "png",
+): Promise<Uint8Array> {
+  const format = normalizeExportFormat(requestedFormat);
   if (!canvas || typeof canvas !== "object") {
-    throw new TypeError("PNG로 변환할 Canvas가 필요합니다.");
+    throw new TypeError(`${exportLabel(format)}로 변환할 Canvas가 필요합니다.`);
   }
 
   const failures: Error[] = [];
   if (typeof canvas.convertToBlob === "function") {
     try {
-      const blob = await canvas.convertToBlob({ type: "image/png" });
-      return assertPngBytes(await bytesFromBlob(blob));
+      const blob = await canvas.convertToBlob({
+        type: exportMimeType(format),
+        ...(format === "jpg" ? { quality: 0.92 } : {}),
+      });
+      return assertImageBytes(await bytesFromBlob(blob), format);
     } catch (error) {
       failures.push(error instanceof Error ? error : new Error(String(error)));
     }
@@ -846,7 +1408,7 @@ export async function canvasToPngBytes(canvas: PngCanvasLike): Promise<Uint8Arra
 
   if (typeof canvas.toBlob === "function") {
     try {
-      return assertPngBytes(await bytesFromBlob(await canvasBlob(canvas)));
+      return assertImageBytes(await bytesFromBlob(await canvasBlob(canvas, format)), format);
     } catch (error) {
       failures.push(error instanceof Error ? error : new Error(String(error)));
     }
@@ -854,7 +1416,7 @@ export async function canvasToPngBytes(canvas: PngCanvasLike): Promise<Uint8Arra
 
   if (typeof canvas.toDataURL === "function") {
     try {
-      return assertPngBytes(bytesFromDataUrl(canvas.toDataURL("image/png")));
+      return assertImageBytes(bytesFromDataUrl(canvas.toDataURL(exportMimeType(format)), format), format);
     } catch (error) {
       failures.push(error instanceof Error ? error : new Error(String(error)));
     }
@@ -863,7 +1425,11 @@ export async function canvasToPngBytes(canvas: PngCanvasLike): Promise<Uint8Arra
   const detail = failures[failures.length - 1]?.message;
   throw new Error(
     detail
-      ? `Canvas PNG 변환에 실패했습니다: ${detail}`
-      : "이 환경은 Canvas PNG 내보내기를 지원하지 않습니다.",
+      ? `Canvas ${exportLabel(format)} 변환에 실패했습니다: ${detail}`
+      : `이 환경은 Canvas ${exportLabel(format)} 내보내기를 지원하지 않습니다.`,
   );
+}
+
+export async function canvasToPngBytes(canvas: PngCanvasLike): Promise<Uint8Array> {
+  return canvasToImageBytes(canvas, "png");
 }

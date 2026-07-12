@@ -2,20 +2,32 @@ import {
   THUMBNAIL_LAYOUTS,
   addLayer,
   calculateLayoutRects,
+  canvasToImageBytes,
   canvasToPngBytes,
   createThumbnailState,
+  inferThumbnailImageMime,
   removeLayer,
   renderThumbnail,
+  renderThumbnailSvg,
   reorderLayers,
   setLayout,
+  thumbnailBytesToDataUrl,
   updateAdjustments,
+  updateBadgeOverlay,
   updateOverlay,
+  updateTextOverlay,
+  updateTransform,
   type CanvasContextLike,
   type CanvasImageLike,
   type ThumbnailAdjustments,
+  type ThumbnailBadgeOverlay,
+  type ThumbnailExportFormat,
+  type ThumbnailLayer,
   type ThumbnailLayoutId,
   type ThumbnailOverlay,
   type ThumbnailState,
+  type ThumbnailTextOverlay,
+  type ThumbnailTransform,
 } from "./thumbnail";
 import { bind, element, valueOf } from "./ui";
 
@@ -110,6 +122,7 @@ export interface ThumbnailHistoryItem {
 export interface ThumbnailBrandDefaults {
   layout: ThumbnailLayoutId;
   backgroundColor: string;
+  textColor?: string;
   brightness: number;
   contrast: number;
   saturation: number;
@@ -143,15 +156,18 @@ interface StoredLayer {
   createdAt: number;
   adjustments?: Partial<ThumbnailAdjustments>;
   overlay?: Partial<ThumbnailOverlay>;
+  transform?: Partial<ThumbnailTransform>;
 }
 
 interface StoredThumbnailState {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   width?: number;
   height?: number;
   layout: ThumbnailLayoutId;
   selectedLayerId: string | null;
   backgroundColor?: string;
+  textOverlay?: Partial<ThumbnailTextOverlay>;
+  badgeOverlay?: Partial<ThumbnailBadgeOverlay>;
   layers: StoredLayer[];
 }
 
@@ -196,11 +212,15 @@ function isThumbnailAIPreset(value: string): value is (typeof THUMBNAIL_AI_PRESE
   return THUMBNAIL_AI_PRESETS.some((preset) => preset === value);
 }
 
+function exportFormatFromControl(value: string): ThumbnailExportFormat {
+  return value === "jpg" ? "jpg" : "png";
+}
+
 function sourceId(now: number, index: number): string {
   return `thumb-${now.toString(36)}-${index.toString(36)}`;
 }
 
-function timestampName(now: number): string {
+function timestampName(now: number, format: ThumbnailExportFormat): string {
   const date = new Date(now);
   const parts = [
     date.getFullYear(),
@@ -210,7 +230,11 @@ function timestampName(now: number): string {
     date.getMinutes(),
     date.getSeconds(),
   ].map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"));
-  return `ShortFlow_Thumbnail_${parts.join("")}.png`;
+  return `ShortFlow_Thumbnail_${parts.join("")}.${format === "jpg" ? "jpg" : "png"}`;
+}
+
+function timestampSvgName(now: number): string {
+  return timestampName(now, "png").replace(/\.png$/u, ".svg");
 }
 
 function assertByteLength(byteLength: number, maximum: number, message: string): void {
@@ -259,6 +283,37 @@ function base64Encode(bytes: Uint8Array): string {
   return output;
 }
 
+function utf8Encode(value: string): Uint8Array {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    let codePoint = value.codePointAt(index);
+    if (codePoint === undefined) continue;
+    if (codePoint > 0xffff) index += 1;
+    if (codePoint <= 0x7f) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 0x7ff) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint <= 0xffff) {
+      bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+    } else {
+      codePoint = Math.min(codePoint, 0x10ffff);
+      bytes.push(
+        0xf0 | (codePoint >> 18),
+        0x80 | ((codePoint >> 12) & 0x3f),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    }
+  }
+  return Uint8Array.from(bytes);
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
 function pngUrl(bytes: Uint8Array): string {
   try {
     if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function" && typeof Blob !== "undefined") {
@@ -286,7 +341,7 @@ function parseStored(raw: unknown): StoredThumbnailState | null {
   try {
     const parsed = JSON.parse(raw) as Partial<StoredThumbnailState>;
     if (
-      (parsed.version !== 1 && parsed.version !== 2) ||
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) ||
       !validLayout(parsed.layout) ||
       !Array.isArray(parsed.layers)
     ) {
@@ -314,6 +369,9 @@ function parseStored(raw: unknown): StoredThumbnailState | null {
         ...(item.overlay && typeof item.overlay === "object"
           ? { overlay: item.overlay }
           : {}),
+        ...(item.transform && typeof item.transform === "object"
+          ? { transform: item.transform }
+          : {}),
       }));
     const stored: StoredThumbnailState = {
       version: parsed.version,
@@ -323,11 +381,19 @@ function parseStored(raw: unknown): StoredThumbnailState | null {
         : null,
       layers,
     };
-    if (parsed.version === 2) {
+    if (parsed.version === 2 || parsed.version === 3) {
       if (typeof parsed.width === "number") stored.width = parsed.width;
       if (typeof parsed.height === "number") stored.height = parsed.height;
       if (typeof parsed.backgroundColor === "string") {
         stored.backgroundColor = parsed.backgroundColor;
+      }
+    }
+    if (parsed.version === 3) {
+      if (parsed.textOverlay && typeof parsed.textOverlay === "object") {
+        stored.textOverlay = parsed.textOverlay;
+      }
+      if (parsed.badgeOverlay && typeof parsed.badgeOverlay === "object") {
+        stored.badgeOverlay = parsed.badgeOverlay;
       }
     }
     return stored;
@@ -376,6 +442,10 @@ export class ThumbnailController {
   private dragFromIndex = -1;
   private renderScheduled = false;
   private renderRevision = 0;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private canvasLimitReason: string | null = null;
+  private exportInProgress = false;
+  private disposed = false;
 
   constructor(private readonly options: ThumbnailControllerOptions = {}) {
     this.adapter = options.adapter ?? createDefaultThumbnailControllerAdapter();
@@ -398,6 +468,11 @@ export class ThumbnailController {
       height: this.stateValue.height,
       layout: defaults.layout,
       backgroundColor: defaults.backgroundColor,
+      textOverlay: {
+        ...this.stateValue.textOverlay,
+        color: defaults.textColor ?? this.stateValue.textOverlay.color,
+      },
+      badgeOverlay: this.stateValue.badgeOverlay,
       selectedLayerId: this.stateValue.selectedLayerId,
       layers: this.stateValue.layers.map((layer) => ({
         id: layer.id,
@@ -413,6 +488,7 @@ export class ThumbnailController {
           shadowColor: defaults.shadowColor,
           glowColor: defaults.glowColor,
         },
+        transform: layer.transform,
       })),
     });
     await this.persist();
@@ -425,17 +501,35 @@ export class ThumbnailController {
     this.initialized = true;
     this.bindEvents();
     await this.restore();
+    this.canvasLimitReason = this.detectCanvasLimit();
     this.syncUI();
-    await this.renderCanvas();
+    try {
+      await this.renderCanvas();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error ?? "알 수 없는 오류");
+      this.setCanvasLimited(message);
+    }
   }
 
-  dispose(): void {
-    for (const source of this.sources.values()) {
-      if (source.kind === "generated") revokeGeneratedUrl(source.url);
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const flushPendingPersist = this.persistTimer !== null;
+    if (this.persistTimer !== null) clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    try {
+      if (flushPendingPersist) await this.persist();
+    } catch (error) {
+      this.options.onError?.(error, "썸네일 종료 전 자동 저장 실패");
+      if (!this.options.onError) console.error("썸네일 종료 전 자동 저장 실패", error);
+    } finally {
+      for (const source of this.sources.values()) {
+        if (source.kind === "generated") revokeGeneratedUrl(source.url);
+      }
+      this.sources.clear();
+      this.imageCache.clear();
+      this.historyItems.splice(0);
     }
-    this.sources.clear();
-    this.imageCache.clear();
-    this.historyItems.splice(0);
   }
 
   private async guard(task: () => MaybePromise<void>, context: string): Promise<void> {
@@ -448,6 +542,94 @@ export class ThumbnailController {
     }
   }
 
+  private detectCanvasLimit(): string | null {
+    let canvas: HTMLCanvasElement;
+    try {
+      canvas = element<HTMLCanvasElement>("thumbnail-canvas");
+    } catch (error) {
+      return `썸네일 Canvas 요소를 찾지 못했습니다: ${errorText(error)}`;
+    }
+
+    let ctx: Partial<CanvasContextLike> | null = null;
+    try {
+      ctx = canvas.getContext("2d") as Partial<CanvasContextLike> | null;
+    } catch {
+      return "2D Canvas 컨텍스트를 만들지 못했습니다.";
+    }
+    if (!ctx) return "2D Canvas 컨텍스트를 만들지 못했습니다.";
+
+    const missing: string[] = [];
+    if (typeof ctx.drawImage !== "function") missing.push("이미지 합성");
+    if (typeof ctx.fillText !== "function") missing.push("텍스트 렌더링");
+
+    const exportCanvas = canvas as unknown as {
+      convertToBlob?: unknown;
+      toBlob?: unknown;
+      toDataURL?: unknown;
+    };
+    if (
+      typeof exportCanvas.convertToBlob !== "function" &&
+      typeof exportCanvas.toBlob !== "function" &&
+      typeof exportCanvas.toDataURL !== "function"
+    ) {
+      missing.push("PNG/JPG 내보내기");
+    }
+
+    return missing.length > 0
+      ? `현재 Premiere UXP Canvas가 ${missing.join(", ")} 기능을 제공하지 않습니다.`
+      : null;
+  }
+
+  private setCanvasLimited(message: string): void {
+    this.canvasLimitReason = message;
+    this.syncCanvasCapabilityUI();
+    this.options.onActivity?.(`썸네일 미리보기/내보내기는 현재 UXP Canvas 제한으로 비활성화되었습니다: ${message}`);
+  }
+
+  private syncCanvasCapabilityUI(): void {
+    const reason = this.canvasLimitReason;
+    const exporting = this.exportInProgress;
+    const exportButton = element<HTMLButtonElement>("thumb-export-btn");
+    const svgFallbackButton = element<HTMLButtonElement>("thumb-export-svg-btn");
+    const exportFormat = element<HTMLSelectElement>("thumb-export-format-select");
+    exportButton.disabled = Boolean(reason) || exporting;
+    svgFallbackButton.disabled = exporting;
+    exportFormat.disabled = Boolean(reason) || exporting;
+    exportButton.title = exporting
+      ? "썸네일 내보내기가 진행 중입니다."
+      : reason ? `현재 저장할 수 없습니다: ${reason}` : "";
+    svgFallbackButton.title = exporting
+      ? "썸네일 내보내기가 진행 중입니다."
+      : reason
+        ? `PNG/JPG 대신 SVG fallback으로 저장합니다: ${reason}`
+        : "SVG fallback 썸네일을 저장합니다.";
+
+    const canvas = element<HTMLCanvasElement>("thumbnail-canvas");
+    canvas.setAttribute(
+      "aria-label",
+      reason
+        ? `1280 × 720 썸네일 미리보기 비활성화: ${reason}`
+        : "1280 × 720 썸네일 미리보기 캔버스",
+    );
+    const shell = canvas.closest<HTMLElement>(".thumbnail-canvas-shell");
+    shell?.classList.toggle("is-limited", Boolean(reason));
+    if (!shell) return;
+
+    let notice = shell.querySelector<HTMLElement>("#thumbnail-canvas-fallback-notice");
+    if (!reason) {
+      notice?.remove();
+      return;
+    }
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = "thumbnail-canvas-fallback-notice";
+      notice.className = "thumbnail-canvas-fallback-notice";
+      notice.setAttribute("role", "status");
+      shell.append(notice);
+    }
+    notice.textContent = `${reason} 썸네일 편집값은 저장되지만, PNG/JPG 출력은 fallback 구현 후 활성화됩니다.`;
+  }
+
   private bindEvents(): void {
     bind("thumbnail-source-btn", "click", () => this.guard(
       () => this.chooseSources(),
@@ -458,8 +640,12 @@ export class ThumbnailController {
       "썸네일 분할 변경 실패",
     ));
     bind("thumb-export-btn", "click", () => this.guard(
-      () => this.exportPng(),
-      "썸네일 PNG 저장 실패",
+      () => this.exportImage(),
+      "썸네일 저장 실패",
+    ));
+    bind("thumb-export-svg-btn", "click", () => this.guard(
+      () => this.exportSvgFallback(),
+      "썸네일 SVG fallback 저장 실패",
     ));
     bind("thumb-ai-run-btn", "click", () => this.guard(
       () => this.runAI(),
@@ -467,11 +653,30 @@ export class ThumbnailController {
     ));
 
     for (const id of [
+      "thumb-title-input",
+      "thumb-title-color",
+      "thumb-title-size-input",
+      "thumb-badge-input",
+      "thumb-badge-color",
+      "thumb-badge-background-color",
+    ]) {
+      bind(id, "input", () => this.updateTextAndBadge());
+      bind(id, "change", () => this.updateTextAndBadge());
+    }
+
+    for (const id of [
+      "thumb-zoom-input",
+      "thumb-offset-x-input",
+      "thumb-offset-y-input",
       "thumb-brightness-input",
       "thumb-contrast-input",
       "thumb-saturation-input",
     ]) {
-      bind(id, "input", () => this.updateSelectedAdjustments());
+      if (id === "thumb-zoom-input" || id === "thumb-offset-x-input" || id === "thumb-offset-y-input") {
+        bind(id, "input", () => this.updateSelectedTransform());
+      } else {
+        bind(id, "input", () => this.updateSelectedAdjustments());
+      }
     }
     for (const id of [
       "thumb-shadow-checkbox",
@@ -548,8 +753,11 @@ export class ThumbnailController {
       layers: this.stateValue.layers,
       selectedLayerId: id,
       backgroundColor: this.stateValue.backgroundColor,
+      textOverlay: this.stateValue.textOverlay,
+      badgeOverlay: this.stateValue.badgeOverlay,
     });
     this.syncUI();
+    this.schedulePersist();
     this.requestRender();
   }
 
@@ -581,6 +789,18 @@ export class ThumbnailController {
       saturation: Number(valueOf("thumb-saturation-input")),
     });
     this.syncInspector();
+    this.schedulePersist();
+    this.requestRender();
+  }
+
+  private updateSelectedTransform(): void {
+    this.stateValue = updateTransform(this.stateValue, {
+      zoom: Number(valueOf("thumb-zoom-input")) / 100,
+      offsetX: Number(valueOf("thumb-offset-x-input")) / 100,
+      offsetY: Number(valueOf("thumb-offset-y-input")) / 100,
+    });
+    this.syncInspector();
+    this.schedulePersist();
     this.requestRender();
   }
 
@@ -594,7 +814,37 @@ export class ThumbnailController {
       glowColor: valueOf("thumb-glow-color"),
     });
     this.syncInspector();
+    this.schedulePersist();
     this.requestRender();
+  }
+
+  private updateTextAndBadge(): void {
+    this.stateValue = updateTextOverlay(this.stateValue, {
+      text: valueOf("thumb-title-input"),
+      color: valueOf("thumb-title-color"),
+      fontSize: Number(valueOf("thumb-title-size-input")),
+    });
+    this.stateValue = updateBadgeOverlay(this.stateValue, {
+      text: valueOf("thumb-badge-input"),
+      color: valueOf("thumb-badge-color"),
+      backgroundColor: valueOf("thumb-badge-background-color"),
+      visible: valueOf("thumb-badge-input").trim().length > 0,
+    });
+    this.syncInspector();
+    this.schedulePersist();
+    this.requestRender();
+  }
+
+  private schedulePersist(): void {
+    if (this.disposed) return;
+    if (this.persistTimer !== null) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.guard(
+        () => this.persist(),
+        "썸네일 자동 저장 실패",
+      );
+    }, 250);
   }
 
   private selectCanvasCell(event: MouseEvent): void {
@@ -617,6 +867,7 @@ export class ThumbnailController {
   }
 
   private requestRender(): void {
+    if (this.disposed) return;
     this.renderRevision += 1;
     if (this.renderScheduled) return;
     this.renderScheduled = true;
@@ -624,6 +875,7 @@ export class ThumbnailController {
       ? (callback: () => void) => requestAnimationFrame(callback)
       : (callback: () => void) => setTimeout(callback, 0);
     schedule(() => {
+      if (this.disposed) return;
       this.renderScheduled = false;
       const revision = this.renderRevision;
       void this.guard(async () => {
@@ -634,6 +886,11 @@ export class ThumbnailController {
   }
 
   private async renderCanvas(): Promise<void> {
+    const detectedLimit = this.detectCanvasLimit();
+    if (detectedLimit) {
+      this.setCanvasLimited(detectedLimit);
+      return;
+    }
     const canvas = element<HTMLCanvasElement>("thumbnail-canvas");
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2D Canvas 컨텍스트를 만들지 못했습니다.");
@@ -691,21 +948,96 @@ export class ThumbnailController {
     });
   }
 
-  private async exportPng(): Promise<void> {
-    await this.renderCanvas();
-    const bytes = await canvasToPngBytes(element<HTMLCanvasElement>("thumbnail-canvas"));
-    const folder = await this.adapter.localFileSystem.getFolder();
-    if (!folder) return;
-    const name = timestampName(this.now());
-    const entry = await folder.createFile(name, { overwrite: false });
-    if (typeof entry.write !== "function") throw new Error("생성한 PNG 파일에 쓰기 기능이 없습니다.");
-    const buffer = new ArrayBuffer(bytes.byteLength);
-    new Uint8Array(buffer).set(bytes);
-    await entry.write(buffer, { format: this.adapter.binaryFormat });
-    this.options.onActivity?.(`${fileName(entry) || name} 썸네일을 저장했습니다.`);
+  private async withExportLock(task: () => Promise<void>): Promise<void> {
+    if (this.disposed) throw new Error("종료된 썸네일 편집기에서는 내보낼 수 없습니다.");
+    if (this.exportInProgress) throw new Error("썸네일 내보내기가 이미 진행 중입니다.");
+    this.exportInProgress = true;
+    this.syncCanvasCapabilityUI();
+    try {
+      await task();
+    } finally {
+      this.exportInProgress = false;
+      this.syncCanvasCapabilityUI();
+    }
+  }
+
+  private async exportImage(): Promise<void> {
+    await this.withExportLock(async () => {
+      const format = exportFormatFromControl(valueOf("thumb-export-format-select"));
+      const detectedLimit = this.detectCanvasLimit();
+      if (detectedLimit) {
+        this.setCanvasLimited(detectedLimit);
+        throw new Error(`현재 환경에서는 썸네일 ${format.toUpperCase()} 저장을 지원하지 않습니다: ${detectedLimit}`);
+      }
+      await this.renderCanvas();
+      const bytes = await canvasToImageBytes(element<HTMLCanvasElement>("thumbnail-canvas"), format);
+      const folder = await this.adapter.localFileSystem.getFolder();
+      if (!folder) return;
+      const name = timestampName(this.now(), format);
+      const entry = await folder.createFile(name, { overwrite: false });
+      if (typeof entry.write !== "function") throw new Error(`생성한 ${format.toUpperCase()} 파일에 쓰기 기능이 없습니다.`);
+      await entry.write(bytesToArrayBuffer(bytes), { format: this.adapter.binaryFormat });
+      this.options.onActivity?.(`${fileName(entry) || name} 썸네일을 저장했습니다.`);
+    });
+  }
+
+  private async exportSvgFallback(): Promise<void> {
+    await this.withExportLock(async () => {
+      const hrefs = new Map<string, string>();
+      for (const layer of this.stateValue.layers) {
+        hrefs.set(layer.id, await this.svgHrefForLayer(layer));
+      }
+      const svg = renderThumbnailSvg(this.stateValue, {
+        title: "ShortFlow Studio thumbnail fallback",
+        resolveImageHref: (_source, layer) => {
+          const href = hrefs.get(layer.id);
+          if (!href) throw new Error(`레이어 ${layer.id}의 SVG 이미지 경로를 찾지 못했습니다.`);
+          return href;
+        },
+      });
+      const bytes = utf8Encode(svg);
+      const folder = await this.adapter.localFileSystem.getFolder();
+      if (!folder) return;
+      const name = timestampSvgName(this.now());
+      const entry = await folder.createFile(name, { overwrite: false });
+      if (typeof entry.write !== "function") throw new Error("생성한 SVG 파일에 쓰기 기능이 없습니다.");
+      await entry.write(bytesToArrayBuffer(bytes), { format: this.adapter.binaryFormat });
+      this.options.onActivity?.(`${fileName(entry) || name} SVG fallback 썸네일을 저장했습니다.`);
+    });
+  }
+
+  private async svgHrefForLayer(layer: ThumbnailLayer): Promise<string> {
+    const record = this.sources.get(layer.id) ?? this.sources.get(layer.source);
+    if (!record) throw new Error(`레이어 ${layer.id}의 SVG 이미지 원본을 찾지 못했습니다.`);
+    const historyItem = this.historyItems.find((item) => item.id === record.id || item.url === record.url);
+    if (historyItem) {
+      return thumbnailBytesToDataUrl(historyItem.bytes, "image/png");
+    }
+    if (/^data:image\//iu.test(record.url)) return record.url;
+    if (!record.token) {
+      if (record.url) return record.url;
+      throw new Error(`레이어 ${layer.id}의 SVG 이미지 경로를 찾지 못했습니다.`);
+    }
+    const entry = await this.adapter.localFileSystem.getEntryForPersistentToken(record.token);
+    if (typeof entry.read !== "function") {
+      if (record.url) return record.url;
+      throw new Error(`${record.name} 파일을 SVG에 포함할 수 없습니다.`);
+    }
+    const bytes = normalizeBytes(await entry.read({ format: this.adapter.binaryFormat }), MAX_THUMBNAIL_SOURCE_BYTES);
+    return thumbnailBytesToDataUrl(bytes, inferThumbnailImageMime(fileName(entry), bytes));
   }
 
   private async runAI(): Promise<void> {
+    const button = element<HTMLButtonElement>("thumb-ai-run-btn");
+    const card = button.closest<HTMLElement>(".thumb-ai-card");
+    if (button.disabled || card?.hidden) {
+      throw new Error("썸네일 AI 보정은 내부 베타에서 비활성화되어 있습니다.");
+    }
+    const detectedLimit = this.detectCanvasLimit();
+    if (detectedLimit) {
+      this.setCanvasLimited(detectedLimit);
+      throw new Error(`현재 환경에서는 썸네일 AI 입력 이미지를 만들 수 없습니다: ${detectedLimit}`);
+    }
     if (!this.options.onAIRequest) {
       throw new Error("AI 실행 콜백이 연결되지 않았습니다. index.ts에서 onAIRequest를 주입해 주세요.");
     }
@@ -724,7 +1056,6 @@ export class ThumbnailController {
     if (preset === "chat" && !prompt) {
       throw new Error("AI 대화로 수정하려면 추가 지시를 입력해 주세요.");
     }
-    const button = element<HTMLButtonElement>("thumb-ai-run-btn");
     button.disabled = true;
     try {
       await this.renderCanvas();
@@ -862,6 +1193,7 @@ export class ThumbnailController {
         source: record.id,
         ...(storedLayer.adjustments ? { adjustments: storedLayer.adjustments } : {}),
         ...(storedLayer.overlay ? { overlay: storedLayer.overlay } : {}),
+        ...(storedLayer.transform ? { transform: storedLayer.transform } : {}),
       })),
       selectedLayerId: restored.some(({ record }) => record.id === stored.selectedLayerId)
         ? stored.selectedLayerId
@@ -869,6 +1201,8 @@ export class ThumbnailController {
       ...(stored.backgroundColor !== undefined
         ? { backgroundColor: stored.backgroundColor }
         : {}),
+      ...(stored.textOverlay ? { textOverlay: stored.textOverlay } : {}),
+      ...(stored.badgeOverlay ? { badgeOverlay: stored.badgeOverlay } : {}),
     });
   }
 
@@ -885,16 +1219,19 @@ export class ThumbnailController {
           createdAt: source.createdAt,
           adjustments: { ...layer.adjustments },
           overlay: { ...layer.overlay },
+          transform: { ...layer.transform },
         });
       }
     }
     const stored: StoredThumbnailState = {
-      version: 2,
+      version: 3,
       width: this.stateValue.width,
       height: this.stateValue.height,
       layout: this.stateValue.layout,
       selectedLayerId: this.stateValue.selectedLayerId,
       backgroundColor: this.stateValue.backgroundColor,
+      textOverlay: { ...this.stateValue.textOverlay },
+      badgeOverlay: { ...this.stateValue.badgeOverlay },
       layers,
     };
     await this.adapter.storage.setItem(this.storageKey, JSON.stringify(stored));
@@ -904,6 +1241,7 @@ export class ThumbnailController {
     this.syncLayoutControl();
     this.renderLayerList();
     this.syncInspector();
+    this.syncCanvasCapabilityUI();
     this.renderHistory();
   }
 
@@ -918,22 +1256,44 @@ export class ThumbnailController {
     const brightness = element<HTMLInputElement>("thumb-brightness-input");
     const contrast = element<HTMLInputElement>("thumb-contrast-input");
     const saturation = element<HTMLInputElement>("thumb-saturation-input");
+    const zoom = element<HTMLInputElement>("thumb-zoom-input");
+    const offsetX = element<HTMLInputElement>("thumb-offset-x-input");
+    const offsetY = element<HTMLInputElement>("thumb-offset-y-input");
     const shadow = element<HTMLInputElement>("thumb-shadow-checkbox");
     const shadowColor = element<HTMLInputElement>("thumb-shadow-color");
     const glow = element<HTMLInputElement>("thumb-glow-checkbox");
     const glowColor = element<HTMLInputElement>("thumb-glow-color");
-    const controls = [brightness, contrast, saturation, shadow, shadowColor, glow, glowColor];
+    const title = element<HTMLInputElement>("thumb-title-input");
+    const titleColor = element<HTMLInputElement>("thumb-title-color");
+    const titleSize = element<HTMLInputElement>("thumb-title-size-input");
+    const badge = element<HTMLInputElement>("thumb-badge-input");
+    const badgeColor = element<HTMLInputElement>("thumb-badge-color");
+    const badgeBackground = element<HTMLInputElement>("thumb-badge-background-color");
+    const controls = [brightness, contrast, saturation, zoom, offsetX, offsetY, shadow, shadowColor, glow, glowColor];
     controls.forEach((control) => { control.disabled = !layer; });
     brightness.value = String(layer?.adjustments.brightness ?? 100);
     contrast.value = String(layer?.adjustments.contrast ?? 100);
     saturation.value = String(layer?.adjustments.saturation ?? 100);
+    zoom.value = String(Math.round((layer?.transform.zoom ?? 1) * 100));
+    offsetX.value = String(Math.round((layer?.transform.offsetX ?? 0) * 100));
+    offsetY.value = String(Math.round((layer?.transform.offsetY ?? 0) * 100));
     shadow.checked = (layer?.overlay.shadow ?? 0) > 0;
     glow.checked = (layer?.overlay.glow ?? 0) > 0;
     shadowColor.value = layer?.overlay.shadowColor ?? "#000000";
     glowColor.value = layer?.overlay.glowColor ?? "#8b5cf6";
-    for (const control of [brightness, contrast, saturation]) {
+    title.value = this.stateValue.textOverlay.text;
+    titleColor.value = this.stateValue.textOverlay.color;
+    titleSize.value = String(this.stateValue.textOverlay.fontSize);
+    badge.value = this.stateValue.badgeOverlay.text;
+    badgeColor.value = this.stateValue.badgeOverlay.color;
+    badgeBackground.value = this.stateValue.badgeOverlay.backgroundColor;
+    for (const control of [brightness, contrast, saturation, zoom]) {
       const output = document.querySelector<HTMLOutputElement>(`[data-value-for="${control.id}"]`);
       if (output) output.value = `${control.value}%`;
+    }
+    for (const control of [offsetX, offsetY]) {
+      const output = document.querySelector<HTMLOutputElement>(`[data-value-for="${control.id}"]`);
+      if (output) output.value = `${Number(control.value) > 0 ? "+" : ""}${control.value}%`;
     }
   }
 

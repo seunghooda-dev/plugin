@@ -17,6 +17,7 @@ export interface SilenceCutOptions {
   minKeep?: number;
   trimLeading?: boolean;
   trimTrailing?: boolean;
+  maximumCuts?: number;
 }
 
 export interface SilenceCutPlan {
@@ -47,6 +48,36 @@ export interface PunchOptions {
   keywords?: readonly string[];
 }
 
+export interface AutomationAnalysisSettingsInput {
+  minSilence?: unknown;
+  padding?: unknown;
+  trimLeading?: unknown;
+  trimTrailing?: unknown;
+  punchEnabled?: unknown;
+  punchScale?: unknown;
+  punchCount?: unknown;
+  keywords?: unknown;
+}
+
+export interface AutomationAnalysisSettings {
+  readonly minSilence: number;
+  readonly padding: number;
+  readonly trimLeading: boolean;
+  readonly trimTrailing: boolean;
+  readonly punchEnabled: boolean;
+  readonly punchScale: number;
+  readonly punchCount: number;
+  readonly keywords: readonly string[];
+}
+
+export interface AutomationAnalysisFingerprintInput {
+  readonly transcriptName: string;
+  readonly sourceDuration: number;
+  readonly segments: readonly TimedSpeechSegment[];
+  readonly settings: AutomationAnalysisSettingsInput;
+  readonly sourceContextKey?: string;
+}
+
 export interface ScaleKeyframe {
   time: number;
   scale: number;
@@ -56,6 +87,7 @@ export interface ScaleKeyframe {
 export const MAX_AUTOMATION_SEGMENTS = 10_000;
 export const MAX_AUTOMATION_SEGMENT_TEXT_LENGTH = 4_000;
 export const MAX_PUNCH_KEYWORDS = 100;
+export const MAX_AUTOMATION_MARKERS = 500;
 
 const DEFAULT_SILENCE = 0.42;
 const DEFAULT_PADDING = 0.08;
@@ -96,8 +128,12 @@ export function normalizeSpeechSegments(
   }
   return segments
     .map((segment) => {
-      const start = clamped(finite(segment?.start, -1), 0, duration);
-      const end = clamped(finite(segment?.end, -1), 0, duration);
+      if (
+        typeof segment?.start !== "number" || !Number.isFinite(segment.start) ||
+        typeof segment?.end !== "number" || !Number.isFinite(segment.end)
+      ) return null;
+      const start = clamped(segment.start, 0, duration);
+      const end = clamped(segment.end, 0, duration);
       const text = typeof segment?.text === "string" ? segment.text.trim() : "";
       if (text.length > MAX_AUTOMATION_SEGMENT_TEXT_LENGTH) {
         throw new RangeError(`STT 구간 텍스트는 최대 ${MAX_AUTOMATION_SEGMENT_TEXT_LENGTH.toLocaleString("ko-KR")}자입니다.`);
@@ -110,6 +146,96 @@ export function normalizeSpeechSegments(
     })
     .filter((segment): segment is TimedSpeechSegment => Boolean(segment))
     .sort(compareSegments);
+}
+
+export function assertAutomationMarkerBudget(cutCount: number, punchCount: number): void {
+  if (!Number.isSafeInteger(cutCount) || cutCount < 0 || !Number.isSafeInteger(punchCount) || punchCount < 0) {
+    throw new RangeError("자동 편집 마커 개수는 0 이상의 안전한 정수여야 합니다.");
+  }
+  if (cutCount + punchCount > MAX_AUTOMATION_MARKERS) {
+    throw new RangeError(
+      `자동 편집 마커는 컷과 펀치인을 합쳐 최대 ${MAX_AUTOMATION_MARKERS.toLocaleString("ko-KR")}개까지 만들 수 있습니다.`,
+    );
+  }
+}
+
+export function normalizeAutomationAnalysisSettings(
+  input: AutomationAnalysisSettingsInput = {},
+): AutomationAnalysisSettings {
+  const keywords = Array.isArray(input.keywords)
+    ? keywordTokens(input.keywords)
+    : [];
+  return Object.freeze({
+    minSilence: clamped(finite(input.minSilence, DEFAULT_SILENCE), 0.1, 10),
+    padding: clamped(finite(input.padding, DEFAULT_PADDING), 0, 2),
+    trimLeading: input.trimLeading !== false,
+    trimTrailing: input.trimTrailing !== false,
+    punchEnabled: input.punchEnabled === true,
+    punchScale: clamped(finite(input.punchScale, 112), 101, 150),
+    punchCount: Math.round(clamped(finite(input.punchCount, 12), 1, 100)),
+    keywords: Object.freeze(keywords),
+  });
+}
+
+function updateFingerprintHash(hash: number, label: string, value: string): number {
+  const token = `${label.length}:${label}:${value.length}:${value};`;
+  let next = hash >>> 0;
+  for (let index = 0; index < token.length; index += 1) {
+    next ^= token.charCodeAt(index);
+    next = Math.imul(next, 0x01000193);
+  }
+  return next >>> 0;
+}
+
+/**
+ * Builds an opaque, deterministic identity for the exact transcript, effective controls,
+ * and Premiere project+sequence context used by an automation analysis. No source text or
+ * host identifier is embedded in the returned value.
+ */
+export function createAutomationAnalysisFingerprint(
+  input: AutomationAnalysisFingerprintInput,
+): string {
+  const duration = typeof input.sourceDuration === "number" && Number.isFinite(input.sourceDuration)
+    ? input.sourceDuration
+    : 0;
+  if (duration <= 0) throw new RangeError("자동 편집 fingerprint에는 0초보다 긴 소스가 필요합니다.");
+  const segments = normalizeSpeechSegments(input.segments, duration);
+  const settings = normalizeAutomationAnalysisSettings(input.settings);
+  const transcriptName = typeof input.transcriptName === "string"
+    ? input.transcriptName.trim().slice(0, 512)
+    : "";
+  const sourceContextKey = typeof input.sourceContextKey === "string"
+    ? input.sourceContextKey.trim().slice(0, 512)
+    : "";
+  let primary = 0x811c9dc5;
+  let secondary = 0x9e3779b9;
+  const append = (label: string, value: unknown): void => {
+    const text = typeof value === "string" ? value : String(value);
+    primary = updateFingerprintHash(primary, label, text);
+    secondary = updateFingerprintHash(secondary, label, text);
+  };
+  append("schema", "shortflow.automation.analysis.v1");
+  append("markerLimit", MAX_AUTOMATION_MARKERS);
+  append("transcriptName", transcriptName);
+  append("duration", duration);
+  append("segmentCount", segments.length);
+  segments.forEach((segment, index) => {
+    append(`segment.${index}.start`, segment.start);
+    append(`segment.${index}.end`, segment.end);
+    append(`segment.${index}.text`, segment.text);
+    append(`segment.${index}.speaker`, segment.speaker ?? "");
+  });
+  append("minSilence", settings.minSilence);
+  append("padding", settings.padding);
+  append("trimLeading", settings.trimLeading);
+  append("trimTrailing", settings.trimTrailing);
+  append("punchEnabled", settings.punchEnabled);
+  append("punchScale", settings.punchScale);
+  append("punchCount", settings.punchCount);
+  append("keywordCount", settings.keywords.length);
+  settings.keywords.forEach((keyword, index) => append(`keyword.${index}`, keyword));
+  append("sourceContext", sourceContextKey);
+  return `auto_v1_${primary.toString(36).padStart(7, "0")}_${secondary.toString(36).padStart(7, "0")}`;
 }
 
 function mergeRanges(ranges: readonly TimeRange[], maximumGap = 0): TimeRange[] {
@@ -150,6 +276,7 @@ export function planSilenceCuts(
   const minSilence = clamped(finite(options.minSilence, DEFAULT_SILENCE), 0.1, 10);
   const padding = clamped(finite(options.padding, DEFAULT_PADDING), 0, 2);
   const minKeep = clamped(finite(options.minKeep, 0.12), 0, 5);
+  const maximumCuts = Math.round(clamped(finite(options.maximumCuts, MAX_AUTOMATION_MARKERS), 1, MAX_AUTOMATION_MARKERS));
   const normalized = normalizeSpeechSegments(segments, duration);
   const warnings: string[] = [];
   if (normalized.length === 0) {
@@ -163,6 +290,7 @@ export function planSilenceCuts(
     };
   }
 
+  const actualSpeech = mergeRanges(normalized.map((segment) => range(segment.start, segment.end)));
   const speech = mergeRanges(normalized.map((segment) => range(
     Math.max(0, segment.start - padding),
     Math.min(duration, segment.end + padding),
@@ -180,15 +308,32 @@ export function planSilenceCuts(
   // 너무 짧은 잔여 조각은 인접 컷에 흡수해 1~2프레임짜리 플래시 컷을 방지합니다.
   if (minKeep > 0 && keeps.some((item) => item.duration < minKeep)) {
     const expandedCuts = [...cuts];
+    let absorbedSilenceKeeps = 0;
+    let protectedSpeechKeeps = 0;
     for (const keep of keeps) {
       if (keep.duration + EPSILON >= minKeep) continue;
+      const containsSpeech = actualSpeech.some((speechRange) =>
+        keep.start < speechRange.end && keep.end > speechRange.start);
+      if (containsSpeech) {
+        protectedSpeechKeeps += 1;
+        continue;
+      }
       expandedCuts.push(keep);
+      absorbedSilenceKeeps += 1;
     }
-    const mergedCuts = mergeRanges(expandedCuts.sort((a, b) => a.start - b.start));
-    keeps = complementRanges(mergedCuts, duration);
-    cuts.splice(0, cuts.length, ...mergedCuts);
-    warnings.push("너무 짧은 잔여 구간을 인접 무음 컷에 합쳤습니다.");
+    if (absorbedSilenceKeeps > 0) {
+      const mergedCuts = mergeRanges(expandedCuts.sort((a, b) => a.start - b.start));
+      keeps = complementRanges(mergedCuts, duration);
+      cuts.splice(0, cuts.length, ...mergedCuts);
+      warnings.push("실제 발화가 없는 너무 짧은 잔여 구간을 인접 무음 컷에 합쳤습니다.");
+    }
+    if (protectedSpeechKeeps > 0) warnings.push("최소 유지 길이보다 짧은 실제 발화 구간은 삭제하지 않고 보존했습니다.");
   }
+  if (cuts.length > maximumCuts) throw new RangeError(
+    `자동 컷 계획은 최대 ${maximumCuts.toLocaleString("ko-KR")}개까지 만들 수 있습니다. ` +
+    "최소 무음 길이를 늘리거나 분석 범위를 줄여 주세요.",
+  );
+  assertAutomationMarkerBudget(cuts.length, 0);
 
   const removedDuration = cuts.reduce((sum, item) => sum + item.duration, 0);
   const outputDuration = Math.max(0, duration - removedDuration);

@@ -1,24 +1,59 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
   ShortFlowError,
+  assertAutomationPlan,
+  buildExportFilename,
+  buildSafeZoneItemAlignmentActions,
   centeredPosition,
   errorMessage,
+  exportTimestamp,
   joinNativePath,
   keyframeValue,
   normalizeExportExtension,
   normalizePremierePath,
+  premiereContextKey,
+  prepareInsertAssetPreflight,
+  readSequenceStatus,
+  removeVerifiedClonedSequenceFromProject,
   sameMediaPath,
+  scanSequenceMediaQC,
   tickTimeSeconds,
+  translateSafeZonePosition,
+  validatePremiereImportPath,
   zeroBasedTrackIndex,
 } from "../src/premiere";
+import type { SilenceCutPlan } from "../src/automation";
+import type { PointF, Project, VideoClipTrackItem } from "@adobe/premierepro";
+import type { SafeZoneAlignment } from "../src/safe-zone";
 
 function assertShortFlowError(error: unknown, code: string): boolean {
   assert.ok(error instanceof ShortFlowError);
   assert.equal(error.code, code);
   assert.ok(error.message.length > 0);
   return true;
+}
+
+function markerPlan(cutCount: number): SilenceCutPlan {
+  const sourceDuration = cutCount + 1;
+  const cuts = Array.from({ length: cutCount }, (_value, index) => ({
+    start: index,
+    end: index + 1,
+    duration: 1,
+  }));
+  return {
+    sourceDuration,
+    outputDuration: 1,
+    removedDuration: cutCount,
+    compressionRatio: 1 / sourceDuration,
+    speech: [],
+    cuts,
+    keeps: [{ start: cutCount, end: sourceDuration, duration: 1 }],
+    warnings: [],
+  };
 }
 
 describe("tickTimeSeconds", () => {
@@ -38,6 +73,358 @@ describe("tickTimeSeconds", () => {
 
   it("does not confuse a bare number with TickTime", () => {
     assert.equal(tickTimeSeconds(5, -1), -1);
+  });
+});
+
+describe("readSequenceStatus Host snapshot", () => {
+  function selectedItem(start: number, end: number, type: "video" | "audio" = "video") {
+    return {
+      ...(type === "video" ? { isAdjustmentLayer: () => false } : {}),
+      getStartTime: async () => ({ seconds: start }),
+      getEndTime: async () => ({ seconds: end }),
+    };
+  }
+
+  it("starts independent read-only Host calls together instead of serializing QC latency", async () => {
+    const started = new Set<string>();
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const delayed = <T>(name: string, value: T): Promise<T> => {
+      started.add(name);
+      return gate.then(() => value);
+    };
+    const sequence = {
+      name: "Sequence 01",
+      guid: "sequence-guid",
+      getFrameSize: () => delayed("frame", { width: 1080, height: 1920 }),
+      getEndTime: () => delayed("end", { seconds: 12 }),
+      getInPoint: () => delayed("in", { seconds: 2 }),
+      getOutPoint: () => delayed("out", { seconds: 10 }),
+      getPlayerPosition: () => delayed("playhead", { seconds: 4 }),
+      getSelection: async () => null,
+      getVideoTrackCount: () => delayed("video-tracks", 3),
+      getAudioTrackCount: () => delayed("audio-tracks", 4),
+      getCaptionTrackCount: () => delayed("caption-tracks", 1),
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+    const pending = readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+    await Promise.resolve();
+    const beforeRelease = [...started].sort();
+    release();
+    const status = await pending;
+
+    assert.deepEqual(beforeRelease, [
+      "audio-tracks",
+      "caption-tracks",
+      "end",
+      "frame",
+      "in",
+      "out",
+      "playhead",
+      "video-tracks",
+    ]);
+    assert.deepEqual({
+      width: status.width,
+      height: status.height,
+      duration: status.effectiveDuration,
+      frameRate: status.frameRate,
+      videoTracks: status.videoTrackCount,
+      audioTracks: status.audioTrackCount,
+      captionTracks: status.captionTrackCount,
+    }, {
+      width: 1080,
+      height: 1920,
+      duration: 8,
+      frameRate: 30,
+      videoTracks: 3,
+      audioTracks: 4,
+      captionTracks: 1,
+    });
+  });
+
+  it("skips selection and playhead Host calls for the lightweight basic-QC path", async () => {
+    let selectionCalls = 0;
+    let playheadCalls = 0;
+    const sequence = {
+      name: "QC Sequence",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1080, height: 1920 }),
+      getEndTime: async () => ({ seconds: 20 }),
+      getInPoint: async () => ({ seconds: 0 }),
+      getOutPoint: async () => ({ seconds: 20 }),
+      getPlayerPosition: async () => { playheadCalls += 1; return { seconds: 5 }; },
+      getSelection: async () => { selectionCalls += 1; return null; },
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => 1,
+      getCaptionTrackCount: async () => 0,
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never, {
+      includeSelection: false,
+      includePlayerPosition: false,
+    });
+
+    assert.equal(selectionCalls, 0);
+    assert.equal(playheadCalls, 0);
+    assert.equal(status.playerPosition, 0);
+    assert.equal(status.selectedItemCount, 0);
+    assert.equal(status.effectiveDuration, 20);
+  });
+
+  it("reports timeline TrackItem selection counts and the combined selected range", async () => {
+    const sequence = {
+      name: "Selected Sequence",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1920, height: 1080 }),
+      getEndTime: async () => ({ seconds: 30 }),
+      getInPoint: async () => ({ seconds: 0 }),
+      getOutPoint: async () => ({ seconds: 30 }),
+      getPlayerPosition: async () => ({ seconds: 9 }),
+      getSelection: async () => ({
+        getTrackItems: async () => [
+          selectedItem(4, 12, "video"),
+          selectedItem(6, 14, "audio"),
+        ],
+      }),
+      getVideoTrackCount: async () => 3,
+      getAudioTrackCount: async () => 4,
+      getCaptionTrackCount: async () => 0,
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 29.97 }) }),
+    };
+
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+
+    assert.equal(status.selectedItemCount, 2);
+    assert.equal(status.selectedVideoCount, 1);
+    assert.equal(status.selectedStart, 4);
+    assert.equal(status.selectedEnd, 14);
+    assert.equal(status.playerPosition, 9);
+  });
+
+  it("falls back to TrackItem getIsSelected when Premiere selection returns an empty collection", async () => {
+    const videoSelected = {
+      ...selectedItem(2, 6, "video"),
+      getIsSelected: async () => true,
+    };
+    const videoUnselected = {
+      ...selectedItem(20, 24, "video"),
+      getIsSelected: async () => false,
+    };
+    const audioSelected = {
+      ...selectedItem(3, 8, "audio"),
+      getIsSelected: async () => true,
+    };
+    const sequence = {
+      name: "Host Selection Fallback",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1080, height: 1920 }),
+      getEndTime: async () => ({ seconds: 30 }),
+      getInPoint: async () => ({ seconds: 0 }),
+      getOutPoint: async () => ({ seconds: 30 }),
+      getPlayerPosition: async () => ({ seconds: 4 }),
+      getSelection: async () => ({
+        getTrackItems: async () => [],
+      }),
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => 1,
+      getCaptionTrackCount: async () => 0,
+      getVideoTrack: async () => ({
+        getTrackItems: () => [videoSelected, videoUnselected],
+      }),
+      getAudioTrack: async () => ({
+        getTrackItems: () => [audioSelected],
+      }),
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+
+    assert.equal(status.selectedItemCount, 2);
+    assert.equal(status.selectedVideoCount, 1);
+    assert.equal(status.selectedStart, 2);
+    assert.equal(status.selectedEnd, 8);
+  });
+
+  it("falls back to TrackItem getIsSelected when Premiere selection inspection fails", async () => {
+    const videoSelected = {
+      ...selectedItem(5, 9, "video"),
+      getIsSelected: async () => true,
+    };
+    const sequence = {
+      name: "Selection Failure With Fallback",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1080, height: 1920 }),
+      getEndTime: async () => ({ seconds: 10 }),
+      getInPoint: async () => ({ seconds: 0 }),
+      getOutPoint: async () => ({ seconds: 10 }),
+      getPlayerPosition: async () => ({ seconds: 1 }),
+      getSelection: async () => ({
+        getTrackItems: async () => {
+          throw new Error("Host selection unavailable");
+        },
+      }),
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => 0,
+      getCaptionTrackCount: async () => 0,
+      getVideoTrack: async () => ({
+        getTrackItems: () => [videoSelected],
+      }),
+      getAudioTrack: async () => ({
+        getTrackItems: () => [],
+      }),
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+
+    assert.equal(status.selectedItemCount, 1);
+    assert.equal(status.selectedVideoCount, 1);
+    assert.equal(status.selectedStart, 5);
+    assert.equal(status.selectedEnd, 9);
+  });
+
+  it("keeps the status read safe when Premiere selection and fallback inspection fail", async () => {
+    const sequence = {
+      name: "Selection Failure",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1080, height: 1920 }),
+      getEndTime: async () => ({ seconds: 10 }),
+      getInPoint: async () => ({ seconds: 0 }),
+      getOutPoint: async () => ({ seconds: 10 }),
+      getPlayerPosition: async () => ({ seconds: 1 }),
+      getSelection: async () => ({
+        getTrackItems: async () => {
+          throw new Error("Host selection unavailable");
+        },
+      }),
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => 1,
+      getCaptionTrackCount: async () => 0,
+      getVideoTrack: async () => {
+        throw new Error("video track unavailable");
+      },
+      getAudioTrack: async () => ({
+        getTrackItems: () => {
+          throw new Error("audio items unavailable");
+        },
+      }),
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+
+    assert.equal(status.selectedItemCount, 0);
+    assert.equal(status.selectedVideoCount, 0);
+    assert.equal(status.selectedStart, null);
+    assert.equal(status.selectedEnd, null);
+  });
+});
+
+describe("scanSequenceMediaQC", () => {
+  function mediaItem(name: string, id: string, offline = false) {
+    return {
+      getName: async () => name,
+      getProjectItem: async () => ({
+        getId: () => id,
+        isOffline: async () => offline,
+      }),
+    };
+  }
+
+  function sequenceWithMedia(videoItems: unknown[], audioItems: unknown[] = []) {
+    return {
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => audioItems.length > 0 ? 1 : 0,
+      getVideoTrack: async () => ({
+        getTrackItems: () => videoItems,
+      }),
+      getAudioTrack: async () => ({
+        getTrackItems: () => audioItems,
+      }),
+    };
+  }
+
+  it("preserves media QC result shape while respecting the scan limit", async () => {
+    const status = await scanSequenceMediaQC(3, {
+      context: {
+        project: { name: "Project", guid: "project-guid" },
+        sequence: sequenceWithMedia([
+          mediaItem("clip-01.mp4", "asset-1", true),
+          mediaItem("__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__safe-zone.bmp", "asset-2"),
+          mediaItem("clip-03.mp4", "asset-3"),
+          mediaItem("clip-04.mp4", "asset-4", true),
+        ]),
+      } as never,
+      concurrency: 2,
+    });
+
+    assert.deepEqual(status.offlineMedia, ["clip-01.mp4"]);
+    assert.deepEqual(status.guideOverlays, ["__SHORTFLOW_SAFE_GUIDE_DO_NOT_EXPORT__safe-zone.bmp"]);
+    assert.equal(status.scannedItems, 3);
+    assert.equal(status.truncated, true);
+  });
+
+  it("bounds TrackItem inspection concurrency for long timelines", async () => {
+    let active = 0;
+    let maxActive = 0;
+    let completed = 0;
+    const releases: Array<() => void> = [];
+    const total = 9;
+    const items = Array.from({ length: total }, (_value, index) => ({
+      getName: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        return new Promise<string>((resolve) => {
+          releases.push(() => {
+            active -= 1;
+            completed += 1;
+            resolve(`clip-${index + 1}.mp4`);
+          });
+        });
+      },
+      getProjectItem: async () => ({
+        getId: () => `asset-${index + 1}`,
+        isOffline: async () => false,
+      }),
+    }));
+
+    const pending = scanSequenceMediaQC(total, {
+      context: {
+        project: { name: "Project", guid: "project-guid" },
+        sequence: sequenceWithMedia(items),
+      } as never,
+      concurrency: 3,
+    });
+
+    while (completed < total) {
+      while (releases.length === 0) await Promise.resolve();
+      const batch = releases.splice(0);
+      for (const release of batch) release();
+      await Promise.resolve();
+    }
+    const status = await pending;
+
+    assert.equal(status.scannedItems, total);
+    assert.equal(status.truncated, false);
+    assert.equal(maxActive, 3);
   });
 });
 
@@ -155,6 +542,25 @@ describe("normalizeExportExtension", () => {
   });
 });
 
+describe("buildExportFilename", () => {
+  it("builds deterministic export names from sanitized sequence names and extensions", () => {
+    const date = new Date(2026, 6, 11, 12, 34, 56);
+    assert.equal(exportTimestamp(date), "20260711-123456");
+    assert.equal(
+      buildExportFilename("Client: Interview / Final", ".MP4", date),
+      "Client_ Interview _ Final_20260711-123456.mp4",
+    );
+  });
+
+  it("falls back from unsafe sequence names and codec extensions", () => {
+    const date = new Date(2026, 0, 2, 3, 4, 5);
+    assert.equal(
+      buildExportFilename("\n\t", "../exe", date),
+      "shortflow_20260102-030405.mp4",
+    );
+  });
+});
+
 describe("normalizePremierePath and sameMediaPath", () => {
   it("normalizes Windows drive paths case-insensitively", () => {
     assert.equal(
@@ -187,6 +593,127 @@ describe("normalizePremierePath and sameMediaPath", () => {
 
   it("never considers two empty paths the same media", () => {
     assert.equal(sameMediaPath("", ""), false);
+  });
+});
+
+describe("Premiere import path boundary", () => {
+  it("builds a deterministic opaque project+sequence key without exposing GUIDs or paths", () => {
+    const key = premiereContextKey("project-guid-secret", "sequence-guid-secret");
+    assert.match(key, /^ctx_[a-z0-9]{7}_[a-z0-9]{7}$/u);
+    assert.equal(key, premiereContextKey("project-guid-secret", "sequence-guid-secret"));
+    assert.notEqual(key, premiereContextKey("project-guid-secret", "other-sequence"));
+    assert.doesNotMatch(key, /project|sequence|guid|[\\/]/u);
+    assert.throws(
+      () => premiereContextKey("", "sequence"),
+      (error) => assertShortFlowError(error, "INVALID_HOST_CONTEXT"),
+    );
+  });
+
+  it("accepts absolute Windows, UNC, and POSIX native file paths", () => {
+    assert.equal(validatePremiereImportPath("C:\\Media\\voice.wav"), "C:\\Media\\voice.wav");
+    assert.equal(validatePremiereImportPath("\\\\NAS\\Share\\captions.srt"), "\\\\NAS\\Share\\captions.srt");
+    assert.equal(validatePremiereImportPath("/Users/editor/captions.srt"), "/Users/editor/captions.srt");
+  });
+
+  it("rejects relative, traversal, folder, extensionless, control-character, and non-string paths", () => {
+    for (const value of [
+      "captions.srt",
+      "C:\\Media\\..\\captions.srt",
+      "C:\\Media\\",
+      "C:\\Media\\caption",
+      "C:\\Media\\bad\nname.srt",
+      "https://example.com/captions.srt",
+      null,
+    ]) {
+      assert.throws(
+        () => validatePremiereImportPath(value),
+        (error) => assertShortFlowError(error, "INVALID_IMPORT_PATH"),
+      );
+    }
+  });
+
+  it("preflights asset insertion without touching the Premiere host", () => {
+    assert.deepEqual(
+      prepareInsertAssetPreflight("C:\\Media\\whoosh.wav", {
+        videoTrackIndex: 0,
+        audioTrackIndex: 2,
+        displayName: "  효과음\n삽입  ",
+        durationSeconds: "5.5" as never,
+        expectedContextKey: " ctx_abc ",
+      }),
+      {
+        assetPath: "C:\\Media\\whoosh.wav",
+        videoTrackIndex: 0,
+        audioTrackIndex: 2,
+        displayName: "효과음 삽입",
+        durationSeconds: 5.5,
+        expectedContextKey: "ctx_abc",
+      },
+    );
+  });
+
+  it("rejects unsafe asset insertion inputs before Premiere host access", () => {
+    assert.throws(
+      () => prepareInsertAssetPreflight("relative.wav", { videoTrackIndex: 0, audioTrackIndex: 0 }),
+      (error) => assertShortFlowError(error, "INVALID_IMPORT_PATH"),
+    );
+    assert.throws(
+      () => prepareInsertAssetPreflight("C:\\Media\\whoosh.wav", null as never),
+      (error) => assertShortFlowError(error, "INVALID_INSERT_OPTIONS"),
+    );
+    assert.throws(
+      () => prepareInsertAssetPreflight("C:\\Media\\whoosh.wav", { videoTrackIndex: 99, audioTrackIndex: 0 }),
+      (error) => assertShortFlowError(error, "INVALID_TRACK"),
+    );
+    assert.throws(
+      () => prepareInsertAssetPreflight("C:\\Media\\whoosh.wav", { videoTrackIndex: 0, audioTrackIndex: 0, durationSeconds: 0 }),
+      (error) => assertShortFlowError(error, "INVALID_ASSET_DURATION"),
+    );
+  });
+
+  it("validates duration and track options before resolving a Premiere host context", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const functionStart = source.indexOf("export async function importAndInsertAsset");
+    const functionEnd = source.indexOf("export function errorMessage", functionStart);
+    const body = source.slice(functionStart, functionEnd);
+    assert.ok(body.indexOf("prepareInsertAssetPreflight(nativePath, options)") < body.indexOf("getExpectedActiveContext(preflight.expectedContextKey)"));
+    assert.match(body, /findImportedItem\(bin, assetPath, new Set<string>\(\)\)/u);
+    assert.match(body, /if \(!imported\)[\s\S]*ASSET_IMPORT_FAILED/u);
+    assert.match(body, /getExpectedActiveContext\(preflight\.expectedContextKey\)/u);
+    assert.ok((body.match(/assertActiveContextKey\(contextKey\)/gu) ?? []).length >= 3);
+    const bulkStart = source.indexOf("export async function importFilesToProject");
+    const bulkBody = source.slice(bulkStart, functionStart);
+    assert.match(bulkBody, /if \(!existing\) pendingPaths\.push\(path\)/u);
+    assert.match(bulkBody, /if \(pendingPaths\.length === 0\) return 0/u);
+    assert.match(bulkBody, /PROJECT_IMPORT_FAILED/u);
+    assert.match(bulkBody, /getExpectedActiveContext\(expectedContext\)/u);
+    assert.match(bulkBody, /assertActiveContextKey\(contextKey\)/u);
+  });
+
+  it("rechecks the source Host context immediately before cloning for automation", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const cloneStart = source.indexOf("async function cloneSequence");
+    const cloneEnd = source.indexOf("async function setSequenceFrame", cloneStart);
+    const cloneBody = source.slice(cloneStart, cloneEnd);
+    assert.ok(cloneBody.indexOf("await beforeCommit?.()") < cloneBody.indexOf("commitActionFactories(project"));
+    assert.match(cloneBody, /beforeCommit\?: \(\) => void \| Promise<void>/u);
+
+    const applyStart = source.indexOf("export async function applyAutomationPlan");
+    const applyEnd = source.indexOf("export function translateSafeZonePosition", applyStart);
+    const applyBody = source.slice(applyStart, applyEnd);
+    assert.match(applyBody, /const sourceContextKey = premiereContextKey\(project\.guid, source\.guid\)/u);
+    assert.match(applyBody, /\(\) => assertActiveContextKey\(sourceContextKey\)/u);
+    assert.ok(applyBody.indexOf("const sourceContextKey") < applyBody.indexOf("const clone = await cloneSequence"));
+  });
+
+  it("rechecks the active Host context before committing Safe Zone alignment", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const functionStart = source.indexOf("export async function alignSelectedVideoToSafeZone");
+    const functionEnd = source.indexOf("function unwrapPickerResult", functionStart);
+    const body = source.slice(functionStart, functionEnd);
+    assert.match(body, /const \{ project, sequence, contextKey \} = await getExpectedActiveContext\(\)/u);
+    assert.ok(body.indexOf("await assertActiveContextKey(contextKey)") < body.indexOf("commitActionFactories(project, actions"));
+    assert.equal((body.match(/assertActiveContextKey\(contextKey\)/gu) ?? []).length, 1);
   });
 });
 
@@ -248,5 +775,206 @@ describe("errorMessage", () => {
     const message = errorMessage(new Error(`Authorization: Bearer ${secret}`));
     assert.equal(message.includes(secret), false);
     assert.match(message, /REDACTED/u);
+  });
+});
+
+describe("automation host validation", () => {
+  it("accepts exactly 500 combined markers and rejects 501 before mutation", () => {
+    const exact = markerPlan(499);
+    const cue = { start: 499, end: 500, scale: 112, reason: "test", text: "punch" };
+    assert.doesNotThrow(() => assertAutomationPlan(exact, [cue]));
+    assert.throws(
+      () => assertAutomationPlan(markerPlan(500), [{ ...cue, start: 500, end: 501 }]),
+      (error) => assertShortFlowError(error, "TOO_MANY_AUTOMATION_MARKERS"),
+    );
+  });
+
+  it("rejects non-finite, reversed, out-of-source, and inconsistent ranges without mutation", () => {
+    const cases = [
+      (plan: SilenceCutPlan) => { plan.cuts[0]!.start = Number.NaN; },
+      (plan: SilenceCutPlan) => { plan.cuts[0]!.end = -1; },
+      (plan: SilenceCutPlan) => { plan.cuts[0]!.end = plan.sourceDuration + 1; },
+      (plan: SilenceCutPlan) => { plan.cuts[0]!.duration = 999; },
+    ];
+    for (const mutate of cases) {
+      const plan = markerPlan(1);
+      mutate(plan);
+      const snapshot = structuredClone(plan);
+      assert.throws(
+        () => assertAutomationPlan(plan, []),
+        (error) => assertShortFlowError(error, "INVALID_AUTOMATION_PLAN"),
+      );
+      assert.deepEqual(plan, snapshot);
+    }
+  });
+
+  it("rejects malformed or source-outside punch cues", () => {
+    const plan = markerPlan(1);
+    for (const cue of [
+      { start: 1, end: 3, scale: 112, reason: "outside", text: "outside" },
+      { start: 1.5, end: 1, scale: 112, reason: "reverse", text: "reverse" },
+      { start: 1, end: 2, scale: Number.NaN, reason: "nan", text: "nan" },
+    ]) {
+      assert.throws(
+        () => assertAutomationPlan(plan, [cue]),
+        (error) => assertShortFlowError(error, "INVALID_AUTOMATION_PLAN"),
+      );
+    }
+  });
+
+  it("rejects a tampered cut that overlaps protected speech", () => {
+    const plan = markerPlan(1);
+    plan.speech = [{ start: 0.25, end: 0.75, duration: 0.5 }];
+    assert.throws(
+      () => assertAutomationPlan(plan, []),
+      (error) => assertShortFlowError(error, "INVALID_AUTOMATION_PLAN"),
+    );
+  });
+
+  it("removes only a verified clone through the official project transaction path", async () => {
+    const source = { guid: "source" };
+    const removeAction = { kind: "remove-clone" };
+    const cloneItem = {
+      getParentBin: () => ({ createRemoveItemAction: (item: unknown) => item === cloneItem ? removeAction : null }),
+    };
+    const clone = { guid: "clone", getProjectItem: async () => cloneItem };
+    let active: unknown = null;
+    let added: unknown = null;
+    const project = {
+      getSequences: async () => [source, clone],
+      setActiveSequence: async (sequence: unknown) => { active = sequence; return true; },
+      lockedAccess: (callback: () => void) => callback(),
+      executeTransaction: (callback: (compound: { addAction(action: unknown): boolean }) => void) => {
+        callback({ addAction: (action) => { added = action; return true; } });
+        return true;
+      },
+    } as unknown as Project;
+    await removeVerifiedClonedSequenceFromProject(project, "source", "clone");
+    assert.equal(active, source);
+    assert.equal(added, removeAction);
+  });
+
+  it("keeps silence cuts as SF CUT review markers and contains no QE/private razor path", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    assert.match(source, /no supported razor-at-time action/u);
+    assert.match(source, /SF CUT 검토 마커/u);
+    assert.doesNotMatch(source, /enableQE|\.qe\b|QE DOM/iu);
+    assert.match(source, /removeVerifiedClonedSequenceFromProject\(project, sourceGuid, cloneGuid\)/u);
+  });
+});
+
+describe("Safe Zone Motion alignment", () => {
+  const alignment: SafeZoneAlignment = {
+    rect: { x: 0.1, y: 0.2, width: 0.4, height: 0.4 },
+    deltaX: 0.1,
+    deltaY: 0.2,
+    scale: 0.8,
+    changed: true,
+    wasOversized: true,
+  };
+
+  it("rechecks the active Host context immediately before Safe Zone alignment mutations", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const start = source.indexOf("export async function alignSelectedVideoToSafeZone");
+    const end = source.indexOf("function unwrapPickerResult", start);
+    const body = source.slice(start, end);
+    assert.match(body, /getExpectedActiveContext\(\)/u);
+    assert.match(body, /await assertActiveContextKey\(contextKey\)/u);
+    assert.ok(body.indexOf("await assertActiveContextKey(contextKey)") < body.indexOf("commitActionFactories(project"));
+  });
+
+  it("translates normalized and pixel PointF values in their own coordinate spaces", () => {
+    assert.deepEqual(translateSafeZonePosition({ x: 0.4, y: 0.5 }, 0.1, -0.2, 1080, 1920), {
+      x: 0.5, y: 0.3, space: "normalized",
+    });
+    assert.deepEqual(translateSafeZonePosition({ x: 540, y: 960 }, 0.1, -0.2, 1080, 1920), {
+      x: 648, y: 576, space: "pixels",
+    });
+    assert.equal(translateSafeZonePosition({ x: 0, y: 0 }, 0.1, 0.1, 1080, 1920), null);
+    assert.equal(translateSafeZonePosition({ x: "540", y: 960 }, 0.1, 0.1, 1080, 1920), null);
+  });
+
+  it("preserves relative layout by adding one delta instead of assigning one shared center", () => {
+    const first = translateSafeZonePosition({ x: 540, y: 700 }, 0.1, 0.05, 1080, 1920)!;
+    const second = translateSafeZonePosition({ x: 740, y: 900 }, 0.1, 0.05, 1080, 1920)!;
+    assert.equal(second.x - first.x, 200);
+    assert.equal(second.y - first.y, 200);
+  });
+
+  it("builds position and proportional scale actions together for a safe static Motion item", async () => {
+    const created: Array<{ kind: string; value: unknown }> = [];
+    const position = {
+      displayName: "Position",
+      isTimeVarying: () => false,
+      getStartValue: async () => ({ value: { value: { x: 100, y: 200 } } }),
+      createKeyframe: (value: unknown) => ({ value }),
+      createSetValueAction: (keyframe: { value: unknown }) => {
+        const action = { kind: "position", value: keyframe.value };
+        created.push(action);
+        return action;
+      },
+    };
+    const scale = {
+      displayName: "Scale",
+      isTimeVarying: () => false,
+      getStartValue: async () => ({ value: { value: 100 } }),
+      createKeyframe: (value: unknown) => ({ value }),
+      createSetValueAction: (keyframe: { value: unknown }) => {
+        const action = { kind: "scale", value: keyframe.value };
+        created.push(action);
+        return action;
+      },
+    };
+    const component = {
+      getMatchName: async () => "ADBE Motion",
+      getDisplayName: async () => "Motion",
+      getParamCount: () => 2,
+      getParam: (index: number) => index === 0 ? position : scale,
+    };
+    const item = {
+      isAdjustmentLayer: async () => false,
+      getComponentChain: async () => ({ getComponentCount: () => 1, getComponentAtIndex: () => component }),
+    } as unknown as VideoClipTrackItem;
+    const result = await buildSafeZoneItemAlignmentActions(
+      item,
+      alignment,
+      { width: 1000, height: 500 },
+      (x, y) => ({ x, y }) as PointF,
+    );
+    assert.equal(result.changed, true);
+    assert.equal(result.actions.length, 2);
+    assert.deepEqual(created, []);
+    for (const createAction of result.actions) createAction();
+    assert.deepEqual(created, [
+      { kind: "position", value: { x: 200, y: 300 } },
+      { kind: "scale", value: 80 },
+    ]);
+  });
+
+  it("preserves the whole item when a required Position or Scale property is keyed", async () => {
+    const keyedPosition = {
+      displayName: "Position",
+      isTimeVarying: () => true,
+      getStartValue: async () => ({ value: { value: { x: 100, y: 200 } } }),
+    };
+    const scale = {
+      displayName: "Scale",
+      isTimeVarying: () => false,
+      getStartValue: async () => ({ value: { value: 100 } }),
+    };
+    const component = {
+      getMatchName: async () => "ADBE Motion",
+      getDisplayName: async () => "Motion",
+      getParamCount: () => 2,
+      getParam: (index: number) => index === 0 ? keyedPosition : scale,
+    };
+    const item = {
+      isAdjustmentLayer: async () => false,
+      getComponentChain: async () => ({ getComponentCount: () => 1, getComponentAtIndex: () => component }),
+    } as unknown as VideoClipTrackItem;
+    const result = await buildSafeZoneItemAlignmentActions(item, alignment, { width: 1000, height: 500 });
+    assert.equal(result.changed, false);
+    assert.deepEqual(result.actions, []);
+    assert.match(result.warning ?? "", /위치 키프레임.*보존/u);
   });
 });

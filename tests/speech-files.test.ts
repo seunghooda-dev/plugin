@@ -525,6 +525,36 @@ describe("persistent TTS and STT output folders", () => {
 });
 
 describe("collision-free binary and text writes", () => {
+  it("writes to the captured output-folder snapshot after the current folder changes", async () => {
+    const { adapter, state } = createHarness();
+    const first = new MockFolder("First", "C:\\First");
+    const second = new MockFolder("Second", "C:\\Second");
+    const manager = new SpeechFileManager(adapter);
+    state.selectedFolder = first;
+    const snapshot = await manager.selectOutputFolder("tts");
+    state.selectedFolder = second;
+    await manager.selectOutputFolder("tts");
+    const written = await manager.writeTtsAudio([1], "snapshot", "wav", snapshot);
+    assert.equal(written.nativePath, "C:\\First\\snapshot.wav");
+    assert.equal(first.created.length, 1);
+    assert.equal(second.created.length, 0);
+  });
+
+  it("rejects a mismatched output-folder snapshot before creating a file", async () => {
+    const { adapter } = createHarness();
+    const manager = new SpeechFileManager(adapter);
+    await assert.rejects(
+      manager.writeTtsAudio([1], "voice", "wav", {
+        kind: "stt",
+        entry: new MockFolder("STT", "C:\\STT"),
+        token: "token",
+        name: "STT",
+        nativePath: "C:\\STT",
+      }),
+      (error) => assertSpeechError(error, "INVALID_ENTRY"),
+    );
+  });
+
   it("writes WAV bytes with binary format and returns an importable native path", async () => {
     const { adapter, state } = createHarness();
     const folder = new MockFolder("TTS", "C:\\TTS");

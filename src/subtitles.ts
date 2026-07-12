@@ -1,6 +1,10 @@
 export const SUBTITLE_DOCUMENT_VERSION = 1 as const;
 export const SUBTITLE_AUTOSAVE_SCHEMA = "shortflow.subtitles.autosave" as const;
 export const SUBTITLE_UNDO_LIMIT = 50;
+export const DEFAULT_SRT_IMPORT_CUE_LIMIT = 10_000;
+export const DEFAULT_SRT_IMPORT_INPUT_CHAR_LIMIT = 5_000_000;
+export const DEFAULT_SRT_IMPORT_TEXT_CHAR_LIMIT = 5_000_000;
+export const MAX_SUBTITLE_SERIALIZED_JSON_CHARS = 32 * 1024 * 1024;
 
 const MIN_CUE_DURATION = 0.001;
 const DEFAULT_PROJECT_KEY = "untitled-project";
@@ -43,9 +47,11 @@ export interface SubtitleValidationIssue {
     | "DUPLICATE_CUE_ID"
     | "INVALID_TIME"
     | "INVALID_TEXT"
-    | "INVALID_WORD"
-    | "DUPLICATE_WORD_ID"
-    | "WORD_OUTSIDE_CUE";
+     | "INVALID_WORD"
+     | "DUPLICATE_WORD_ID"
+     | "UNSORTED_CUES"
+     | "UNSORTED_WORDS"
+     | "WORD_OUTSIDE_CUE";
   message: string;
 }
 
@@ -74,6 +80,14 @@ export interface ActiveSubtitlePosition {
 
 export interface ParseSrtOptions {
   projectKey?: string;
+  maxCueCount?: number;
+  maxInputChars?: number;
+  maxTotalTextChars?: number;
+}
+
+export interface ReflowSubtitleOptions {
+  /** Maximum number of cues allowed in the complete reflow result. */
+  maxOutputCues?: number;
 }
 
 export interface SubtitleAutosaveEnvelope {
@@ -90,6 +104,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function finiteNumber(value: unknown, fallback: number): number {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function boundedPositiveInteger(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(parsed)));
 }
 
 function normalizedProjectKey(value: unknown): string {
@@ -283,13 +303,16 @@ export function validateSubtitleDocument(value: unknown): SubtitleValidationResu
   }
   if (typeof value.projectKey !== "string" || !value.projectKey.trim()) {
     issues.push({ path: "projectKey", code: "INVALID_PROJECT_KEY", message: "프로젝트 키가 비어 있습니다." });
+  } else if (value.projectKey !== normalizedProjectKey(value.projectKey)) {
+    issues.push({ path: "projectKey", code: "INVALID_PROJECT_KEY", message: "프로젝트 키가 정규화된 형식이 아닙니다." });
   }
   if (!Array.isArray(value.cues)) {
     issues.push({ path: "cues", code: "INVALID_DOCUMENT", message: "cues는 배열이어야 합니다." });
     return { valid: false, issues };
   }
+  const rawCues = value.cues;
   const cueIds = new Set<string>();
-  value.cues.forEach((raw, cueIndex) => {
+  rawCues.forEach((raw, cueIndex) => {
     const path = `cues[${cueIndex}]`;
     if (!isRecord(raw)) {
       issues.push({ path, code: "INVALID_CUE", message: "큐는 객체여야 합니다." });
@@ -297,6 +320,8 @@ export function validateSubtitleDocument(value: unknown): SubtitleValidationResu
     }
     if (typeof raw.cueId !== "string" || !raw.cueId.trim()) {
       issues.push({ path: `${path}.cueId`, code: "INVALID_CUE", message: "cueId가 비어 있습니다." });
+    } else if (raw.cueId !== normalizedItemId(raw.cueId)) {
+      issues.push({ path: `${path}.cueId`, code: "INVALID_CUE", message: "cueId가 정규화된 형식이 아닙니다." });
     } else if (cueIds.has(raw.cueId)) {
       issues.push({ path: `${path}.cueId`, code: "DUPLICATE_CUE_ID", message: "cueId가 중복되었습니다." });
     } else cueIds.add(raw.cueId);
@@ -305,32 +330,69 @@ export function validateSubtitleDocument(value: unknown): SubtitleValidationResu
     if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
       issues.push({ path, code: "INVALID_TIME", message: "큐 시간은 0 이상이며 종료가 시작보다 커야 합니다." });
     }
+    const previousCue = rawCues[cueIndex - 1];
+    if (cueIndex > 0 && isRecord(previousCue)) {
+      const previousStart = typeof previousCue.start === "number" ? previousCue.start : Number.NaN;
+      const previousEnd = typeof previousCue.end === "number" ? previousCue.end : Number.NaN;
+      const previousId = typeof previousCue.cueId === "string" ? previousCue.cueId : "";
+      const currentId = typeof raw.cueId === "string" ? raw.cueId : "";
+      if (
+        Number.isFinite(previousStart) && Number.isFinite(previousEnd) &&
+        Number.isFinite(start) && Number.isFinite(end) && previousId && currentId &&
+        (previousStart > start ||
+          (previousStart === start && previousEnd > end) ||
+          (previousStart === start && previousEnd === end && previousId.localeCompare(currentId) > 0))
+      ) {
+        issues.push({ path, code: "UNSORTED_CUES", message: "자막 큐가 시작·종료 시간과 cueId 순서로 정렬되어 있지 않습니다." });
+      }
+    }
     if (typeof raw.enabled !== "boolean" || typeof raw.hidden !== "boolean") {
       issues.push({ path, code: "INVALID_CUE", message: "큐의 enabled와 hidden은 불리언이어야 합니다." });
     }
     if (typeof raw.text !== "string") {
       issues.push({ path: `${path}.text`, code: "INVALID_TEXT", message: "큐 텍스트는 문자열이어야 합니다." });
+    } else if (raw.text !== normalizedText(raw.text)) {
+      issues.push({ path: `${path}.text`, code: "INVALID_TEXT", message: "큐 텍스트가 정규화된 형식이 아닙니다." });
     }
     if (!Array.isArray(raw.words)) {
       issues.push({ path: `${path}.words`, code: "INVALID_WORD", message: "words는 배열이어야 합니다." });
       return;
     }
+    const rawWords = raw.words;
     const wordIds = new Set<string>();
-    raw.words.forEach((word, wordIndex) => {
+    rawWords.forEach((word, wordIndex) => {
       const wordPath = `${path}.words[${wordIndex}]`;
       if (!isRecord(word) || typeof word.wordId !== "string" || !word.wordId.trim() || typeof word.t !== "string") {
         issues.push({ path: wordPath, code: "INVALID_WORD", message: "단어 형식이 올바르지 않습니다." });
         return;
       }
-      if (wordIds.has(word.wordId)) {
+      if (word.wordId !== normalizedItemId(word.wordId)) {
+        issues.push({ path: `${wordPath}.wordId`, code: "INVALID_WORD", message: "wordId가 정규화된 형식이 아닙니다." });
+      } else if (wordIds.has(word.wordId)) {
         issues.push({ path: `${wordPath}.wordId`, code: "DUPLICATE_WORD_ID", message: "wordId가 중복되었습니다." });
       } else wordIds.add(word.wordId);
+      if (word.t !== normalizedText(word.t)) {
+        issues.push({ path: `${wordPath}.t`, code: "INVALID_WORD", message: "단어 텍스트가 정규화된 형식이 아닙니다." });
+      }
       const wordStart = typeof word.s === "number" ? word.s : Number.NaN;
       const wordEnd = typeof word.e === "number" ? word.e : Number.NaN;
       if (!Number.isFinite(wordStart) || !Number.isFinite(wordEnd) || wordEnd <= wordStart) {
         issues.push({ path: wordPath, code: "INVALID_TIME", message: "단어 시간이 올바르지 않습니다." });
       } else if (Number.isFinite(start) && Number.isFinite(end) && (wordStart < start || wordEnd > end)) {
         issues.push({ path: wordPath, code: "WORD_OUTSIDE_CUE", message: "단어 시간이 큐 범위를 벗어났습니다." });
+      }
+      const previousWord = rawWords[wordIndex - 1];
+      if (wordIndex > 0 && isRecord(previousWord)) {
+        const previousWordStart = typeof previousWord.s === "number" ? previousWord.s : Number.NaN;
+        const previousWordEnd = typeof previousWord.e === "number" ? previousWord.e : Number.NaN;
+        if (
+          Number.isFinite(previousWordStart) && Number.isFinite(previousWordEnd) &&
+          Number.isFinite(wordStart) && Number.isFinite(wordEnd) &&
+          (previousWordStart > wordStart ||
+            (previousWordStart === wordStart && previousWordEnd > wordEnd))
+        ) {
+          issues.push({ path: wordPath, code: "UNSORTED_WORDS", message: "자막 단어가 시작·종료 시간 순서로 정렬되어 있지 않습니다." });
+        }
       }
       if (typeof word.hidden !== "boolean") {
         issues.push({ path: `${wordPath}.hidden`, code: "INVALID_WORD", message: "단어 hidden은 불리언이어야 합니다." });
@@ -420,12 +482,15 @@ export function joinSubtitleWords(
   const rightIndex = Math.max(firstIndex, secondIndex);
   const left = cue.words[leftIndex] as SubtitleWord;
   const right = cue.words[rightIndex] as SubtitleWord;
+  if (left.hidden !== right.hidden) {
+    throw new Error("숨김 상태가 다른 단어는 붙일 수 없습니다. 먼저 두 단어의 숨김 상태를 같게 맞춰 주세요.");
+  }
   const joined: SubtitleWord = {
     wordId: left.wordId,
     s: Math.min(left.s, right.s),
     e: Math.max(left.e, right.e),
     t: `${left.t.trim()}${right.t.trim()}`,
-    hidden: false,
+    hidden: left.hidden,
   };
   const words = [...cue.words.slice(0, leftIndex), joined, ...cue.words.slice(rightIndex + 1)];
   return replaceCueAt(document, cueIndex, { ...cue, words, text: wordDisplayText(words) });
@@ -618,6 +683,9 @@ export function mergeSubtitleCues(
   const rightIndex = Math.max(firstIndex, secondIndex);
   const left = document.cues[leftIndex] as SubtitleCue;
   const right = document.cues[rightIndex] as SubtitleCue;
+  if (left.enabled !== right.enabled || left.hidden !== right.hidden) {
+    throw new Error("표시 상태가 다른 자막 큐는 합칠 수 없습니다. 먼저 두 큐의 활성 및 숨김 상태를 같게 맞춰 주세요.");
+  }
   const usedWordIds = new Set<string>();
   const words = [...left.words, ...right.words].map((word) => ({
     ...word,
@@ -628,8 +696,8 @@ export function mergeSubtitleCues(
     start: Math.min(left.start, right.start),
     end: Math.max(left.end, right.end),
     text: [left.text.trim(), right.text.trim()].filter(Boolean).join(" "),
-    enabled: left.enabled || right.enabled,
-    hidden: left.hidden && right.hidden,
+    enabled: left.enabled,
+    hidden: left.hidden,
     words,
   };
   return {
@@ -638,60 +706,88 @@ export function mergeSubtitleCues(
   };
 }
 
-function splitLongWord(word: SubtitleWord, maxChars: number, usedWordIds: Set<string>): SubtitleWord[] {
-  if (word.t.length <= maxChars) return [cloneWord(word)];
-  const pieces: SubtitleWord[] = [];
-  const duration = word.e - word.s;
-  for (let offset = 0, index = 0; offset < word.t.length; offset += maxChars, index += 1) {
-    const text = word.t.slice(offset, offset + maxChars);
-    const s = word.s + duration * (offset / word.t.length);
-    const e = word.s + duration * ((offset + text.length) / word.t.length);
-    // The original IDs are reserved before derived pieces are created. This keeps
-    // a pre-existing `word~2` stable when a long `word` is split for reflow.
-    const wordId = index === 0
-      ? word.wordId
-      : uniqueId(`${word.wordId}~${index + 1}`, usedWordIds);
-    pieces.push({ ...word, wordId, s, e, t: text });
-  }
-  return pieces;
-}
-
-function cueWordGroups(cue: SubtitleCue, maxChars: number): SubtitleWord[][] {
+function cueWordGroups(
+  cue: SubtitleCue,
+  maxChars: number,
+  maxGroups?: number,
+  maxOutputCues?: number,
+): SubtitleWord[][] {
   const usedWordIds = new Set(cue.words.map((word) => word.wordId));
   const source = cue.words.length > 0
-    ? cue.words.flatMap((word) => splitLongWord(word, maxChars, usedWordIds))
+    ? cue.words
     : proportionalWords(cue.text, cue.start, cue.end, cue.cueId);
   const groups: SubtitleWord[][] = [];
   let current: SubtitleWord[] = [];
   let length = 0;
-  for (const word of source) {
+  const pushCurrent = (): void => {
+    if (current.length === 0) return;
+    if (maxGroups !== undefined && groups.length >= maxGroups) {
+      throw new Error(`자막 리플로 결과가 설정한 출력 큐 상한 ${String(maxOutputCues ?? maxGroups)}개를 초과합니다.`);
+    }
+    groups.push(current);
+    current = [];
+    length = 0;
+  };
+  const appendWord = (word: SubtitleWord): void => {
     const visibleLength = word.hidden ? 0 : word.t.trim().length;
     const addition = visibleLength + (length > 0 && visibleLength > 0 ? 1 : 0);
     if (current.length > 0 && visibleLength > 0 && length + addition > maxChars) {
-      groups.push(current);
-      current = [];
-      length = 0;
+      pushCurrent();
     }
     current.push(cloneWord(word));
     length += visibleLength + (length > 0 && visibleLength > 0 ? 1 : 0);
+  };
+  for (const word of source) {
+    if (word.hidden || word.t.length <= maxChars) {
+      appendWord(word);
+      continue;
+    }
+    const duration = word.e - word.s;
+    for (let offset = 0, index = 0; offset < word.t.length; offset += maxChars, index += 1) {
+      const text = word.t.slice(offset, offset + maxChars);
+      const s = word.s + duration * (offset / word.t.length);
+      const e = word.s + duration * ((offset + text.length) / word.t.length);
+      // Original IDs are reserved before derived pieces are created, keeping an
+      // existing `word~2` stable when `word` itself is split for reflow.
+      const wordId = index === 0
+        ? word.wordId
+        : uniqueId(`${word.wordId}~${index + 1}`, usedWordIds);
+      appendWord({ ...word, wordId, s, e, t: text });
+    }
   }
-  if (current.length > 0) groups.push(current);
+  pushCurrent();
   return groups;
 }
 
-export function reflowSubtitleCues(document: SubtitleDocument, maxChars: number): SubtitleDocument {
+export function reflowSubtitleCues(
+  document: SubtitleDocument,
+  maxChars: number,
+  options: ReflowSubtitleOptions = {},
+): SubtitleDocument {
   const limit = Math.floor(maxChars);
   if (!Number.isFinite(limit) || limit < 1 || limit > 10_000) {
     throw new Error("자막 최대 글자 수는 1자에서 10,000자 사이여야 합니다.");
   }
+  const maxOutputCues = options.maxOutputCues;
+  if (maxOutputCues !== undefined && (!Number.isSafeInteger(maxOutputCues) || maxOutputCues < 1)) {
+    throw new Error("자막 리플로 출력 큐 상한은 1 이상의 안전한 정수여야 합니다.");
+  }
+  if (maxOutputCues !== undefined && document.cues.length > maxOutputCues) {
+    throw new Error(`자막 리플로 결과가 설정한 출력 큐 상한 ${String(maxOutputCues)}개를 초과합니다.`);
+  }
   const used = new Set(document.cues.map((cue) => cue.cueId));
   const cues: SubtitleCue[] = [];
-  for (const cue of document.cues) {
+  for (let cueIndex = 0; cueIndex < document.cues.length; cueIndex += 1) {
+    const cue = document.cues[cueIndex] as SubtitleCue;
     if (!cue.enabled || cue.hidden || cue.text.length <= limit) {
       cues.push(cloneCue(cue));
       continue;
     }
-    const groups = cueWordGroups(cue, limit);
+    const remainingInputCues = document.cues.length - cueIndex - 1;
+    const maxGroups = maxOutputCues === undefined
+      ? undefined
+      : maxOutputCues - cues.length - remainingInputCues;
+    const groups = cueWordGroups(cue, limit, maxGroups, maxOutputCues);
     if (groups.length * MIN_CUE_DURATION > cue.end - cue.start + Number.EPSILON) {
       throw new Error("자막 구간이 너무 짧아 현재 최대 글자 수로 나눌 수 없습니다.");
     }
@@ -788,9 +884,17 @@ export function buildSrt(document: SubtitleDocument, options: BuildSrtOptions = 
 
 export function parseSrt(value: string, options: ParseSrtOptions = {}): SubtitleDocument {
   const projectKey = normalizedProjectKey(options.projectKey);
-  const clean = String(value ?? "").replace(/^\uFEFF/gu, "").replace(/\r\n?/gu, "\n").trim();
+  const maxInputChars = boundedPositiveInteger(options.maxInputChars, DEFAULT_SRT_IMPORT_INPUT_CHAR_LIMIT);
+  const maxCueCount = boundedPositiveInteger(options.maxCueCount, DEFAULT_SRT_IMPORT_CUE_LIMIT);
+  const maxTotalTextChars = boundedPositiveInteger(options.maxTotalTextChars, DEFAULT_SRT_IMPORT_TEXT_CHAR_LIMIT);
+  const source = String(value ?? "");
+  if (source.length > maxInputChars) {
+    throw new Error(`SRT 입력이 안전 제한 ${maxInputChars.toLocaleString("ko-KR")}자를 초과했습니다.`);
+  }
+  const clean = source.replace(/^\uFEFF/gu, "").replace(/\r\n?/gu, "\n").trim();
   if (!clean) return createSubtitleDocument(projectKey);
   const cues: Partial<SubtitleCue>[] = [];
+  let totalTextChars = 0;
   for (const block of clean.split(/\n[\t ]*\n+/gu)) {
     const lines = block.split("\n");
     if (/^\d+$/u.test(lines[0]?.trim() ?? "")) lines.shift();
@@ -803,6 +907,13 @@ export function parseSrt(value: string, options: ParseSrtOptions = {}): Subtitle
     if (start === null || end === null || end <= start) continue;
     const text = lines.slice(timingIndex + 1).join("\n").trim();
     if (!text) continue;
+    totalTextChars += text.length;
+    if (totalTextChars > maxTotalTextChars) {
+      throw new Error(`SRT 자막 텍스트가 안전 제한 ${maxTotalTextChars.toLocaleString("ko-KR")}자를 초과했습니다.`);
+    }
+    if (cues.length >= maxCueCount) {
+      throw new Error(`SRT 자막 큐는 최대 ${maxCueCount.toLocaleString("ko-KR")}개까지 불러올 수 있습니다.`);
+    }
     cues.push({ start, end, text, enabled: true, hidden: false });
   }
   return createSubtitleDocument(projectKey, cues);
@@ -814,39 +925,57 @@ export function subtitleAutosaveKey(projectKey: string): string {
 }
 
 export function serializeSubtitleDocument(document: SubtitleDocument): string {
-  const normalized = normalizeSubtitleDocument(document, { projectKey: document.projectKey });
-  return JSON.stringify(normalized);
+  return JSON.stringify(requireStrictSubtitleDocument(document, "자막 문서"));
+}
+
+function requireStrictSubtitleDocument(value: unknown, label: string): SubtitleDocument {
+  if (!isRecord(value)) {
+    throw new Error(`${label} 형식이 올바르지 않습니다: 자막 문서는 객체여야 합니다.`);
+  }
+  if (value.version !== SUBTITLE_DOCUMENT_VERSION) {
+    throw new Error(`지원하지 않는 ${label} 버전입니다.`);
+  }
+  const validation = validateSubtitleDocument(value);
+  if (!validation.valid) {
+    const issue = validation.issues[0];
+    const detail = issue ? `${issue.path}: ${issue.message}` : "스키마 검증에 실패했습니다.";
+    throw new Error(`${label} 형식이 올바르지 않습니다: ${detail}`);
+  }
+  return cloneSubtitleDocument(value as unknown as SubtitleDocument);
 }
 
 export function deserializeSubtitleDocument(value: string, projectKey?: string): SubtitleDocument {
+  if (value.length > MAX_SUBTITLE_SERIALIZED_JSON_CHARS) {
+    throw new Error(`저장된 자막 문서 JSON이 안전 제한 ${MAX_SUBTITLE_SERIALIZED_JSON_CHARS.toLocaleString("ko-KR")}자를 초과했습니다.`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
   } catch {
     throw new Error("저장된 자막 문서 JSON을 읽을 수 없습니다.");
   }
-  if (!isRecord(parsed) || parsed.version !== SUBTITLE_DOCUMENT_VERSION) {
-    throw new Error("지원하지 않는 자막 문서 버전입니다.");
-  }
-  const normalized = normalizeSubtitleDocument(parsed);
-  if (projectKey !== undefined && normalized.projectKey !== normalizedProjectKey(projectKey)) {
+  const document = requireStrictSubtitleDocument(parsed, "자막 문서");
+  if (projectKey !== undefined && document.projectKey !== normalizedProjectKey(projectKey)) {
     throw new Error("저장된 자막 문서가 현재 프로젝트와 일치하지 않습니다.");
   }
-  return normalized;
+  return document;
 }
 
 export function serializeSubtitleAutosave(document: SubtitleDocument): string {
-  const normalized = normalizeSubtitleDocument(document, { projectKey: document.projectKey });
+  const strict = requireStrictSubtitleDocument(document, "자동 저장 자막 문서");
   const envelope: SubtitleAutosaveEnvelope = {
     schema: SUBTITLE_AUTOSAVE_SCHEMA,
     version: SUBTITLE_DOCUMENT_VERSION,
-    projectKey: normalized.projectKey,
-    document: normalized,
+    projectKey: strict.projectKey,
+    document: strict,
   };
   return JSON.stringify(envelope);
 }
 
 export function deserializeSubtitleAutosave(value: string, projectKey: string): SubtitleDocument {
+  if (value.length > MAX_SUBTITLE_SERIALIZED_JSON_CHARS) {
+    throw new Error(`자동 저장 자막 JSON이 안전 제한 ${MAX_SUBTITLE_SERIALIZED_JSON_CHARS.toLocaleString("ko-KR")}자를 초과했습니다.`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
@@ -857,8 +986,15 @@ export function deserializeSubtitleAutosave(value: string, projectKey: string): 
     throw new Error("지원하지 않는 자막 자동 저장 형식입니다.");
   }
   const expected = normalizedProjectKey(projectKey);
+  if (typeof parsed.projectKey !== "string" || parsed.projectKey !== normalizedProjectKey(parsed.projectKey)) {
+    throw new Error("자막 자동 저장 형식이 올바르지 않습니다: projectKey가 유효하지 않습니다.");
+  }
   if (parsed.projectKey !== expected) throw new Error("자동 저장 자막이 현재 프로젝트와 일치하지 않습니다.");
-  return deserializeSubtitleDocument(JSON.stringify(parsed.document), expected);
+  const document = requireStrictSubtitleDocument(parsed.document, "자동 저장 자막 문서");
+  if (document.projectKey !== expected) {
+    throw new Error("자동 저장 자막 문서가 현재 프로젝트와 일치하지 않습니다.");
+  }
+  return document;
 }
 
 export class SubtitleUndoRedo {

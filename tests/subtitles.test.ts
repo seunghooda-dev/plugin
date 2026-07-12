@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  MAX_SUBTITLE_SERIALIZED_JSON_CHARS,
   SUBTITLE_AUTOSAVE_SCHEMA,
   SUBTITLE_DOCUMENT_VERSION,
   SUBTITLE_UNDO_LIMIT,
@@ -191,6 +192,38 @@ describe("immutable word and cue editing", () => {
     assert.throws(() => joinSubtitleWords(documentWith(three), "cue-1", "a", "c"), /인접/u);
   });
 
+  it("rejects joining words with different hidden states without mutating the source", () => {
+    const source = documentWith(cue({
+      text: "표시 숨김",
+      words: [
+        { wordId: "shown", s: 1, e: 2, t: "표시", hidden: false },
+        { wordId: "hidden", s: 2, e: 3, t: "숨김", hidden: true },
+      ],
+    }));
+    const snapshot = cloneSubtitleDocument(source);
+    assert.throws(
+      () => joinSubtitleWords(source, "cue-1", "shown", "hidden"),
+      /숨김 상태가 다른 단어/u,
+    );
+    assert.deepEqual(source, snapshot);
+  });
+
+  it("keeps a joined pair hidden so excluded words cannot leak into SRT", () => {
+    const source = documentWith(cue({
+      text: "비공개 내용 공개",
+      words: [
+        { wordId: "private-1", s: 1, e: 2, t: "비공개", hidden: true },
+        { wordId: "private-2", s: 2, e: 3, t: "내용", hidden: true },
+        { wordId: "public", s: 3, e: 4, t: "공개", hidden: false },
+      ],
+    }));
+    const joined = joinSubtitleWords(source, "cue-1", "private-1", "private-2");
+    assert.equal(joined.cues[0]?.words[0]?.hidden, true);
+    assert.equal(joined.cues[0]?.words[0]?.wordId, "private-1");
+    assert.equal(buildSrt(joined).includes("비공개내용"), false);
+    assert.match(buildSrt(joined), /공개/u);
+  });
+
   it("toggles cue enabled and hidden states immutably", () => {
     const original = documentWith(cue());
     const disabled = setSubtitleCueEnabled(original, "cue-1", false);
@@ -257,6 +290,49 @@ describe("cue split, merge, and max-character reflow", () => {
       cue({ cueId: "c", start: 2, end: 3 }),
     ];
     assert.throws(() => mergeSubtitleCues(documentWith(...cues), "a", "c"), /인접/u);
+  });
+
+  it("rejects merging cues with different visibility states without mutating the source", () => {
+    const first = cue({ cueId: "first", start: 1, end: 5, enabled: true, hidden: false });
+    const disabled = cue({ cueId: "disabled", start: 5, end: 9, enabled: false, hidden: false });
+    const hidden = cue({ cueId: "hidden", start: 5, end: 9, enabled: true, hidden: true });
+    for (const second of [disabled, hidden]) {
+      const source = documentWith(first, second);
+      const snapshot = cloneSubtitleDocument(source);
+      assert.throws(
+        () => mergeSubtitleCues(source, "first", second.cueId),
+        /표시 상태가 다른 자막 큐/u,
+      );
+      assert.deepEqual(source, snapshot);
+    }
+  });
+
+  it("preserves matching excluded cue states after merge", () => {
+    const firstDisabled = cue({ cueId: "disabled-1", enabled: false });
+    const secondDisabled = cue({ cueId: "disabled-2", start: 5, end: 9, enabled: false });
+    const disabled = mergeSubtitleCues(documentWith(firstDisabled, secondDisabled), "disabled-1", "disabled-2");
+    assert.equal(disabled.cues[0]?.enabled, false);
+    assert.equal(buildSrt(disabled), "");
+
+    const firstHidden = cue({ cueId: "hidden-1", hidden: true });
+    const secondHidden = cue({ cueId: "hidden-2", start: 5, end: 9, hidden: true });
+    const hidden = mergeSubtitleCues(documentWith(firstHidden, secondHidden), "hidden-1", "hidden-2");
+    assert.equal(hidden.cues[0]?.hidden, true);
+    assert.equal(buildSrt(hidden), "");
+  });
+
+  it("keeps IDs, time ranges, and source documents stable across split and merge", () => {
+    const original = documentWith(cue());
+    const snapshot = cloneSubtitleDocument(original);
+    const split = splitSubtitleCue(original, "cue-1", "word-2");
+    const merged = mergeSubtitleCues(split, split.cues[0]!.cueId, split.cues[1]!.cueId);
+    assert.equal(validateSubtitleDocument(split).valid, true);
+    assert.equal(validateSubtitleDocument(merged).valid, true);
+    assert.equal(merged.cues[0]?.cueId, "cue-1");
+    assert.deepEqual(merged.cues[0]?.words.map((word) => word.wordId), ["word-1", "word-2"]);
+    assert.ok(merged.cues[0]?.words.every((word) =>
+      word.s >= (merged.cues[0]?.start ?? 0) && word.e <= (merged.cues[0]?.end ?? 0) && word.e > word.s));
+    assert.deepEqual(original, snapshot);
   });
 
   it("reflows measured words at maxChars and uses their timings", () => {
@@ -359,6 +435,51 @@ describe("cue split, merge, and max-character reflow", () => {
     assert.equal(result.cues.length, 1);
     assert.equal(result.cues[0]?.text, disabled.text);
   });
+
+  it("does not split or expose a long hidden word during reflow", () => {
+    const source = documentWith(cue({
+      start: 0,
+      end: 10,
+      text: "절대로노출하면안되는내용 공개",
+      words: [
+        { wordId: "private", s: 0, e: 8, t: "절대로노출하면안되는내용", hidden: true },
+        { wordId: "public", s: 8, e: 10, t: "공개", hidden: false },
+      ],
+    }));
+    const result = reflowSubtitleCues(source, 2, { maxOutputCues: 1 });
+    assert.equal(result.cues.length, 1);
+    assert.equal(result.cues[0]?.words.filter((word) => word.wordId === "private").length, 1);
+    assert.equal(result.cues[0]?.words[0]?.t, "절대로노출하면안되는내용");
+    assert.doesNotMatch(buildSrt(result), /절대로/u);
+    assert.match(buildSrt(result), /공개/u);
+  });
+
+  it("enforces an optional total output cue cap before returning excessive reflow output", () => {
+    const source = documentWith(cue({
+      start: 0,
+      end: 10,
+      text: "가나다라마바사아자차",
+      words: [{ wordId: "long", s: 0, e: 10, t: "가나다라마바사아자차", hidden: false }],
+    }));
+    const snapshot = cloneSubtitleDocument(source);
+    assert.throws(
+      () => reflowSubtitleCues(source, 2, { maxOutputCues: 4 }),
+      /출력 큐 상한 4개/u,
+    );
+    assert.deepEqual(source, snapshot);
+
+    const exact = reflowSubtitleCues(source, 2, { maxOutputCues: 5 });
+    assert.equal(exact.cues.length, 5);
+    assert.equal(validateSubtitleDocument(exact).valid, true);
+    assert.deepEqual(source, snapshot);
+  });
+
+  it("rejects invalid reflow output caps while keeping the legacy call signature", () => {
+    const source = documentWith(cue());
+    assert.throws(() => reflowSubtitleCues(source, 5, { maxOutputCues: 0 }), /안전한 정수/u);
+    assert.throws(() => reflowSubtitleCues(source, 5, { maxOutputCues: 1.5 }), /안전한 정수/u);
+    assert.ok(reflowSubtitleCues(source, 5).cues.length > 0);
+  });
 });
 
 describe("SRT parsing and building", () => {
@@ -386,6 +507,17 @@ describe("SRT parsing and building", () => {
   it("skips malformed and reversed cues", () => {
     const source = "1\nnot a time\ninvalid\n\n2\n00:00:03,000 --> 00:00:02,000\nreverse";
     assert.deepEqual(parseSrt(source).cues, []);
+  });
+
+  it("rejects oversized SRT input before parsing", () => {
+    assert.throws(() => parseSrt("가".repeat(11), { maxInputChars: 10 }), /SRT 입력/u);
+  });
+
+  it("caps imported SRT cue count and total subtitle text", () => {
+    const one = "1\n00:00:00,000 --> 00:00:01,000\n하나";
+    const two = "2\n00:00:01,000 --> 00:00:02,000\n둘";
+    assert.throws(() => parseSrt(`${one}\n\n${two}`, { maxCueCount: 1 }), /최대 1개/u);
+    assert.throws(() => parseSrt(one, { maxTotalTextChars: 1 }), /텍스트/u);
   });
 
   it("builds sequential SRT while omitting disabled and hidden cues", () => {
@@ -492,6 +624,74 @@ describe("serialization, project autosave, and undo/redo", () => {
     assert.throws(() => deserializeSubtitleDocument(serializeSubtitleDocument(documentWith()), "other"), /프로젝트/u);
   });
 
+  it("strictly rejects repairable but malformed saved document schemas", () => {
+    const malformed = {
+      version: SUBTITLE_DOCUMENT_VERSION,
+      projectKey: "project-A",
+      cues: [{
+        cueId: "",
+        start: -1,
+        end: -2,
+        text: 123,
+        enabled: "yes",
+        hidden: 0,
+        words: "not-an-array",
+      }],
+    };
+    assert.throws(
+      () => deserializeSubtitleDocument(JSON.stringify(malformed), "project-A"),
+      /형식이 올바르지 않습니다: cues\[0\]/u,
+    );
+    assert.throws(
+      () => deserializeSubtitleDocument(JSON.stringify({ version: 1, projectKey: "project-A" }), "project-A"),
+      /cues는 배열/u,
+    );
+
+    const wrongBoolean = JSON.parse(serializeSubtitleDocument(documentWith(cue()))) as {
+      cues: Array<{ enabled: unknown }>;
+    };
+    wrongBoolean.cues[0]!.enabled = "true";
+    assert.throws(
+      () => deserializeSubtitleDocument(JSON.stringify(wrongBoolean), "project-A"),
+      /enabled와 hidden은 불리언/u,
+    );
+
+    const duplicateIds = JSON.parse(serializeSubtitleDocument(documentWith(cue()))) as SubtitleDocument;
+    duplicateIds.cues.push(cloneSubtitleDocument(duplicateIds).cues[0]!);
+    assert.throws(
+      () => deserializeSubtitleDocument(JSON.stringify(duplicateIds), "project-A"),
+      /cueId가 중복/u,
+    );
+  });
+
+  it("rejects oversized saved JSON before parsing", () => {
+    const oversized = " ".repeat(MAX_SUBTITLE_SERIALIZED_JSON_CHARS + 1);
+    assert.throws(() => deserializeSubtitleDocument(oversized), /JSON이 안전 제한/u);
+    assert.throws(() => deserializeSubtitleAutosave(oversized, "project-A"), /JSON이 안전 제한/u);
+  });
+
+  it("does not normalize away corruption while serializing documents or autosaves", () => {
+    const corrupted = documentWith(cue());
+    corrupted.cues[0]!.enabled = "true" as unknown as boolean;
+    assert.throws(() => serializeSubtitleDocument(corrupted), /형식이 올바르지 않습니다/u);
+    assert.throws(() => serializeSubtitleAutosave(corrupted), /형식이 올바르지 않습니다/u);
+  });
+
+  it("strictly rejects unsorted cue and word timelines instead of silently reordering them", () => {
+    const unsortedCues = createSubtitleDocument("project-A", [
+      { cueId: "first", start: 1, end: 2, text: "첫째" },
+      { cueId: "second", start: 3, end: 4, text: "둘째" },
+    ]);
+    unsortedCues.cues.reverse();
+    assert.ok(validateSubtitleDocument(unsortedCues).issues.some((issue) => issue.code === "UNSORTED_CUES"));
+    assert.throws(() => serializeSubtitleAutosave(unsortedCues), /정렬/u);
+
+    const unsortedWords = documentWith(cue());
+    unsortedWords.cues[0]!.words.reverse();
+    assert.ok(validateSubtitleDocument(unsortedWords).issues.some((issue) => issue.code === "UNSORTED_WORDS"));
+    assert.throws(() => serializeSubtitleDocument(unsortedWords), /정렬/u);
+  });
+
   it("builds deterministic, project-specific autosave keys", () => {
     const first = subtitleAutosaveKey("프로젝트 A");
     assert.equal(first, subtitleAutosaveKey("프로젝트 A"));
@@ -507,6 +707,36 @@ describe("serialization, project autosave, and undo/redo", () => {
     assert.equal(envelope.version, 1);
     assert.deepEqual(deserializeSubtitleAutosave(serialized, "project-A"), original);
     assert.throws(() => deserializeSubtitleAutosave(serialized, "project-B"), /프로젝트/u);
+  });
+
+  it("strictly rejects corrupted autosave documents and envelope/document key mismatches", () => {
+    const envelope = JSON.parse(serializeSubtitleAutosave(documentWith(cue()))) as {
+      projectKey: unknown;
+      document: SubtitleDocument;
+    };
+    envelope.document.cues[0]!.words[0]!.s = -10;
+    assert.throws(
+      () => deserializeSubtitleAutosave(JSON.stringify(envelope), "project-A"),
+      /자동 저장 자막 문서 형식이 올바르지 않습니다/u,
+    );
+
+    const wrongDocumentKey = JSON.parse(serializeSubtitleAutosave(documentWith(cue()))) as {
+      document: SubtitleDocument;
+    };
+    wrongDocumentKey.document.projectKey = "other";
+    assert.throws(
+      () => deserializeSubtitleAutosave(JSON.stringify(wrongDocumentKey), "project-A"),
+      /자동 저장 자막 문서가 현재 프로젝트와 일치하지 않습니다/u,
+    );
+
+    const wrongEnvelopeKey = JSON.parse(serializeSubtitleAutosave(documentWith(cue()))) as {
+      projectKey: unknown;
+    };
+    wrongEnvelopeKey.projectKey = 42;
+    assert.throws(
+      () => deserializeSubtitleAutosave(JSON.stringify(wrongEnvelopeKey), "project-A"),
+      /projectKey가 유효하지 않습니다/u,
+    );
   });
 
   it("supports undo, redo, and clears redo after a new commit", () => {

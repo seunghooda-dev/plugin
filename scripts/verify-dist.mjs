@@ -12,6 +12,12 @@ const MAX_DIST_FILES = 5_000;
 const MAX_DIST_FILE_BYTES = 250 * 1024 * 1024;
 const MAX_DIST_TOTAL_BYTES = 500 * 1024 * 1024;
 const REQUIRED_NETWORK_DOMAINS = ["https://api.openai.com"];
+const ALLOWED_LAUNCH_SCHEMES = new Set(["file"]);
+const ALLOWED_LAUNCH_EXTENSIONS = new Set([
+  "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma",
+  "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "psd", "tif", "tiff", "webp",
+  "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mxf", "webm", "wmv",
+]);
 const SENSITIVE_DISTRIBUTION_PATH = /(?:^|\/)(?:\.env(?:[._-][^/]*)?|credentials?(?:[._-][^/]*)?|secrets?(?:[._-][^/]*)?|\.(?:npmrc|netrc)|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]+\.(?:pem|key|p12|pfx))$/i;
 
 function fail(message) {
@@ -83,6 +89,9 @@ async function validateDistTree() {
       }
       if (SENSITIVE_DISTRIBUTION_PATH.test(relativePath.replaceAll("\\", "/"))) {
         fail(`dist에 배포하면 안 되는 민감 파일명이 있습니다: ${relativePath}`);
+      }
+      if (relativePath.toLowerCase().endsWith(".map")) {
+        fail(`내부 베타 dist에는 source map을 포함하지 않습니다: ${relativePath}`);
       }
     }
   }
@@ -280,6 +289,42 @@ function validateManifest(manifest, packageJson) {
         }
       }
     }
+
+    const launchProcess = permissions.launchProcess;
+    if (!launchProcess || typeof launchProcess !== "object" || Array.isArray(launchProcess)) {
+      fail("manifest.json의 requiredPermissions.launchProcess 객체가 없습니다.");
+    } else {
+      const schemes = launchProcess.schemes;
+      if (!Array.isArray(schemes) || schemes.length === 0) {
+        fail("launchProcess.schemes에는 file scheme만 명시해야 합니다.");
+      } else {
+        for (const scheme of schemes) {
+          if (!ALLOWED_LAUNCH_SCHEMES.has(scheme)) {
+            fail(`launchProcess scheme은 file만 허용합니다: ${JSON.stringify(scheme)}`);
+          }
+        }
+      }
+
+      const extensions = launchProcess.extensions;
+      if (!Array.isArray(extensions) || extensions.length === 0) {
+        fail("launchProcess.extensions에는 내부 베타에서 여는 미디어 확장자 allowlist가 필요합니다.");
+      } else {
+        const seenExtensions = new Set();
+        for (const extension of extensions) {
+          if (typeof extension !== "string" || !/^[a-z0-9]+$/u.test(extension)) {
+            fail(`launchProcess extension은 점 없는 소문자/숫자 문자열이어야 합니다: ${JSON.stringify(extension)}`);
+            continue;
+          }
+          if (seenExtensions.has(extension)) {
+            fail(`launchProcess extension이 중복됐습니다: ${extension}`);
+          }
+          seenExtensions.add(extension);
+          if (!ALLOWED_LAUNCH_EXTENSIONS.has(extension)) {
+            fail(`내부 베타 launchProcess allowlist에 없는 확장자입니다: ${extension}`);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -340,14 +385,14 @@ async function validateSourceMaps() {
 
   const directives = [...source.matchAll(/[#@]\s*sourceMappingURL=([^\s*]+)/g)].map((match) => match[1]);
   if (directives.length === 0) {
-    notice("index.js에 sourceMappingURL이 없습니다(소스맵은 선택 사항입니다). ");
+    notice("index.js에 sourceMappingURL이 없습니다(내부 베타 배포 기준).");
     return;
   }
 
   for (const value of directives) {
     const sourceMapUrl = value.trim().replace(/^['"]|['"]$/g, "");
+    fail(`내부 베타 dist에는 sourceMappingURL을 포함하지 않습니다: ${sourceMapUrl}`);
     if (sourceMapUrl.startsWith("data:")) {
-      notice("index.js에서 인라인 sourceMappingURL을 확인했습니다.");
       continue;
     }
 

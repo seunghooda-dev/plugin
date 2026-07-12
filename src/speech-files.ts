@@ -582,6 +582,7 @@ export class SpeechFileManager {
     data: SpeechBinary,
     requestedName: string,
     format: TtsAudioFormat,
+    outputFolder?: SpeechOutputFolder,
   ): Promise<SpeechWriteResult> {
     if (!TTS_FORMAT_SET.has(format)) {
       throw new SpeechFileError("INVALID_FORMAT", "TTS 출력은 WAV, MP3, AAC, FLAC만 지원합니다.");
@@ -590,13 +591,15 @@ export class SpeechFileManager {
     if (bytes.byteLength === 0) {
       throw new SpeechFileError("EMPTY_FILE", "저장할 TTS 오디오 데이터가 비어 있습니다.");
     }
-    return this.enqueueWrite(() => this.writeBinary("tts", bytes, requestedName, format));
+    const folderSnapshot = outputFolder ? this.requireFolderSnapshot(outputFolder, "tts") : undefined;
+    return this.enqueueWrite(() => this.writeBinary("tts", bytes, requestedName, format, folderSnapshot));
   }
 
   async writeTranscript(
     text: string,
     requestedName: string,
     format: TranscriptFormat,
+    outputFolder?: SpeechOutputFolder,
   ): Promise<SpeechWriteResult> {
     if (!TRANSCRIPT_FORMAT_SET.has(format)) {
       throw new SpeechFileError("INVALID_FORMAT", "STT 텍스트 출력은 TXT 또는 SRT만 지원합니다.");
@@ -604,7 +607,8 @@ export class SpeechFileManager {
     if (typeof text !== "string" || text.length === 0) {
       throw new SpeechFileError("EMPTY_FILE", "저장할 STT 텍스트가 비어 있습니다.");
     }
-    return this.enqueueWrite(() => this.writeText("stt", text, requestedName, format));
+    const folderSnapshot = outputFolder ? this.requireFolderSnapshot(outputFolder, "stt") : undefined;
+    return this.enqueueWrite(() => this.writeText("stt", text, requestedName, format, folderSnapshot));
   }
 
   private async writeBinary(
@@ -612,8 +616,9 @@ export class SpeechFileManager {
     bytes: Uint8Array,
     requestedName: string,
     format: TtsAudioFormat,
+    outputFolder?: SpeechOutputFolder,
   ): Promise<SpeechWriteResult> {
-    const folder = await this.requireOutputFolder(kind);
+    const folder = outputFolder ?? await this.requireOutputFolder(kind);
     const { entry, name } = await this.createCollisionFreeFile(folder.entry, requestedName, format);
     if (typeof entry.write !== "function") {
       throw new SpeechFileError("WRITE_FAILED", "생성한 출력 파일에 쓰기 기능이 없습니다.");
@@ -639,8 +644,9 @@ export class SpeechFileManager {
     text: string,
     requestedName: string,
     format: TranscriptFormat,
+    outputFolder?: SpeechOutputFolder,
   ): Promise<SpeechWriteResult> {
-    const folder = await this.requireOutputFolder(kind);
+    const folder = outputFolder ?? await this.requireOutputFolder(kind);
     const { entry, name } = await this.createCollisionFreeFile(folder.entry, requestedName, format);
     if (typeof entry.write !== "function") {
       throw new SpeechFileError("WRITE_FAILED", "생성한 출력 파일에 쓰기 기능이 없습니다.");
@@ -675,6 +681,28 @@ export class SpeechFileManager {
       );
     }
     return restored;
+  }
+
+  private requireFolderSnapshot(folder: SpeechOutputFolder, kind: SpeechOutputKind): SpeechOutputFolder {
+    if (
+      folder?.kind !== kind
+      || !isFolder(folder.entry)
+      || typeof folder.token !== "string"
+      || !folder.token.trim()
+      || typeof folder.name !== "string"
+      || !folder.name.trim()
+      || typeof folder.nativePath !== "string"
+      || !folder.nativePath.trim()
+    ) {
+      throw new SpeechFileError("INVALID_ENTRY", `${kind.toUpperCase()} 출력 폴더 스냅샷이 올바르지 않습니다.`);
+    }
+    return {
+      kind,
+      entry: folder.entry,
+      token: folder.token.trim(),
+      name: folder.name.trim(),
+      nativePath: folder.nativePath.trim(),
+    };
   }
 
   private async createCollisionFreeFile(

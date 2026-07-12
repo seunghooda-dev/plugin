@@ -17,6 +17,8 @@ export interface ReferenceItem {
   nativePath: string;
   token: string;
   notes: string;
+  source: string;
+  tags: readonly string[];
   createdAt: number;
   unavailable?: boolean;
 }
@@ -112,10 +114,14 @@ export class ReferenceLibraryError extends Error {
 export const REFERENCE_STORAGE_KEY = "shortflow.references.v1";
 export const MAX_REFERENCES = 100;
 export const MAX_IMAGE_INPUTS = 4;
+export const MAX_REFERENCE_PROMPT_ITEMS = 8;
 export const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_REFERENCE_NOTES_LENGTH = 4_000;
 export const MAX_REFERENCE_PROMPT_CHARACTERS = 4_096;
 export const MAX_REFERENCE_TOKEN_LENGTH = 8_192;
+export const MAX_REFERENCE_SOURCE_LENGTH = 512;
+export const MAX_REFERENCE_TAGS = 16;
+export const MAX_REFERENCE_TAG_LENGTH = 64;
 
 export const REFERENCE_FILE_TYPES = Object.freeze([
   "png",
@@ -258,7 +264,7 @@ export function filterReferences(
       return true;
     }
     const haystack = normalizedSearchValue(
-      `${reference.name} ${reference.notes} ${reference.nativePath} ${reference.type}`,
+      `${reference.name} ${reference.notes} ${reference.source} ${reference.tags.join(" ")} ${reference.nativePath} ${reference.type}`,
     );
     return tokens.every((token) => haystack.includes(token));
   });
@@ -308,9 +314,16 @@ export function buildReferencePrompt(
     if (!reference || reference.unavailable) continue;
     const name = promptText(reference.name, 160);
     const notes = promptText(reference.notes, 500);
+    const source = promptText(reference.source, 160);
+    const tags = normalizeReferenceTags(reference.tags).map((tag) => promptText(tag, 64)).filter(Boolean).slice(0, MAX_REFERENCE_TAGS);
     if (!name) continue;
     const type = reference.type === "video" ? "video" : "image";
-    const line = `Reference ${index + 1} (${type}) — label: "${name}"${notes ? `; notes: "${notes}"` : ""}.`;
+    const line = [
+      `Reference ${index + 1} (${type}) — label: "${name}"`,
+      source ? `source: "${source}"` : "",
+      tags.length > 0 ? `tags: "${tags.join(", ")}"` : "",
+      notes ? `notes: "${notes}"` : "",
+    ].filter(Boolean).join("; ") + ".";
     if (length + 1 + line.length > MAX_REFERENCE_PROMPT_CHARACTERS) break;
     lines.push(line);
     length += line.length + 1;
@@ -356,6 +369,44 @@ function notesValue(value: unknown): string {
   return typeof value === "string"
     ? value.trim().slice(0, MAX_REFERENCE_NOTES_LENGTH)
     : "";
+}
+
+function sourceValue(value: unknown): string {
+  return typeof value === "string"
+    ? value
+      .normalize("NFKC")
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, MAX_REFERENCE_SOURCE_LENGTH)
+    : "";
+}
+
+export function normalizeReferenceTags(value: unknown): string[] {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,#\n]/u)
+      : [];
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const item of source) {
+    const tag = typeof item === "string"
+      ? item
+        .normalize("NFKC")
+        .replace(/[\u0000-\u001f\u007f]/gu, " ")
+        .replace(/\s+/gu, " ")
+        .trim()
+        .replace(/^#+/u, "")
+        .slice(0, MAX_REFERENCE_TAG_LENGTH)
+      : "";
+    const key = tag.toLocaleLowerCase();
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length >= MAX_REFERENCE_TAGS) break;
+  }
+  return tags;
 }
 
 function persistentTokenValue(value: unknown): string {
@@ -420,6 +471,8 @@ function cleanStoredItem(value: unknown): ReferenceItem | null {
     nativePath,
     token,
     notes: notesValue(record.notes),
+    source: sourceValue(record.source),
+    tags: normalizeReferenceTags(record.tags),
     createdAt,
   };
   if (record.unavailable === true) {
@@ -778,7 +831,10 @@ export class ReferenceLibrary {
     return this.items;
   }
 
-  async selectFiles(notes = ""): Promise<readonly ReferenceItem[]> {
+  async selectFiles(
+    notes = "",
+    metadata: { source?: unknown; tags?: unknown } = {},
+  ): Promise<readonly ReferenceItem[]> {
     let selection: ReferenceFileEntry | ReferenceFileEntry[] | null | undefined;
     try {
       selection = await this.adapter.localFileSystem.getFileForOpening({
@@ -793,12 +849,13 @@ export class ReferenceLibrary {
       return [];
     }
     const entries = Array.isArray(selection) ? selection : [selection];
-    return this.addEntries(entries, notes);
+    return this.addEntries(entries, notes, metadata);
   }
 
   async addEntries(
     entries: readonly ReferenceFileEntry[],
     notes = "",
+    metadata: { source?: unknown; tags?: unknown } = {},
   ): Promise<readonly ReferenceItem[]> {
     if (!Array.isArray(entries) || entries.length === 0) {
       return [];
@@ -898,6 +955,8 @@ export class ReferenceLibrary {
         nativePath: candidate.nativePath,
         token,
         notes: notesValue(notes),
+        source: sourceValue(metadata.source),
+        tags: normalizeReferenceTags(metadata.tags),
         createdAt: createdAt + index,
       });
     }
@@ -924,6 +983,27 @@ export class ReferenceLibrary {
       return null;
     }
     const updated: ReferenceItem = { ...current, notes: notesValue(notes) };
+    const next = [...this.references];
+    next[index] = updated;
+    await this.commit(next);
+    return { ...updated };
+  }
+
+  async updateMetadata(
+    id: string,
+    metadata: { notes?: unknown; source?: unknown; tags?: unknown },
+  ): Promise<ReferenceItem | null> {
+    const index = this.references.findIndex((item) => item.id === id);
+    const current = this.references[index];
+    if (index < 0 || !current) {
+      return null;
+    }
+    const updated: ReferenceItem = {
+      ...current,
+      notes: metadata.notes === undefined ? current.notes : notesValue(metadata.notes),
+      source: metadata.source === undefined ? current.source : sourceValue(metadata.source),
+      tags: metadata.tags === undefined ? current.tags : normalizeReferenceTags(metadata.tags),
+    };
     const next = [...this.references];
     next[index] = updated;
     await this.commit(next);

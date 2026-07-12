@@ -65,6 +65,16 @@ export interface AssetFilterOptions {
   folderPath?: string;
 }
 
+export type AudioAssetCategoryRoot = "music" | "sfx";
+
+export interface AudioAssetCategory {
+  readonly id: string;
+  readonly label: string;
+  readonly folderPath: string;
+  readonly root: AudioAssetCategoryRoot;
+  readonly count: number;
+}
+
 export type AssetSortKey =
   | "name"
   | "type"
@@ -134,6 +144,7 @@ export const MAX_ASSET_SYNC_DEPTH = 5;
 export const MAX_ASSET_SYNC_ENTRIES = 5_000;
 export const ASSET_DRAG_PAYLOAD_MIME = "application/x-shortflow-asset+json";
 export const MAX_ASSET_DRAG_PAYLOAD_LENGTH = 8_192;
+export const MAX_ASSET_CUSTOM_ORDER_ITEMS = 5_000;
 
 /**
  * References는 컨테이너 폴더이며 Images/Videos는 그 아래에 생성합니다.
@@ -343,8 +354,88 @@ export function parseAssetDragPayload(serialized: unknown): AssetDragPayload | n
   }
 }
 
+export function parseAudioAssetDragPayload(serialized: unknown): AssetDragPayload | null {
+  const payload = parseAssetDragPayload(serialized);
+  return payload?.kind === "audio" ? payload : null;
+}
+
+export function resolveAudioAssetDragTarget(
+  assets: readonly AssetItem[],
+  serialized: unknown,
+): AssetItem | null {
+  const payload = parseAudioAssetDragPayload(serialized);
+  if (!payload) return null;
+  const payloadId = normalizeNativePath(payload.id);
+  return assets.find((candidate) => (
+    candidate.kind === "audio" &&
+    candidate.normalizedPath === payloadId &&
+    normalizeNativePath(candidate.nativePath) === normalizeNativePath(payload.nativePath)
+  )) ?? null;
+}
+
 function normalizedSearchValue(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase().trim();
+}
+
+function normalizedRelativeFolder(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .trim()
+    .normalize("NFC")
+    .replace(/\\/gu, "/")
+    .split("/").map((segment) => segment.trim()).filter(Boolean)
+    .join("/");
+}
+
+export function audioAssetCategoryRoot(folderPath: string): AudioAssetCategoryRoot | null {
+  const [root] = normalizedRelativeFolder(folderPath).split("/");
+  const normalized = root?.toLocaleLowerCase("en-US");
+  if (normalized === "music") return "music";
+  if (normalized === "sfx") return "sfx";
+  return null;
+}
+
+function audioCategoryLabel(folderPath: string): string {
+  const normalized = normalizedRelativeFolder(folderPath);
+  if (!normalized) return "기타 오디오";
+  const segments = normalized.split("/");
+  const root = segments[0]?.toLocaleLowerCase("en-US");
+  if (root === "music") {
+    return segments.length === 1 ? "음악" : `음악 / ${segments.slice(1).join(" / ")}`;
+  }
+  if (root === "sfx") {
+    return segments.length === 1 ? "효과음" : `효과음 / ${segments.slice(1).join(" / ")}`;
+  }
+  return normalized;
+}
+
+export function listAudioAssetCategories(assets: readonly AssetItem[]): AudioAssetCategory[] {
+  const byFolder = new Map<string, { folderPath: string; root: AudioAssetCategoryRoot; count: number }>();
+  for (const asset of assets) {
+    if (asset.kind !== "audio") continue;
+    const folderPath = normalizedRelativeFolder(asset.folderPath);
+    const root = audioAssetCategoryRoot(folderPath);
+    if (!root || !folderPath) continue;
+    const id = normalizeNativePath(folderPath);
+    const current = byFolder.get(id);
+    if (current) {
+      current.count += 1;
+    } else {
+      byFolder.set(id, { folderPath, root, count: 1 });
+    }
+  }
+  return [...byFolder.entries()]
+    .map(([id, category]) => Object.freeze({
+      id,
+      label: audioCategoryLabel(category.folderPath),
+      folderPath: category.folderPath,
+      root: category.root,
+      count: category.count,
+    }))
+    .sort((left, right) => {
+      if (left.root !== right.root) return left.root === "music" ? -1 : 1;
+      return collator.compare(left.folderPath, right.folderPath);
+    });
 }
 
 export function filterAssets(
@@ -445,6 +536,69 @@ export function sortAssets(
       return comparison * multiplier;
     })
     .map(({ asset }) => asset);
+}
+
+export function normalizeAssetOrder(
+  value: unknown,
+  allowedIds?: readonly string[],
+): string[] {
+  const source = Array.isArray(value) ? value : [];
+  const allowed = allowedIds ? new Set(allowedIds.map((id) => normalizeNativePath(id))) : null;
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const item of source) {
+    const id = normalizeNativePath(String(item ?? ""));
+    if (!id || seen.has(id) || (allowed && !allowed.has(id))) continue;
+    seen.add(id);
+    output.push(id);
+    if (output.length >= MAX_ASSET_CUSTOM_ORDER_ITEMS) break;
+  }
+  return output;
+}
+
+export function applyAssetOrder(
+  assets: readonly AssetItem[],
+  order: readonly string[],
+): AssetItem[] {
+  const ranks = new Map<string, number>();
+  for (const [index, id] of normalizeAssetOrder(order).entries()) {
+    if (!ranks.has(id)) ranks.set(id, index);
+  }
+  return assets
+    .map((asset, index) => ({ asset, index, rank: ranks.get(asset.normalizedPath) }))
+    .sort((left, right) => {
+      const leftRank = left.rank;
+      const rightRank = right.rank;
+      if (leftRank !== undefined && rightRank !== undefined && leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      if (leftRank !== undefined) return -1;
+      if (rightRank !== undefined) return 1;
+      return left.index - right.index;
+    })
+    .map(({ asset }) => asset);
+}
+
+export function reorderAssetIds(
+  existingOrder: readonly string[],
+  visibleIds: readonly string[],
+  draggedId: string,
+  targetId: string,
+): string[] {
+  const visible = normalizeAssetOrder(visibleIds);
+  const dragged = normalizeNativePath(draggedId);
+  const target = normalizeNativePath(targetId);
+  const from = visible.indexOf(dragged);
+  const to = visible.indexOf(target);
+  if (from < 0 || to < 0 || from === to) {
+    return normalizeAssetOrder(existingOrder);
+  }
+
+  visible.splice(from, 1);
+  visible.splice(to, 0, dragged);
+  const visibleSet = new Set(visible);
+  const rest = normalizeAssetOrder(existingOrder).filter((id) => !visibleSet.has(id));
+  return normalizeAssetOrder([...visible, ...rest]);
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -990,6 +1144,48 @@ export class AssetLibrary {
   async openRootFolder(): Promise<void> {
     const root = await this.requireRoot();
     await this.openFolder(root);
+  }
+
+  async openRelativeFolder(relativeFolderPath: string): Promise<void> {
+    const folder = await this.resolveRelativeFolder(relativeFolderPath);
+    await this.openFolder(folder);
+  }
+
+  async resolveRelativeFolder(relativeFolderPath: string): Promise<UxpEntry> {
+    let current = await this.requireRoot();
+    const normalized = normalizedRelativeFolder(relativeFolderPath);
+    if (!normalized) {
+      return current;
+    }
+
+    const segments = normalized.split("/");
+    if (segments.some((segment) => segment === "." || segment === "..")) {
+      throw new AssetLibraryError(
+        "INVALID_ROOT",
+        "열 폴더 경로가 올바르지 않습니다.",
+      );
+    }
+
+    try {
+      for (const segment of segments) {
+        const children = await current.getEntries();
+        const entries = Array.from(children ?? []) as UxpEntry[];
+        const next = entries.find((entry) =>
+          isFolderEntry(entry) &&
+          entryName(entry).toLocaleLowerCase("en-US") === segment.toLocaleLowerCase("en-US"));
+        if (!next) {
+          throw new AssetLibraryError(
+            "INVALID_ROOT",
+            `자산 폴더 '${normalized}'을 찾을 수 없습니다. 동기화를 다시 실행해 주세요.`,
+          );
+        }
+        current = next;
+      }
+    } catch (error) {
+      throw filesystemError(error, `자산 폴더 '${normalized}'을 열 수 없습니다.`);
+    }
+
+    return current;
   }
 
   async openFolder(folder: UxpEntry): Promise<void> {
