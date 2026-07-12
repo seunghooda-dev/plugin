@@ -511,3 +511,9 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 - 드래그 순서 저장과 원복을 Host DOM에서 확인했고 localStorage 원복도 확인했습니다.
 - Premiere UXP에서 `replaceChildren()` 재렌더가 stale 카드를 남기는 현상을 명시적 `removeChild` 반복으로 교체했으며, 재동기화 후 카드 수가 실제 오디오 수와 같은 2개임을 확인했습니다.
 - 선택 폴더 열기는 `shell.openPath(path, developerText)` 계약까지 적용했지만, 미디어 확장자만 허용하는 `launchProcess` 보안 allowlist에서 확장자 없는 디렉터리가 차단됩니다. 임의 실행 범위를 넓히는 wildcard는 사용하지 않으며 대체 UX가 필요합니다.
+
+## 23. 썸네일 SVG fallback Host 상태 검증 — 2026-07-12 23:18 KST
+
+- 실제 Host에서 Canvas 크기 `1280×720`, PNG/JPG 버튼 비활성, SVG fallback 버튼 활성 상태를 확인했습니다.
+- Canvas가 이미지 합성·텍스트 렌더링·PNG/JPG 내보내기를 제공하지 않는다는 제한 안내가 표시됩니다.
+- SVG fallback 버튼으로 UXP 폴더 선택창이 열리는 것까지 확인했습니다. 이번 smoke에서는 선택창을 취소했으므로 실제 SVG 파일 생성·내용 검증은 남은 Host gate입니다.
