@@ -45,6 +45,14 @@ const distManifest = distManifestPath ? JSON.parse(readFileSync(distManifestPath
 const ccxPath = optionalFile(`release/ShortFlow-Studio-${pkg.version}.ccx`);
 const checksumPath = optionalFile(`release/ShortFlow-Studio-${pkg.version}.ccx.sha256.txt`);
 const markVerified = process.argv.includes("--verified");
+const gitStatus = command("git", ["status", "--porcelain=v1", "--untracked-files=all"]);
+
+if (markVerified && gitStatus === "unavailable") {
+  throw new Error("Verified beta evidence requires an available Git worktree.");
+}
+if (markVerified && gitStatus) {
+  throw new Error("Verified beta evidence requires a clean committed worktree. Commit the checked source first, then rerun the verified evidence command.");
+}
 
 mkdirSync(evidenceDir, { recursive: true });
 
@@ -58,13 +66,14 @@ const lines = [
   `- generatedAt: ${now.toISOString()}`,
   `- package: ${pkg.name}@${pkg.version}`,
   `- gitCommit: ${command("git", ["rev-parse", "HEAD"])}`,
+  `- gitTree: ${command("git", ["rev-parse", "HEAD^{tree}"])}`,
   `- gitBranch: ${command("git", ["branch", "--show-current"])}`,
   `- node: ${process.version}`,
   `- platform: ${process.platform} ${process.arch}`,
   "",
   "## Git Status",
   "",
-  fenced(command("git", ["status", "--short"])),
+  fenced(gitStatus),
   "",
   "## Manifest",
   "",
@@ -88,6 +97,7 @@ const lines = [
   markVerified
     ? "- status: verified by caller before evidence capture"
     : "- status: template only; run `npm run beta:evidence:verified` for a verified capture",
+  "- checkpointChecklist: docs/BETA_RELEASE_CHECKLIST.md",
   `- [${markVerified ? "x" : " "}] npm run typecheck`,
   `- [${markVerified ? "x" : " "}] npm run lint`,
   `- [${markVerified ? "x" : " "}] npm test`,
@@ -110,8 +120,22 @@ const lines = [
   "- [ ] Validate references, thumbnail SVG fallback export, and Host Canvas limitations.",
   "- [ ] Validate TTS/STT with a test OpenAI key and non-sensitive media.",
   "- [ ] Validate TTS audio file save, Premiere import, and target audio track insert.",
-  "- [ ] Validate clone-before-mutation, automation marker creation, punch-in apply, export, and recovery journal.",
-  "- [ ] Validate final QC, diagnostics JSON export, and absence of secrets in logs/reports.",
+  "- [x] Validate clone-before-mutation, automation marker creation, and basic punch-in apply.",
+  "- [x] Validate recovery journal persistence and committed entries after plugin reload.",
+  "- [ ] Validate recovery rollback/removal only after explicit confirmation in a disposable project.",
+  "- [x] Run Final QC in the real Host and record its blocking codes.",
+  "- [ ] Resolve every Final QC blocking code before beta approval; waivers may apply only to eligible non-hard-block checks.",
+  "- [x] Export diagnostics JSON and confirm the current fixture contains no API key, bearer value, absolute user path, email, media filename, or content field.",
+  "- [ ] Exercise active redaction with synthetic sensitive values before external diagnostic sharing.",
+  "",
+  "## Final Checkpoint Blockers",
+  "",
+  "- Approve the internal beta only when report.blocking === false; PASS/WARNING/ERROR counts and the absence of a hard-block label are not substitutes.",
+  "- Record every resolved blocking code and every accepted non-hard-block waiver in the checkpoint evidence.",
+  "- Push only a coherent checkpoint whose typecheck, lint, test, and build gates passed; package verified evidence from that clean commit.",
+  "- Do not share Final QC or asset-rights reports externally before reviewing sequence names, output names, asset names, attribution lines, and asset ids.",
+  "- Do not run live TTS/STT without an approved non-production API key and non-sensitive media.",
+  "- Do not run destructive Host smoke against a real user project; use a disposable project and clone-first flow.",
   "",
   "## Host Environment",
   "",

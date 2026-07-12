@@ -10,6 +10,7 @@ import {
   listAudioAssetCategories,
   normalizeAssetOrder,
   normalizeNativePath,
+  readAssetPreviewBytes,
   reorderAssetIds,
   resolveAudioAssetDragTarget,
   type AssetItem,
@@ -90,6 +91,7 @@ import { RecoveryManager, type OperationJournalEntry } from "./src/recovery";
 import {
   buildDiagnosticsReport,
   diagnosticBundleToJSON,
+  readRuntimeMember as moduleMember,
   type DiagnosticStatus,
   type DiagnosticsReport,
 } from "./src/diagnostics";
@@ -414,10 +416,10 @@ function renderAssetRights(asset: AssetItem | null): void {
 function clearAssetPreview(): void {
   const audio = optionalElement<HTMLAudioElement>("asset-audio-preview");
   if (audio) {
-    audio.pause();
+    if (typeof audio.pause === "function") audio.pause();
     audio.removeAttribute("src");
     audio.hidden = true;
-    audio.load();
+    if (typeof audio.load === "function") audio.load();
   }
   if (assetPreviewUrl) {
     URL.revokeObjectURL(assetPreviewUrl);
@@ -426,16 +428,31 @@ function clearAssetPreview(): void {
 }
 
 async function assetBytes(asset: AssetItem): Promise<Uint8Array> {
-  const read = asset.entry?.read;
-  if (typeof read !== "function") {
-    throw new Error("동기화된 파일 entry가 없어 미리듣기를 만들 수 없습니다. 에셋을 다시 동기화해 주세요.");
+  const uxpRoot = require("uxp") as any;
+  return readAssetPreviewBytes(asset, uxpRoot?.storage?.formats?.binary);
+}
+
+async function previewAssetInPremiereSourceMonitor(asset: AssetItem): Promise<boolean> {
+  const current = assets.find((candidate) =>
+    candidate.id === asset.id &&
+    candidate.normalizedPath === asset.normalizedPath &&
+    candidate.nativePath === asset.nativePath);
+  if (!current) throw new Error("현재 동기화된 오디오가 아닙니다. 음악·효과음 폴더를 다시 동기화해 주세요.");
+
+  const premiere = require("premierepro") as any;
+  const sourceMonitor = premiere?.SourceMonitor;
+  if (typeof sourceMonitor?.openFilePath !== "function") {
+    await ensureAssetLibrary().openAssetFile(current);
+    return false;
   }
-  const value = await read.call(asset.entry);
-  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  const opened = await sourceMonitor.openFilePath(current.nativePath);
+  if (opened === false) throw new Error("Premiere 소스 모니터에서 오디오 파일을 열지 못했습니다.");
+  if (typeof sourceMonitor.play !== "function") return false;
+  try {
+    return (await sourceMonitor.play(1)) !== false;
+  } catch {
+    return false;
   }
-  throw new Error("오디오 파일을 바이너리로 읽지 못했습니다.");
 }
 
 function finalQCPlatform(): SocialPlatform {
@@ -606,7 +623,9 @@ function recoveryStatusLabel(status: OperationJournalEntry["status"]): string {
 function renderRecoveryJournal(): void {
   const target = optionalElement<HTMLElement>("recovery-list");
   if (!target) return;
-  target.replaceChildren();
+  // Premiere 26.3 UXP can leave stale children behind after replaceChildren().
+  // Remove explicitly so preview/selection rerenders never duplicate asset cards.
+  while (target.firstChild) target.removeChild(target.firstChild);
   const entries = recoveryManager?.list().sort((left, right) => right.createdAt - left.createdAt) ?? [];
   setText("recovery-count", `${entries.length} / 50`);
   if (entries.length === 0) {
@@ -655,15 +674,6 @@ async function rollbackRecoveryEntry(entry: OperationJournalEntry): Promise<void
     reportError(error, "복제 시퀀스 복구 실패");
   }
   renderRecoveryJournal();
-}
-
-function moduleMember(moduleValue: Record<string, unknown> | null, ...path: string[]): unknown {
-  let current: unknown = moduleValue;
-  for (const key of path) {
-    if (!current || typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
 }
 
 function hostModule(moduleName: string): Record<string, unknown> | null {
@@ -1445,6 +1455,24 @@ async function handleSyncAssets(): Promise<void> {
 
 async function handlePreviewAsset(asset: AssetItem): Promise<void> {
   const audio = element<HTMLAudioElement>("asset-audio-preview");
+  const supportsInlineAudio = typeof audio.pause === "function" &&
+    typeof audio.load === "function" &&
+    typeof audio.play === "function" &&
+    typeof URL.createObjectURL === "function";
+  if (!supportsInlineAudio) {
+    const autoPlayed = await busy.during(
+      `${asset.name}을 Premiere 소스 모니터에서 열고 있습니다…`,
+      () => previewAssetInPremiereSourceMonitor(asset),
+    );
+    selectedAssetId = asset.id;
+    renderAssets();
+    renderAssetRights(asset);
+    activity.add("success", `Premiere 소스 모니터 미리듣기: ${asset.name}${autoPlayed ? " · 재생 시작" : " · 재생 버튼을 눌러 주세요"}`);
+    toast(autoPlayed
+      ? "Premiere 소스 모니터에서 미리듣기를 시작했습니다."
+      : "Premiere 소스 모니터에 열었습니다. 소스 모니터 재생 버튼을 눌러 주세요.", "success");
+    return;
+  }
   const bytes = await busy.during(`${asset.name} 미리듣기를 준비하고 있습니다…`, () => assetBytes(asset));
   clearAssetPreview();
   const buffer = new ArrayBuffer(bytes.byteLength);

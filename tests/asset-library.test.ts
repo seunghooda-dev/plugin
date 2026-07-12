@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   ASSET_LIBRARY_TOKEN_KEY,
+  MAX_ASSET_PREVIEW_BYTES,
   AssetLibrary,
   AssetLibraryError,
   applyAssetOrder,
@@ -20,6 +21,7 @@ import {
   isSupportedAsset,
   normalizeAssetOrder,
   normalizeNativePath,
+  readAssetPreviewBytes,
   sortAssets,
 } from "../src/asset-library";
 
@@ -152,6 +154,55 @@ describe("asset classification", () => {
     assert.equal(isSupportedAsset("voice.aiff"), true);
     assert.equal(isSupportedAsset("cover.webp"), true);
     assert.equal(isSupportedAsset("video.mov"), true);
+  });
+});
+
+describe("asset preview bytes", () => {
+  it("requests the UXP binary format and copies ArrayBuffer output", async () => {
+    const binaryFormat = Symbol("binary");
+    const calls: unknown[] = [];
+    const source = new Uint8Array([82, 73, 70, 70]);
+    const bytes = await readAssetPreviewBytes({
+      size: source.byteLength,
+      entry: {
+        read: async (options: unknown) => {
+          calls.push(options);
+          return source.buffer;
+        },
+      },
+    }, binaryFormat);
+
+    assert.deepEqual(calls, [{ format: binaryFormat }]);
+    assert.deepEqual([...bytes], [...source]);
+    source[0] = 0;
+    assert.equal(bytes[0], 82);
+  });
+
+  it("accepts typed-array views without exposing their backing buffer", async () => {
+    const backing = new Uint8Array([0, 82, 73, 70, 70, 0]);
+    const bytes = await readAssetPreviewBytes({
+      entry: { read: async () => backing.subarray(1, 5) },
+    }, "binary");
+    assert.deepEqual([...bytes], [82, 73, 70, 70]);
+  });
+
+  it("rejects missing formats, text reads, empty files, and oversized previews", async () => {
+    await assert.rejects(
+      readAssetPreviewBytes({ entry: { read: async () => new ArrayBuffer(1) } }, undefined),
+      /바이너리 파일 형식/u,
+    );
+    await assert.rejects(
+      readAssetPreviewBytes({ entry: { read: async () => "RIFF" } }, "binary"),
+      /바이너리로 읽지/u,
+    );
+    await assert.rejects(
+      readAssetPreviewBytes({ entry: { read: async () => new ArrayBuffer(0) } }, "binary"),
+      /바이너리로 읽지/u,
+    );
+    await assert.rejects(
+      readAssetPreviewBytes({ size: MAX_ASSET_PREVIEW_BYTES + 1, entry: { read: async () => new ArrayBuffer(1) } }, "binary"),
+      /128MB/u,
+    );
   });
 });
 
@@ -640,6 +691,24 @@ describe("AssetLibrary open folder", () => {
     await assert.rejects(
       library.openRootFolder(),
       (error: unknown) => assertLibraryError(error, "UNSUPPORTED_API"),
+    );
+  });
+
+  it("opens only a file from the current successful sync snapshot", async () => {
+    const clip = mockFile("hook.wav", "C:/Assets/SFX/hook.wav");
+    const root = mockFolder("Assets", "C:/Assets", [mockFolder("SFX", "C:/Assets/SFX", [clip])]);
+    const adapter = createAdapter(root);
+    const opened: string[] = [];
+    adapter.shell = { openPath: async (nativePath: string) => { opened.push(nativePath); return ""; } };
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+    const [synced] = await library.sync();
+
+    await library.openAssetFile(synced!);
+    assert.deepEqual(opened, ["C:/Assets/SFX/hook.wav"]);
+    await assert.rejects(
+      library.openAssetFile(asset("forged.wav", "audio", "C:/Outside/forged.wav")),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
     );
   });
 });

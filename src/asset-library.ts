@@ -145,6 +145,38 @@ export const MAX_ASSET_SYNC_ENTRIES = 5_000;
 export const ASSET_DRAG_PAYLOAD_MIME = "application/x-shortflow-asset+json";
 export const MAX_ASSET_DRAG_PAYLOAD_LENGTH = 8_192;
 export const MAX_ASSET_CUSTOM_ORDER_ITEMS = 5_000;
+export const MAX_ASSET_PREVIEW_BYTES = 128 * 1024 * 1024;
+
+/** Reads a synced audio entry with the UXP binary format instead of the default UTF-8 mode. */
+export async function readAssetPreviewBytes(
+  asset: Pick<AssetItem, "entry" | "size">,
+  binaryFormat: unknown,
+): Promise<Uint8Array> {
+  const read = asset.entry?.read;
+  if (typeof read !== "function") {
+    throw new Error("동기화된 파일 entry가 없어 미리듣기를 만들 수 없습니다. 에셋을 다시 동기화해 주세요.");
+  }
+  if (binaryFormat === undefined || binaryFormat === null) {
+    throw new Error("UXP 바이너리 파일 형식을 사용할 수 없어 미리듣기를 만들 수 없습니다.");
+  }
+  if (typeof asset.size === "number" && asset.size > MAX_ASSET_PREVIEW_BYTES) {
+    throw new Error("미리듣기 파일이 128MB 안전 제한을 초과했습니다.");
+  }
+
+  const value = await read.call(asset.entry, { format: binaryFormat });
+  const bytes = value instanceof ArrayBuffer
+    ? new Uint8Array(value).slice()
+    : ArrayBuffer.isView(value)
+      ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice()
+      : null;
+  if (!bytes || bytes.byteLength === 0) {
+    throw new Error("오디오 파일을 바이너리로 읽지 못했습니다.");
+  }
+  if (bytes.byteLength > MAX_ASSET_PREVIEW_BYTES) {
+    throw new Error("미리듣기 파일이 128MB 안전 제한을 초과했습니다.");
+  }
+  return bytes;
+}
 
 /**
  * References는 컨테이너 폴더이며 Images/Videos는 그 아래에 생성합니다.
@@ -1149,6 +1181,32 @@ export class AssetLibrary {
   async openRelativeFolder(relativeFolderPath: string): Promise<void> {
     const folder = await this.resolveRelativeFolder(relativeFolderPath);
     await this.openFolder(folder);
+  }
+
+  async openAssetFile(asset: Pick<AssetItem, "id" | "nativePath" | "normalizedPath">): Promise<void> {
+    const current = this.cachedAssets.find((candidate) =>
+      candidate.id === asset.id &&
+      candidate.normalizedPath === asset.normalizedPath &&
+      candidate.nativePath === asset.nativePath);
+    if (!current) {
+      throw new AssetLibraryError(
+        "INVALID_ROOT",
+        "현재 동기화된 자산이 아닙니다. 음악·효과음 폴더를 다시 동기화해 주세요.",
+      );
+    }
+    const openPath = this.adapter.shell?.openPath;
+    if (typeof openPath !== "function") {
+      throw new AssetLibraryError(
+        "UNSUPPORTED_API",
+        "현재 Premiere Pro/UXP 환경에서는 시스템 오디오 앱 미리듣기를 지원하지 않습니다.",
+      );
+    }
+    try {
+      const result = await openPath.call(this.adapter.shell, current.nativePath);
+      if (typeof result === "string" && result.trim()) throw new Error(result);
+    } catch (error) {
+      throw filesystemError(error, "시스템 오디오 앱에서 자산을 열지 못했습니다.");
+    }
   }
 
   async resolveRelativeFolder(relativeFolderPath: string): Promise<UxpEntry> {

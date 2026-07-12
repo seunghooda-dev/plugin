@@ -478,3 +478,35 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 - 공개 Premiere UXP API 제약으로 CUT은 실제 razor 삭제가 아니라 `SF CUT` 검토 마커입니다.
 - Motion 펀치인 키프레임의 시각적 보간·easing 품질은 별도 플레이백 QA에서 추가 확인합니다.
 - TTS live/API 삽입은 API key를 사용하지 않았으므로 계속 보류합니다.
+
+## 21. 최종 QC·복구 저널·진단 JSON Host 검증 — 2026-07-12 21:52 KST
+
+목적:
+
+- 실제 Premiere Pro 26.3.0에서 API key 없이 실행 가능한 최종 QC, 복구 저널 영속성, 진단 및 익명 JSON 저장을 확인했습니다.
+- 진단 경로가 class/function namespace의 정적 Host API를 없다고 오판하는 문제를 발견해 수정했습니다.
+
+결과:
+
+| 항목 | 상태 | 실제값 |
+|---|---|---|
+| 최종 QC 실행 | Host 통과 | `PASS 16 · WARNING 4 · ERROR 4`. 오류는 테스트 시퀀스의 frame-size, aspect-ratio, guide-overlay, output-path이며 권리 금지·만료 검사는 통과 |
+| 복구 저널 영속성 | Host 통과 | 플러그인 reload 후 자동 편집 복제 작업 2개가 `완료`로 복원되고 원본 보존 안내가 표시됨 |
+| 진단 Host API 탐지 | 버그 수정 후 Host 통과 | 수정 전 `EncoderManager.getManager`·`Project.getActiveProject`·`SequenceEditor.getEditor`를 없다고 오판. 수정 후 `compatible: true`, Premiere `26.3.0`, UXP `uxp-9.3.0-local` |
+| 진단 JSON 저장 | Host 통과 | `ShortFlow_Diagnostics_Host_20260712.json`, schema 1, 12개 check, recovery count 2 |
+| 현재 fixture 민감정보 검사 | Host 출력 통과 | API key, Bearer, `C:\\Users`, 이메일, 미디어 파일명, transcript/prompt 필드 모두 0건. 합성 민감값을 사용한 능동 redaction Host 테스트는 별도 남음 |
+
+남은 Host gate:
+
+1. TTS live/API 생성, 저장, Premiere import, 지정 트랙 삽입
+2. 음악/SFX 선택 폴더 열기, 잠긴 트랙·충돌 경고
+3. 레퍼런스 파일 권한, 썸네일 SVG fallback 저장, Host Canvas 제한 안내
+4. 최종 QC 차단 항목 해소, 권리 메타데이터 입력·리포트 저장, 복제본 제거 rollback, 합성 민감값 redaction
+
+## 22. 음악/SFX 미리듣기·카드 재렌더 Host 검증 — 2026-07-12 22:48 KST
+
+- Premiere 26.3 UXP의 `<audio>`에는 `pause`·`load`·`play`가 없어 인라인 재생을 사용할 수 없음을 실제 Host에서 확인했습니다.
+- UXP binary format 읽기와 128MB 안전 제한을 추가했고, 인라인 재생 미지원 시 공식 `SourceMonitor.openFilePath()`·`play()` 경로를 사용하도록 전환했습니다.
+- 오디오 2개 동기화 후 `Premiere 소스 모니터 미리듣기: shortflow_smoke.wav · 재생 시작` 로그를 확인했습니다.
+- 드래그 순서 저장과 원복을 Host DOM에서 확인했고 localStorage 원복도 확인했습니다.
+- Premiere UXP에서 `replaceChildren()` 재렌더가 stale 카드를 남기는 현상을 명시적 `removeChild` 반복으로 교체했으며, 재동기화 후 카드 수가 실제 오디오 수와 같은 2개임을 확인했습니다.

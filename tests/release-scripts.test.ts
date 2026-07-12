@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
@@ -34,11 +44,95 @@ describe("internal beta release scripts contract", () => {
       "- [x] Validate asset root, Music/SFX sync, and basic WAV import/insert.",
       "- [x] Validate timeline TrackItem selection detection in the ShortFlow status UI.",
       "- [ ] Validate TTS audio file save, Premiere import, and target audio track insert.",
-      "- [ ] Validate clone-before-mutation, automation marker creation, punch-in apply, export, and recovery journal.",
-      "- [ ] Validate final QC, diagnostics JSON export, and absence of secrets in logs/reports.",
+      "- [x] Validate clone-before-mutation, automation marker creation, and basic punch-in apply.",
+      "- [x] Validate recovery journal persistence and committed entries after plugin reload.",
+      "- [ ] Validate recovery rollback/removal only after explicit confirmation in a disposable project.",
+      "- [x] Run Final QC in the real Host and record its blocking codes.",
+      "- [ ] Resolve every Final QC blocking code before beta approval; waivers may apply only to eligible non-hard-block checks.",
+      "- [x] Export diagnostics JSON and confirm the current fixture contains no API key",
+      "- [ ] Exercise active redaction with synthetic sensitive values before external diagnostic sharing.",
+      "checkpointChecklist: docs/BETA_RELEASE_CHECKLIST.md",
+      "Approve the internal beta only when report.blocking === false",
+      "PASS/WARNING/ERROR counts and the absence of a hard-block label are not substitutes.",
+      "Do not run destructive Host smoke against a real user project; use a disposable project and clone-first flow.",
+      '"status", "--porcelain=v1", "--untracked-files=all"',
+      '"HEAD^{tree}"',
+      "Verified beta evidence requires a clean committed worktree.",
     ]) {
       assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
     }
+  });
+
+  it("rejects verified evidence capture from a dirty committed worktree without writing evidence", () => {
+    const fixtureRoot = mkdtempSync(path.join(tmpdir(), "shortflow-beta-evidence-"));
+    try {
+      const scriptDir = path.join(fixtureRoot, "scripts");
+      const publicDir = path.join(fixtureRoot, "public");
+      mkdirSync(scriptDir, { recursive: true });
+      mkdirSync(publicDir, { recursive: true });
+      copyFileSync(
+        path.join(ROOT, "scripts/collect-beta-evidence.mjs"),
+        path.join(scriptDir, "collect-beta-evidence.mjs"),
+      );
+      writeFileSync(
+        path.join(fixtureRoot, "package.json"),
+        JSON.stringify({ name: "shortflow-release-contract-fixture", version: "0.0.0" }),
+        "utf8",
+      );
+      writeFileSync(
+        path.join(publicDir, "manifest.json"),
+        JSON.stringify({ id: "shortflow.fixture", version: "0.0.0", host: { app: "PPRO", minVersion: "25.0.0" } }),
+        "utf8",
+      );
+
+      execFileSync("git", ["init"], { cwd: fixtureRoot, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "shortflow-release-contract@example.invalid"], {
+        cwd: fixtureRoot,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["config", "user.name", "ShortFlow Release Contract"], {
+        cwd: fixtureRoot,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["add", "."], { cwd: fixtureRoot, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "test fixture baseline"], { cwd: fixtureRoot, stdio: "ignore" });
+
+      writeFileSync(path.join(fixtureRoot, "dirty-marker.txt"), "uncommitted\n", "utf8");
+      const result = spawnSync(
+        process.execPath,
+        [path.join(scriptDir, "collect-beta-evidence.mjs"), "--verified"],
+        { cwd: fixtureRoot, encoding: "utf8" },
+      );
+
+      assert.notEqual(result.status, 0);
+      assert.match(
+        `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+        /Verified beta evidence requires a clean committed worktree/u,
+      );
+      assert.equal(existsSync(path.join(fixtureRoot, "beta-evidence")), false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("documents the final internal beta checkpoint gate", () => {
+    const checklist = readProjectFile("docs/BETA_RELEASE_CHECKLIST.md");
+    for (const required of [
+      "npm run typecheck",
+      "npm run lint",
+      "npm test",
+      "npm run build",
+      "npm run beta:evidence:verified",
+      "최종 QC hard block",
+      "권리 리포트",
+      "진단 JSON",
+      "GitHub push",
+    ]) {
+      assert.match(checklist, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    }
+
+    const readme = readProjectFile("README.md");
+    assert.match(readme, /docs\/BETA_RELEASE_CHECKLIST\.md/u);
   });
 
   it("keeps speech live verification opt-in, redacted, and outside git", () => {

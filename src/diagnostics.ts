@@ -310,6 +310,23 @@ export function parseVersion(value: unknown): readonly number[] | null {
     : null;
 }
 
+/** Reads a Host module path while allowing class/function namespaces with static APIs. */
+export function readRuntimeMember(moduleValue: unknown, ...path: string[]): unknown {
+  let current = moduleValue;
+  for (const key of path) {
+    const kind = typeof current;
+    if (current === null || current === undefined || (kind !== "object" && kind !== "function")) {
+      return undefined;
+    }
+    try {
+      current = (current as Record<string, unknown>)[key];
+    } catch {
+      return undefined;
+    }
+  }
+  return current;
+}
+
 export function compareVersions(left: unknown, right: unknown): number | null {
   const leftParts = parseVersion(left);
   const rightParts = parseVersion(right);
@@ -319,6 +336,10 @@ export function compareVersions(left: unknown, right: unknown): number | null {
     if (difference !== 0) return difference < 0 ? -1 : 1;
   }
   return 0;
+}
+
+function parseUxpRuntimeVersion(value: string): readonly number[] | null {
+  return parseVersion(value) ?? (/^uxp-/iu.test(value) ? parseVersion(value.slice(4)) : null);
 }
 
 function freezeCheck(check: DiagnosticCheck): DiagnosticCheck {
@@ -441,15 +462,16 @@ export async function buildDiagnosticsReport(
         ? `Premiere Pro ${MINIMUM_PREMIERE_VERSION} 이상이 필요합니다.`
         : `Premiere Pro ${host.version}은 지원 범위입니다.`,
   }));
+  const parsedUxpVersion = parseUxpRuntimeVersion(uxp.version);
   checks.push(freezeCheck({
     id: "uxp-runtime",
     label: "UXP runtime",
-    status: parseVersion(uxp.version) ? "green" : "yellow",
+    status: parsedUxpVersion ? "green" : "yellow",
     available: uxpProbe.ok,
     required: true,
     deprecated: false,
     version: uxp.version,
-    message: parseVersion(uxp.version)
+    message: parsedUxpVersion
       ? `UXP ${uxp.version} 런타임을 확인했습니다.`
       : "UXP 런타임 버전을 확인할 수 없습니다.",
   }));

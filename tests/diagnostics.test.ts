@@ -19,6 +19,7 @@ import {
   normalizeDiagnosticBundle,
   normalizeTelemetryPayload,
   parseVersion,
+  readRuntimeMember,
   redactSensitive,
   requireAvailableApi,
   type DiagnosticsAdapter,
@@ -26,6 +27,43 @@ import {
   type TelemetryProvider,
   type TelemetryStorage,
 } from "../src/diagnostics";
+
+describe("readRuntimeMember", () => {
+  it("reads static Host APIs through function and class namespaces", () => {
+    class Project {
+      static getActiveProject(): string { return "project"; }
+    }
+    class SequenceEditor {
+      static getEditor(): string { return "editor"; }
+    }
+    class EncoderManager {
+      static getManager(): string { return "manager"; }
+    }
+    const hostModule = { Project, SequenceEditor, EncoderManager };
+    const uxpModule = {
+      storage: {
+        secureStorage: { getItem: () => null },
+        localFileSystem: { getDataFolder: () => null },
+      },
+    };
+
+    assert.equal(readRuntimeMember(hostModule, "Project", "getActiveProject"), Project.getActiveProject);
+    assert.equal(readRuntimeMember(hostModule, "SequenceEditor", "getEditor"), SequenceEditor.getEditor);
+    assert.equal(readRuntimeMember(hostModule, "EncoderManager", "getManager"), EncoderManager.getManager);
+    assert.equal(typeof readRuntimeMember(hostModule, "EncoderManager", "getManager"), "function");
+    assert.equal(typeof readRuntimeMember(uxpModule, "storage", "secureStorage", "getItem"), "function");
+    assert.equal(typeof readRuntimeMember(uxpModule, "storage", "localFileSystem", "getDataFolder"), "function");
+  });
+
+  it("returns undefined for missing, primitive, or throwing paths", () => {
+    const throwing = Object.defineProperty({}, "broken", {
+      get() { throw new Error("blocked getter"); },
+    });
+    assert.equal(readRuntimeMember(null, "Project"), undefined);
+    assert.equal(readRuntimeMember({ Project: 1 }, "Project", "getActiveProject"), undefined);
+    assert.equal(readRuntimeMember(throwing, "broken"), undefined);
+  });
+});
 
 class MemoryStorage implements TelemetryStorage {
   readonly values = new Map<string, string>();
@@ -200,6 +238,18 @@ describe("buildDiagnosticsReport", () => {
     assert.equal(report.compatible, true);
     assert.equal(report.host.version, "25.6.0");
     assert.equal(report.checks.length, 8);
+  });
+
+  it("accepts the version string exposed by the Premiere 26.3 UXP runtime", async () => {
+    const adapter = healthyAdapter();
+    const report = await buildDiagnosticsReport({
+      ...adapter,
+      getUxpInfo: () => ({ version: "uxp-9.3.0-local" }),
+    });
+    const runtime = report.checks.find((check) => check.id === "uxp-runtime");
+    assert.equal(runtime?.status, "green");
+    assert.equal(runtime?.version, "uxp-9.3.0-local");
+    assert.equal(report.compatible, true);
   });
 
   it("marks an older host red and incompatible", async () => {
