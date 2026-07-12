@@ -28,7 +28,7 @@
 
 오늘의 완료 기준은 1~6번의 Mock/정적 근거입니다. 7번은 Premiere 설치 뒤 [Host Beta Runbook](HOST_BETA_RUNBOOK.md)에 따라 별도 수행합니다.
 
-현재 1~6번, 음악/SFX 순서·미리듣기·폴더 카테고리, 에셋 권리 관리 코어, 최종 QC 권리 리포트, 썸네일 수동 편집·내보내기는 `npm run check` 993/993과 build/dist 검증으로 Mock 기준선을 확보했습니다. 7번 실제 Host smoke는 UXP 패널 로드, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 생성, 테스트 클립 삽입, 기본 QC, Safe Zone overlay, SRT import, 음악/SFX 삽입, 플레이헤드·In/Out 상태 읽기, TrackItem 선택 감지, TTS/STT 탭 접근성, 자동 편집 입력 없음 안전 차단, 자동 컷 dry-run과 추천 마커 추가까지 제한 통과로 기록했습니다. TTS live/API 삽입과 자동 컷 복제 시퀀스 적용은 내부 베타 최종 승인 전 재검증합니다.
+현재 1~6번, 음악/SFX 순서·미리듣기·폴더 카테고리, 에셋 권리 관리 코어, 최종 QC 권리 리포트, 썸네일 수동 편집·내보내기는 `npm run check` 1002/1002와 build/dist 검증으로 Mock 기준선을 확보했습니다. 7번 실제 Host smoke는 UXP 패널 로드, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 생성, 테스트 클립 삽입, 기본 QC, Safe Zone overlay, SRT import, 음악/SFX 삽입, 플레이헤드·In/Out 상태 읽기, TrackItem 선택 감지, TTS/STT 탭 접근성, 자동 편집 입력 없음 안전 차단, 자동 컷 dry-run과 추천 마커 추가까지 제한 통과로 기록했습니다. TTS live/API 삽입과 자동 컷 복제 시퀀스 적용은 내부 베타 최종 승인 전 재검증합니다.
 
 ## 2주차 — 자동 편집·오디오 자산·권리
 

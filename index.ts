@@ -533,14 +533,14 @@ async function subtitleProjectKey(): Promise<string> {
 
 async function readSrtFile(): Promise<string | null> {
   const uxpRoot = require("uxp") as any;
-  const selected = await uxpRoot?.storage?.localFileSystem?.getFileForOpening?.({ types: ["srt"], allowMultiple: false });
+  const selected = await uxpRoot?.storage?.localFileSystem?.getFileForOpening?.({ types: ["srt", "json"], allowMultiple: false });
   const file = Array.isArray(selected) ? selected[0] : selected;
   if (!file) return null;
   const value = await file.read({ format: uxpRoot?.storage?.formats?.utf8 });
   if (typeof value === "string") return value;
   if (value instanceof ArrayBuffer) return new TextDecoder().decode(value);
   if (ArrayBuffer.isView(value)) return new TextDecoder().decode(value as ArrayBufferView);
-  throw new Error("SRT 파일을 텍스트로 읽지 못했습니다.");
+  throw new Error("SRT/Whisper JSON 파일을 UTF-8 텍스트로 읽지 못했습니다.");
 }
 
 async function writeSrtFile(srt: string, suggestedName: string): Promise<void> {

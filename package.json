@@ -23,6 +23,7 @@
     "verify:release": "node scripts/verify-release.mjs",
     "verify:speech": "node scripts/verify-speech-live.mjs",
     "verify:speech:live": "node scripts/verify-speech-live.mjs --live",
+    "verify:speech:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-local-whisper.ps1",
     "package:ccx": "npm run build && node scripts/package-ccx.mjs && npm run verify:release",
     "package:ccx:force": "npm run build && node scripts/package-ccx.mjs --force && npm run verify:release"
   },

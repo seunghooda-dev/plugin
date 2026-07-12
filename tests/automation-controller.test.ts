@@ -554,6 +554,7 @@ describe("AutomationController transcript and busy safety", () => {
       assert.match(errors.at(-1) ?? "", /이미 진행 중/u);
       overlay.resolve();
       await settle();
+      await waitUntil(() => activities.some((message) => /내보내기 전.*삭제/u.test(message)));
       assert.equal(controller.isBusy, false);
       assert.equal(dom.getElementById("safe-overlay-btn")?.disabled, false);
       assert.match(activities.at(-1) ?? "", /YouTube Shorts.*2026-conservative.*보수적 가이드.*내보내기 전.*삭제/u);

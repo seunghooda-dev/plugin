@@ -342,7 +342,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 - `npm run typecheck` 통과
 - `npm run build` 통과
 - compiled automation fallback/controller tests 통과: 11/11
-- `npm run check` 통과: typecheck, lint, build, dist 검증, 993/993 tests
+- `npm run check` 통과: typecheck, lint, build, dist 검증, 1002/1002 tests
 
 추가 Host 확인:
 
@@ -365,7 +365,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - Premiere Pro: 2026, UXP Developer Tools 연결 대상 `premierepro v26.3.0`
 - 테스트 프로젝트: `무제.prproj`, 활성 시퀀스 `시퀀스 01`
-- 로컬 후보: `npm run check` 통과. typecheck, lint, build, dist 검증, 993/993 tests
+- 로컬 후보: `npm run check` 통과. typecheck, lint, build, dist 검증, 1002/1002 tests
 
 결과:
 
@@ -388,7 +388,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - Premiere Pro: 2026, UXP Developer Tools 연결 대상 `premierepro v26.3.0`
 - 테스트 프로젝트: `무제.prproj`, 활성 시퀀스 `시퀀스 01`
-- 로컬 후보: TTS/STT floating panel 레이아웃 수정 후 `npm run check` 통과. typecheck, lint, build, dist 검증, 993/993 tests
+- 로컬 후보: TTS/STT floating panel 레이아웃 수정 후 `npm run check` 통과. typecheck, lint, build, dist 검증, 1002/1002 tests
 
 결과:
 
@@ -419,7 +419,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 
 - `npm run check` 통과
 - typecheck, lint, build, dist 검증 통과
-- 전체 테스트 `993/993` 통과, 실패 0
+- 전체 테스트 `1002/1002` 통과, 실패 0
 
 남은 Host gate:
 
@@ -446,8 +446,9 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | Premiere selection API 직접 조회 | 제한 통과/Host 차이 발견 | `sequence.getSelection().getTrackItems()` 직접 조회 결과는 `count: 0`이지만, 개별 TrackItem `getIsSelected()` 조회에서는 선택 상태가 true로 반영됐습니다. 현재 프로젝트 패널/속성 패널 선택과 타임라인 TrackItem 선택은 구분해 기록합니다. |
 | TrackItem fallback 선택 감지 | Host 통과 | UXP Debug Console에서 timeline fallback 직접 조회 결과 `SF_ALL_ITEMS_SELECTED`가 video/audio TrackItem 4개를 반환했고 각 항목의 `selected: true`를 확인했습니다. 최신 `dist` reload 후 `#refresh-btn` 클릭으로 ShortFlow 상태 UI가 `타임라인 4개 선택 · 00:06`으로 갱신됐습니다. |
 | 자동 편집 안전 차단 | 통과 | 패널 본문에서 `STT 결과가 비어있어 아직 자동 편집을 사용할 수 없습니다. 다시 분석해 주세요.` 안내와 복제 시퀀스 적용 버튼의 제한 상태를 확인했습니다. |
-| 현재 Mock 기준선 | 통과 | selection fallback, TTS 응답 컨테이너 검증, 자동화 host mutation snapshot guard와 SRT fallback 유지 보강 후 `npm run check`가 typecheck, lint, build, dist 검증, 993/993 tests로 통과했습니다. |
-| 베타 증거 템플릿 | 통과 | `beta-evidence/ShortFlow_Beta_Evidence_20260712T090036Z.md`를 생성했습니다. |
+| 현재 Mock 기준선 | 통과 | selection fallback, TTS 응답 컨테이너 검증, 자동화 host mutation snapshot guard와 SRT fallback 유지 보강, 로컬 Whisper 오프라인 검증 스크립트와 Whisper JSON 자막 변환 계약 추가 후 `npm run check`가 typecheck, lint, build, dist 검증, 1002/1002 tests로 통과했습니다. |
+| 베타 증거 템플릿 | 통과 | `beta-evidence/ShortFlow_Beta_Evidence_20260712T111256Z.md`를 생성했습니다. |
+| 로컬 Whisper 오프라인 STT smoke | 통과/Host 대체 아님 | `local-whisper-evidence/20260712T110447Z/ShortFlow_Local_Whisper_Evidence_20260712T110447Z.md`에서 base/cpu, 2개 segment, 9개 word timestamp, 생성 샘플 키워드 4/4를 확인했습니다. OpenAI live API, TTS 생성, Premiere Host 삽입 gate는 아직 통과로 판정하지 않습니다. |
 
 아직 통과로 판정하지 않는 항목:
 

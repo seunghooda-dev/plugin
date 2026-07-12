@@ -47,7 +47,7 @@
 ### 검증 상태
 
 - 범위 재정의 전 `npm test`: 864/864 통과
-- 2026-07-12 Mock 기준선 `npm run check`: typecheck·전체 lint·build·dist 검증·993/993 test 통과
+- 2026-07-12 Mock 기준선 `npm run check`: typecheck·전체 lint·build·dist 검증·1002/1002 test 통과
 - 이전 로컬 CCX 후보와 SHA-256은 `npm run beta:evidence:verified`로 생성·검증 완료. SHA-256: `dadc2dd405a8facceca761175d63360b140b0e8d30fe783d167d3c8cedc50df8`. 이후 소스 변경분은 최종 Host gate 후 재패키징 필요.
 - Premiere Pro/UXP Developer Tool 실제 개발 로드: 패널 표시, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 기본 QC, 최신 dist 탭 전환, 마커 탭 표시, Safe Zone overlay, SRT 파일 import, 음악/SFX WAV A1 삽입, TrackItem 선택 감지까지 제한 통과
 - Premiere Pro 26.3 Host에서 `sequence.getSelection()`이 빈 배열을 반환해도 개별 `TrackItem.getIsSelected()` fallback으로 선택 상태를 감지하도록 보강하고 실제 패널 UI에서 `타임라인 4개 선택 · 00:06` 표시를 확인

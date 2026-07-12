@@ -17,6 +17,10 @@ describe("internal beta release scripts contract", () => {
     assert.equal(pkg.scripts?.["verify:speech"], "node scripts/verify-speech-live.mjs");
     assert.equal(pkg.scripts?.["verify:speech:live"], "node scripts/verify-speech-live.mjs --live");
     assert.equal(
+      pkg.scripts?.["verify:speech:local"],
+      "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-local-whisper.ps1",
+    );
+    assert.equal(
       pkg.scripts?.["beta:evidence:verified"],
       "npm run check && npm run package:ccx:force && node scripts/collect-beta-evidence.mjs --verified",
     );
@@ -48,11 +52,33 @@ describe("internal beta release scripts contract", () => {
     assert.match(source, /TTS\/STT live smoke 검증 실패/u);
   });
 
+  it("keeps local Whisper verification offline, timestamped, and outside the product provider", () => {
+    const source = readProjectFile("scripts/verify-local-whisper.ps1");
+    assert.match(source, /ShortFlowStudio\\whisper/u);
+    assert.match(source, /--model_dir/u);
+    assert.match(source, /--word_timestamps True/u);
+    assert.match(source, /--output_format all/u);
+    assert.match(source, /local-whisper-evidence/u);
+    assert.match(source, /does not use an OpenAI API key or a network STT call/u);
+    assert.match(source, /expectedKeywordMatches/u);
+    assert.match(source, /expectedMatchCount -lt 2/u);
+    assert.match(source, /function Test-FiniteNumber/u);
+    assert.match(source, /\$timedSegments/u);
+    assert.match(source, /UTF8Encoding\(\$false, \$true\)/u);
+    assert.match(source, /word timestamp falls outside its segment range/u);
+    assert.match(source, /Test-ContainsHangul/u);
+    assert.match(source, /IsNullOrWhiteSpace/u);
+    assert.match(source, /FromBase64String/u);
+    assert.doesNotMatch(source, /OPENAI_API_KEY/u);
+    assert.doesNotMatch(source, /[^\u0000-\u007f]/u);
+  });
+
   it("keeps generated evidence and release candidates out of git", () => {
     const ignore = readProjectFile(".gitignore");
     assert.match(ignore, /^release\/$/mu);
     assert.match(ignore, /^beta-evidence\/$/mu);
     assert.match(ignore, /^speech-evidence\/$/mu);
+    assert.match(ignore, /^local-whisper-evidence\/$/mu);
   });
 
   it("fails the test gate when compiled tests are missing", () => {

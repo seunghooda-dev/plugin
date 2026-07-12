@@ -9,6 +9,7 @@ release/
 .final-qc-test-build/
 beta-evidence/
 speech-evidence/
+local-whisper-evidence/
 host-smoke-assets/
 *.log
 .DS_Store

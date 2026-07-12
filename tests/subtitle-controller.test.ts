@@ -662,6 +662,66 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     assert.equal(exported[0]?.name, "News_Project_subtitles.srt");
   });
 
+  it("imports UTF-8 Whisper JSON into the editor without losing measured word timestamps", async () => {
+    const controller = new SubtitleController({ dom: editorDom(), storage: null });
+    await controller.initialize();
+    const source = JSON.stringify({
+      text: "자막 테스트",
+      language: "ko",
+      segments: [{
+        start: 1.25,
+        end: 3.5,
+        text: " 자막 테스트",
+        words: [
+          { start: 1.25, end: 2.1, word: " 자막" },
+          { start: 2.15, end: 3.5, word: " 테스트" },
+        ],
+      }],
+    });
+
+    const imported = controller.importWhisperJsonText(source);
+    const cue = imported.cues[0]!;
+    assert.equal(cue.text, "자막 테스트");
+    assert.deepEqual(cue.words.map(({ s, e, t }) => ({ s, e, t })), [
+      { s: 1.25, e: 2.1, t: "자막" },
+      { s: 2.15, e: 3.5, t: "테스트" },
+    ]);
+    assert.equal(controller.updatePlayhead(2.5)?.wordId, cue.words[1]?.wordId);
+    controller.editWord(cue.cueId, cue.words[1]!.wordId, "검증");
+    assert.equal(controller.document.cues[0]?.words[1]?.t, "검증");
+    controller.undo();
+    assert.equal(controller.document.cues[0]?.words[1]?.t, "테스트");
+  });
+
+  it("auto-detects UTF-8 Whisper JSON through the editor import button", async () => {
+    const dom = editorDom();
+    const source = JSON.stringify({
+      text: "프리미어 자막",
+      language: "ko",
+      segments: [{
+        start: 0,
+        end: 1.5,
+        text: " 프리미어 자막",
+        words: [
+          { start: 0, end: 0.7, word: " 프리미어" },
+          { start: 0.72, end: 1.5, word: " 자막" },
+        ],
+      }],
+    });
+    const controller = new SubtitleController({
+      dom,
+      storage: null,
+      onImportSrt: () => source,
+    });
+    await controller.initialize();
+
+    dom.getElementById("subtitle-import-btn")!.emit("click");
+    await settle();
+
+    assert.equal(controller.document.cues[0]?.text, "프리미어 자막");
+    assert.deepEqual(controller.document.cues[0]?.words.map((word) => word.t), ["프리미어", "자막"]);
+  });
+
   it("serializes autosave writes by the active project key", async () => {
     const dom = editorDom();
     const storage = new MemoryStorage();
@@ -992,7 +1052,7 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     dom.getElementById("subtitle-import-btn")!.emit("click");
     await settle();
     assert.equal(controller.document.cues.length, 0);
-    assert.match(errors[0] ?? "", /SRT 불러오기 실패/u);
+    assert.match(errors[0] ?? "", /자막 파일 불러오기 실패/u);
     assert.equal(dom.getElementById("subtitle-status")?.dataset.status, "error");
   });
 

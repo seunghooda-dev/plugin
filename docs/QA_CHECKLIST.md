@@ -8,7 +8,7 @@
 - **M — mock/순수 테스트**: Premiere/UXP 어댑터를 가짜 객체로 검증한 결과
 - **H — host 테스트**: 실제 Premiere Pro/UXP/Media Encoder/파일 시스템에서 사람이 확인한 결과
 
-범위 재정의 전 기준선은 `npm test` 864/864 통과입니다. 2026-07-12 현재 Mock 기준선은 전체 993/993이며 `npm run check`가 typecheck·전체 lint·build·dist 검증·test까지 통과했습니다. 이전 로컬 CCX 후보는 `npm run beta:evidence:verified`로 생성·검증했으며 SHA-256은 `dadc2dd405a8facceca761175d63360b140b0e8d30fe783d167d3c8cedc50df8`입니다. 이후 소스가 변경됐으므로 이 SHA는 현재 작업트리의 최종 후보가 아니며, 남은 Host gate 통과 후 최종 체크포인트 직전에 CCX/SHA-256을 다시 생성해야 합니다. 실제 Premiere/UXP smoke에서는 패널 로드, bootstrap, UDT watch/reload 가능 상태, 빈 프로젝트·활성 시퀀스 없음 상태 안내, QC 정상 실패 처리, 테스트 MP4 import, 활성 시퀀스 생성, 테스트 클립 삽입, 기본 QC, 최신 dist 탭 전환과 마커 탭 표시를 확인했습니다. 이후 실제 Host에서 `1080×1920`, 길이 약 `00:04`, 비디오 트랙 3개, 오디오 트랙 4개 QC를 재확인했고, 상태 UI에서 플레이헤드와 In/Out 범위도 읽었습니다. 캡션 트랙 없음 경고는 SRT 삽입 전 정상 경고로 기록합니다. Premiere `sequence.getSelection().getTrackItems()`가 비어도 개별 TrackItem `getIsSelected()`가 true를 반환하는 Host 차이를 발견해 트랙 스캔 fallback을 구현했고, 관련 Premiere mock 테스트와 실제 Host 패널 UI `타임라인 4개 선택 · 00:06` 표시를 확인했습니다. 자동 컷은 SRT fallback으로 dry-run 분석과 추천 마커 추가까지 Host에서 제한 통과했고, 복제 시퀀스 적용 중 발견한 SRT fallback 유지 버그는 코드와 회귀 테스트로 수정했습니다. 이 결과는 4주차 최종 승인 게이트를 대신하지 않으며 TTS live/API 삽입·자동 컷 복제 시퀀스 적용은 최종 승인 전 Host에서 다시 확인합니다. Premiere Pro 26.3 UXP Canvas는 현재 썸네일 PNG/JPG export에 필요한 `drawImage`/text/export 기능이 부족하므로 코드가 PNG/JPG 내보내기 UI를 비활성화하고 이미지 data URL을 내장하는 SVG fallback 저장 버튼을 제공합니다. Safe Zone 오버레이는 Canvas 없이 BMP로 생성되며 실제 Host에서 ShortFlow 가이드 에셋 import와 프로그램 모니터 표시까지 확인했습니다. SRT 파일 import는 실제 파일 선택창으로 자막 편집기에 2개 cue가 로드됨을 확인했고, 음악/SFX는 실제 폴더 동기화와 WAV A1 타임라인 삽입을 확인했습니다. 공개 UXP API에는 caption track item 생성 API가 없어 SRT는 파일 저장·프로젝트 가져오기까지를 보장합니다.
+범위 재정의 전 기준선은 `npm test` 864/864 통과입니다. 2026-07-12 현재 Mock 기준선은 전체 1002/1002이며 `npm run check`가 typecheck·전체 lint·build·dist 검증·test까지 통과했습니다. 이전 로컬 CCX 후보는 `npm run beta:evidence:verified`로 생성·검증했으며 SHA-256은 `dadc2dd405a8facceca761175d63360b140b0e8d30fe783d167d3c8cedc50df8`입니다. 이후 소스가 변경됐으므로 이 SHA는 현재 작업트리의 최종 후보가 아니며, 남은 Host gate 통과 후 최종 체크포인트 직전에 CCX/SHA-256을 다시 생성해야 합니다. 실제 Premiere/UXP smoke에서는 패널 로드, bootstrap, UDT watch/reload 가능 상태, 빈 프로젝트·활성 시퀀스 없음 상태 안내, QC 정상 실패 처리, 테스트 MP4 import, 활성 시퀀스 생성, 테스트 클립 삽입, 기본 QC, 최신 dist 탭 전환과 마커 탭 표시를 확인했습니다. 이후 실제 Host에서 `1080×1920`, 길이 약 `00:04`, 비디오 트랙 3개, 오디오 트랙 4개 QC를 재확인했고, 상태 UI에서 플레이헤드와 In/Out 범위도 읽었습니다. 캡션 트랙 없음 경고는 SRT 삽입 전 정상 경고로 기록합니다. Premiere `sequence.getSelection().getTrackItems()`가 비어도 개별 TrackItem `getIsSelected()`가 true를 반환하는 Host 차이를 발견해 트랙 스캔 fallback을 구현했고, 관련 Premiere mock 테스트와 실제 Host 패널 UI `타임라인 4개 선택 · 00:06` 표시를 확인했습니다. 자동 컷은 SRT fallback으로 dry-run 분석과 추천 마커 추가까지 Host에서 제한 통과했고, 복제 시퀀스 적용 중 발견한 SRT fallback 유지 버그는 코드와 회귀 테스트로 수정했습니다. 이 결과는 4주차 최종 승인 게이트를 대신하지 않으며 TTS live/API 삽입·자동 컷 복제 시퀀스 적용은 최종 승인 전 Host에서 다시 확인합니다. Premiere Pro 26.3 UXP Canvas는 현재 썸네일 PNG/JPG export에 필요한 `drawImage`/text/export 기능이 부족하므로 코드가 PNG/JPG 내보내기 UI를 비활성화하고 이미지 data URL을 내장하는 SVG fallback 저장 버튼을 제공합니다. Safe Zone 오버레이는 Canvas 없이 BMP로 생성되며 실제 Host에서 ShortFlow 가이드 에셋 import와 프로그램 모니터 표시까지 확인했습니다. SRT 파일 import는 실제 파일 선택창으로 자막 편집기에 2개 cue가 로드됨을 확인했고, 음악/SFX는 실제 폴더 동기화와 WAV A1 타임라인 삽입을 확인했습니다. 공개 UXP API에는 caption track item 생성 API가 없어 SRT는 파일 저장·프로젝트 가져오기까지를 보장합니다.
 
 ## 내부 베타 범위 게이트
 
@@ -50,13 +50,14 @@
 - [ ] 새 릴리스 소스에서 Node.js 20.19+ `npm install`이 성공합니다.
 - [x] `npm run typecheck`가 성공합니다(2026-07-11 현재 작업 트리).
 - [x] 1주차 Mock 기준선에서 `npm run lint`가 성공했습니다. 최종 소스에서 다시 실행합니다.
-- [x] `npm test`가 성공하며 테스트 수 감소 사유를 검토했습니다. 현재 테스트 수는 993/993입니다.
+- [x] `npm test`가 성공하며 테스트 수 감소 사유를 검토했습니다. 현재 테스트 수는 1002/1002입니다.
 - [x] 1주차 Mock 기준선에서 `npm run build`와 dist 검증이 성공했습니다. 최종 소스에서 다시 실행합니다.
-- [x] Mock 기준선에서 `npm run check`가 993/993으로 성공했습니다. 최종 소스에서 다시 실행합니다.
-- [x] `npm run beta:evidence`가 최신 Host gate 체크리스트 기준의 증거 템플릿을 생성합니다. 최신 템플릿: `beta-evidence/ShortFlow_Beta_Evidence_20260712T090036Z.md`
+- [x] Mock 기준선에서 `npm run check`가 1002/1002로 성공했습니다. 최종 소스에서 다시 실행합니다.
+- [x] `npm run beta:evidence`가 최신 Host gate 체크리스트 기준의 증거 템플릿을 생성합니다. 최신 템플릿: `beta-evidence/ShortFlow_Beta_Evidence_20260712T111256Z.md`
 - [x] 이전 로컬 후보에서 `npm run beta:evidence:verified`가 `check`, CCX 패키징, 릴리스 검증과 증거 파일 생성을 한 번에 완료했습니다. 이전 검증 증거: `beta-evidence/ShortFlow_Beta_Evidence_20260712T052151Z.md`
 - [ ] 남은 Host gate 통과 후 최종 체크포인트 직전에 `npm run beta:evidence:verified`를 다시 실행합니다.
-- [x] `npm run verify:speech`가 dry-run 증거 파일을 생성합니다. 최신 증거: `speech-evidence/ShortFlow_Speech_Evidence_20260712T090036Z.md`
+- [x] `npm run verify:speech`가 dry-run 증거 파일을 생성합니다. 최신 증거: `speech-evidence/ShortFlow_Speech_Evidence_20260712T111256Z.md`
+- [x] `npm run verify:speech:local`이 로컬 `openai-whisper` base/cpu smoke에서 2개 segment, 9개 word timestamp, 생성 샘플 키워드 4/4를 확인했습니다. 최신 증거: `local-whisper-evidence/20260712T110447Z/ShortFlow_Local_Whisper_Evidence_20260712T110447Z.md`. 이 검증은 OpenAI live API, TTS 생성, Premiere Host 오디오 삽입 gate를 대체하지 않습니다.
 - [ ] API key 사용 승인 시 `npm run verify:speech:live`가 실제 TTS→STT smoke 증거 파일을 생성합니다.
 - [x] `dist/manifest.json`은 manifest v5, `premierepro`, 최소 25.6.0입니다.
 - [x] package/manifest 버전이 일치합니다.

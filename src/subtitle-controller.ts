@@ -24,6 +24,7 @@ import {
   type SubtitleCue,
   type SubtitleDocument,
 } from "./subtitles";
+import { parseWhisperJson } from "./whisper-subtitles";
 
 export const DEFAULT_SUBTITLE_DOM_LIMIT = 300;
 export const MAX_SUBTITLE_DOM_LIMIT = 1_000;
@@ -537,6 +538,21 @@ export class SubtitleController {
     return this.document;
   }
 
+  importWhisperJsonText(json: string): SubtitleDocument {
+    const parsed = parseWhisperJson(json, {
+      projectKey: this.projectKey,
+      maxCueCount: this.maximumCues,
+    });
+    this.commit(parsed, `Whisper JSON 자막 ${parsed.cues.length}개를 불러왔습니다.`);
+    return this.document;
+  }
+
+  importSubtitleText(source: string): SubtitleDocument {
+    return source.trimStart().startsWith("{")
+      ? this.importWhisperJsonText(source)
+      : this.importSrtText(source);
+  }
+
   exportSrtText(): string {
     const srt = buildSrt(this.documentValue);
     if (!srt) throw new Error("내보낼 활성 자막 큐가 없습니다.");
@@ -729,7 +745,7 @@ export class SubtitleController {
     this.bind(this.required("subtitle-undo-btn"), "click", () => this.undo());
     this.bind(this.required("subtitle-redo-btn"), "click", () => this.redo());
     this.bind(this.required("subtitle-reflow-btn"), "click", () => guarded(() => this.reflow(), "자막 줄바꿈 실패"));
-    this.bind(this.required("subtitle-import-btn"), "click", () => guarded(() => this.importFromAdapter(), "SRT 불러오기 실패"));
+    this.bind(this.required("subtitle-import-btn"), "click", () => guarded(() => this.importFromAdapter(), "자막 파일 불러오기 실패"));
     this.bind(this.required("subtitle-export-btn"), "click", () => guarded(() => this.exportToAdapter(), "SRT 내보내기 실패"));
     this.bind(this.required("subtitle-ai-reflow-btn"), "click", () => guarded(() => this.runAi("reflow"), "AI 자막 줄바꿈 실패"));
     this.bind(this.required("subtitle-ai-review-btn"), "click", () => guarded(() => this.runAi("review"), "AI 자막 검토 실패"));
@@ -741,11 +757,11 @@ export class SubtitleController {
   }
 
   private async importFromAdapter(): Promise<void> {
-    if (!this.options.onImportSrt) throw new Error("SRT 파일 선택 기능이 연결되지 않았습니다.");
-    await this.runBusy("SRT 불러오기", async () => {
+    if (!this.options.onImportSrt) throw new Error("자막 파일 선택 기능이 연결되지 않았습니다.");
+    await this.runBusy("자막 불러오기", async () => {
       const source = await this.options.onImportSrt?.();
       if (source === null || source === undefined) return;
-      this.importSrtText(source);
+      this.importSubtitleText(source);
     });
   }
 

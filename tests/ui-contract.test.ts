@@ -633,6 +633,8 @@ describe("public UXP HTML contract", () => {
     assertFeatureIds(document);
     assertLiveRegions(document);
     assertInitialDisabledStates(document);
+    assert.match(document.html, /id="subtitle-import-btn"[^>]*>SRT\/Whisper JSON 불러오기<\/button>/u);
+    assert.match(readFileSync(path.join(ROOT, "index.ts"), "utf8"), /types:\s*\["srt", "json"\]/u);
   });
 
   it("publishes production model and control defaults", () => {

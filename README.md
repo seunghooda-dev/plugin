@@ -7,7 +7,7 @@ ShortFlow Studio는 Adobe Premiere Pro용 UXP 숏폼 제작 패널입니다. 현
 현재는 Mock Host와 실제 Premiere 개발 로드 확인을 분리해 검증하고 있습니다. Premiere/UXP 기본 로드, 패널 표시, 테스트 MP4 프로젝트 import, 활성 시퀀스 생성, 기본 QC, Safe Zone BMP overlay, SRT 파일 import, 음악/SFX 폴더 동기화와 WAV A1 삽입, 타임라인 TrackItem 선택 감지, 자동 컷 dry-run과 추천 마커 추가는 실제 Host smoke로 제한 통과했습니다. TTS live/API 삽입과 자동 컷 복제 시퀀스 적용은 내부 베타 최종 승인 전 별도 Host gate로 다시 수행합니다.
 
 - 범위 재정의 직전 Node 기반 정적/mock 기준선: **864개 통과**
-- 현재 Mock 기준선: **전체 993/993 통과**
+- 현재 Mock 기준선: **전체 1002/1002 통과**
 - 현재 TypeScript, 전체 ESLint, Vite build, `dist` 구조 검증 통과
 - 이전 로컬 CCX 후보와 SHA-256은 `npm run beta:evidence:verified`로 생성·검증했습니다. 이후 소스가 변경됐으므로 최종 내부 베타 후보는 남은 Host gate 통과 후 다시 생성합니다.
 - Premiere Pro/UXP Developer Tool 실제 실행: **기본 로드, UDT watch/reload, 패널 표시, 테스트 MP4 import, 활성 시퀀스 기본 QC, Safe Zone overlay, SRT import, 음악/SFX WAV 삽입, TrackItem 선택 감지 확인**
@@ -116,6 +116,7 @@ npm run check
 - `npm run beta:evidence:verified`: `check`, CCX 패키징, 릴리스 검증을 모두 통과한 뒤 검증 표시된 내부 베타 증거 파일 생성
 - `npm run verify:speech`: OpenAI 키 없이 TTS/STT smoke 검증 계획과 증거 템플릿 생성
 - `npm run verify:speech:live`: `OPENAI_API_KEY` 환경변수로 실제 OpenAI TTS→STT smoke 검증 실행
+- `npm run verify:speech:local`: 로컬 `openai-whisper` 패키지로 한국어 테스트 WAV를 전사하고 TXT/SRT/단어 타임스탬프 JSON 검증
 - `npm run check`: typecheck, lint, test, build 전체 게이트
 - `npm run package:ccx`: CCX 후보와 SHA-256 생성 후 릴리스 산출물 검증
 - `npm run package:ccx:force`: 같은 버전의 서로 다른 기존 CCX를 명시적으로 교체 후 릴리스 산출물 검증
@@ -152,6 +153,20 @@ Remove-Item Env:\OPENAI_API_KEY
 ```
 
 `speech-evidence/`는 Git에서 제외됩니다. 이 smoke 검증은 OpenAI TTS/STT 요청 경로 확인이며, Premiere 오디오 트랙 삽입이나 UXP 파일 권한 검증을 대체하지 않습니다.
+
+### 로컬 Whisper smoke 검증
+
+로컬 검증은 API key와 원격 STT 호출 없이 자막·자동 편집 입력을 확인하기 위한 개발 도구입니다. Python 3.11과 `ffmpeg`가 PATH에 있어야 합니다. 가상환경은 `%LOCALAPPDATA%\ShortFlowStudio\whisper\.venv`에 두고, 검증 기준인 `openai-whisper 20250625`를 설치합니다. 기본 `base` 모델은 첫 실행 때 `%LOCALAPPDATA%\ShortFlowStudio\whisper\models`에 내려받습니다.
+
+```powershell
+$whisperRoot = Join-Path $env:LOCALAPPDATA "ShortFlowStudio\whisper"
+ffmpeg -version
+py -3.11 -m venv (Join-Path $whisperRoot ".venv")
+& (Join-Path $whisperRoot ".venv\Scripts\python.exe") -m pip install "openai-whisper==20250625"
+npm run verify:speech:local
+```
+
+기본 실행은 Windows의 한국어 음성으로 짧은 WAV를 만든 뒤 CPU에서 전사합니다. 더 높은 정확도를 비교할 때는 스크립트를 직접 실행해 `-Model small`을 지정할 수 있습니다. 자막 편집기의 `SRT/Whisper JSON 불러오기` 버튼은 UTF-8 `.srt` 또는 단어 타임스탬프가 있는 공식 Whisper `.json` 출력을 자동 판별하며, JSON 단어 시간을 비례 보간하지 않고 그대로 보존합니다. 결과와 증거는 Git에서 제외되는 `local-whisper-evidence/`에 저장됩니다. 이 경로는 제품 UXP 패널의 provider나 배포물에 포함되지 않으며, OpenAI live API smoke 또는 Premiere Host 오디오 삽입 gate 통과를 의미하지 않습니다.
 
 ## CCX 후보 패키징과 설치
 
