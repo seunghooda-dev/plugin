@@ -625,17 +625,20 @@ describe("AssetLibrary open folder", () => {
   it("uses shell.openPath when available", async () => {
     const root = mockFolder("Assets", "C:/Assets");
     const adapter = createAdapter(root);
-    const opened: string[] = [];
+    const opened: Array<{ path: string; text: string | undefined }> = [];
     adapter.shell = {
-      openPath: async (nativePath: string) => {
-        opened.push(nativePath);
+      openPath: async (nativePath: string, developerText?: string) => {
+        opened.push({ path: nativePath, text: developerText });
         return "";
       },
     };
     const library = new AssetLibrary(adapter);
     await library.selectRoot();
     await library.openRootFolder();
-    assert.deepEqual(opened, ["C:/Assets"]);
+    assert.deepEqual(opened, [{
+      path: "C:/Assets",
+      text: "ShortFlow Studio가 선택한 음악·효과음 폴더를 시스템 파일 탐색기에서 엽니다.",
+    }]);
   });
 
   it("opens a selected Music or SFX category folder by relative path", async () => {

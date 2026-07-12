@@ -510,3 +510,4 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 - 오디오 2개 동기화 후 `Premiere 소스 모니터 미리듣기: shortflow_smoke.wav · 재생 시작` 로그를 확인했습니다.
 - 드래그 순서 저장과 원복을 Host DOM에서 확인했고 localStorage 원복도 확인했습니다.
 - Premiere UXP에서 `replaceChildren()` 재렌더가 stale 카드를 남기는 현상을 명시적 `removeChild` 반복으로 교체했으며, 재동기화 후 카드 수가 실제 오디오 수와 같은 2개임을 확인했습니다.
+- 선택 폴더 열기는 `shell.openPath(path, developerText)` 계약까지 적용했지만, 미디어 확장자만 허용하는 `launchProcess` 보안 allowlist에서 확장자 없는 디렉터리가 차단됩니다. 임의 실행 범위를 넓히는 wildcard는 사용하지 않으며 대체 UX가 필요합니다.

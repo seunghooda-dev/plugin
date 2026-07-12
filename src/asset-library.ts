@@ -19,7 +19,7 @@ export interface KeyValueStorageAdapter {
 }
 
 export interface UxpShellAdapter {
-  openPath?(nativePath: string): MaybePromise<any>;
+  openPath?(nativePath: string, developerText?: string): MaybePromise<any>;
 }
 
 export interface AssetLibraryAdapter {
@@ -1202,7 +1202,11 @@ export class AssetLibrary {
       );
     }
     try {
-      const result = await openPath.call(this.adapter.shell, current.nativePath);
+      const result = await openPath.call(
+        this.adapter.shell,
+        current.nativePath,
+        "ShortFlow Studio가 선택한 오디오를 시스템 앱에서 미리듣기 위해 엽니다.",
+      );
       if (typeof result === "string" && result.trim()) throw new Error(result);
     } catch (error) {
       throw filesystemError(error, "시스템 오디오 앱에서 자산을 열지 못했습니다.");
@@ -1264,7 +1268,11 @@ export class AssetLibrary {
     }
 
     try {
-      const result = await openPath.call(this.adapter.shell, nativePath);
+      const result = await openPath.call(
+        this.adapter.shell,
+        nativePath,
+        "ShortFlow Studio가 선택한 음악·효과음 폴더를 시스템 파일 탐색기에서 엽니다.",
+      );
       if (typeof result === "string" && result.trim()) {
         throw new Error(result);
       }
