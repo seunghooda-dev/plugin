@@ -135,8 +135,7 @@ describe("queue basics and concurrency", () => {
   it("drains without a global queueMicrotask (Premiere UXP runtime)", async () => {
     // Premiere 26.3 UXP has no queueMicrotask global; the queue must still drain.
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, "queueMicrotask");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    delete (globalThis as any).queueMicrotask;
+    delete (globalThis as { queueMicrotask?: typeof queueMicrotask }).queueMicrotask;
     try {
       const queue = new JobQueue(successExecutor("ok"));
       const job = queue.enqueue(request(1));
