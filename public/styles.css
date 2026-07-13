@@ -897,8 +897,11 @@ textarea {
   padding: 16px;
 }
 
+/* Premiere 26.3 UXP가 display:grid 컨테이너를 0폭으로 붕괴시켜 내보내기 탭 버튼이 안 보이던
+   Host 버그(§25-g, 전체 UX 감사로 발견)를 flex로 해결한다. */
 .file-picker-stack {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -1004,12 +1007,17 @@ textarea {
 }
 
 .export-action-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 9px;
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--line-subtle);
+}
+
+.export-action-grid > * {
+  flex: 1 1 calc(50% - 5px);
+  min-width: 120px;
 }
 
 .log-card {
@@ -1073,7 +1081,8 @@ textarea {
 }
 
 .recovery-list {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   max-height: 360px;
   margin-top: 12px;
   overflow-y: auto;
@@ -2148,11 +2157,18 @@ textarea {
   opacity: 0.58;
 }
 
+/* UXP가 display:grid를 0폭으로 붕괴시켜 좁은 패널에서 큐 액션 버튼이 안 보이던 문제(§25-g)를
+   flex-wrap으로 해결. time이 남는 폭을 차지하고, 액션은 자리가 없으면 다음 줄로 흐른다. */
 .subtitle-cue-header {
-  display: grid;
-  grid-template-columns: auto minmax(150px, 1fr) auto auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.subtitle-cue-header > .subtitle-cue-time {
+  flex: 1 1 120px;
+  min-width: 0;
 }
 
 .subtitle-cue-number {

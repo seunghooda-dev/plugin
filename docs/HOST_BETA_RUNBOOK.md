@@ -589,6 +589,16 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **부수 통과**: B-4(25-6, 편집 시 분석 결과 무효화)는 API와 무관하게 라이브 통과.
 - **후속 개선(2026-07-13)**: quota 429가 2회 재시도되며 매 요청 ~40초씩 지연되는 것을 관찰해, `insufficient_quota`를 rate limit과 분리해 **재시도 없이 즉시 실패**하도록 수정(`src/openai-text.ts` `isRetryableHttpStatus`, `src/job-queue.ts` `defaultTransientError`가 명시적 `retryable:false` 존중). Mock 테스트 3건 추가. **quota 초과 계정을 픽스처로 라이브 재검증**: 동일 클릭이 수정 전 40초·fetch 3회 → 수정 후 **1.0초·fetch 1회**로 즉시 실패. `rate_limit_exceeded` 429는 계속 재시도 유지.
 
+### 25-g. 전체 UX/UI 컨트롤 감사 — 버튼 grid 붕괴 4곳 발견·수정(2026-07-13)
+
+사용자 요청으로 12개 탭 전체 인터랙티브 컨트롤(212개)을 CDP로 감사(존재·라벨·비활성 상태·렌더 크기·중복 id·숨김). 이전 입력 스윕(§25-d)은 input만 봤으나 이번엔 **버튼**까지 포함해, 좁은 패널(실측 320px 도크)에서 `display:grid` 컨테이너가 0폭으로 붕괴해 **주요 버튼이 안 보이던 4곳**을 새로 발견했다.
+
+- **export 탭**: `.file-picker-stack`·`.export-action-grid` grid 붕괴 → 프리셋 선택·출력 폴더·영상 내보내기·커버 저장 버튼 4개가 0×0(내보내기 탭 사실상 사용 불가). flex로 전환.
+- **복구(로그 탭)**: `.recovery-list` grid 붕괴 → "복제본 제거" 버튼 0×0. flex column으로 전환.
+- **자막 편집기(voice 탭)**: `.subtitle-cue-header` grid 붕괴 → 큐 액션 버튼(합치기/나누기/켜짐) 0×0. flex-wrap으로 전환(time이 남는 폭 차지, 액션은 줄바꿈).
+- 재감사: 12탭 전부 클린 — 0×0·무라벨·중복 id 전부 0, 표시 컨트롤 209개, 콘솔 오류 0. `npm run check` 1515/1515.
+- 숨김 3개는 썸네일 AI 카드(`.thumb-ai-card { display:none }`, 내부 베타 의도적 비활성)로 정상.
+
 ### 25-f. 자막 AI 분석 실제 OpenAI 200 응답 검증 — Host 통과(2026-07-13)
 
 앞서(§25-c) OpenAI 계정 429 quota로 응답을 못 봤으나, quota 해소 후 실제 200 응답으로 분석 3종을 재검증했다. 처음엔 사소한 2큐 테스트 문구라 하이라이트가 비었고(정상 — 강조할 내용 없음), 응답 본문을 캡처하려던 fetch 스파이가 UXP 응답 스트림을 잠가("stream is locked") "응답이 비어 있음" 오탐을 냈다. **스파이 없이 내용 있는 4큐 인터뷰 SRT**로 재실행한 결과 전 경로가 정상 동작했다.
