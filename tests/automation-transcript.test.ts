@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { planSilenceCuts, recommendPunchCues } from "../src/automation";
+import { normalizeSpeechSegments, planSilenceCuts, recommendPunchCues } from "../src/automation";
 import {
   resolveAutomationTranscript,
   speechControllerTranscriptToAutomationTranscript,
@@ -82,6 +82,68 @@ describe("subtitleDocumentToAutomationTranscript", () => {
     });
     assert.equal(subtitleDocumentToAutomationTranscript(document), null);
   });
+
+  it("falls back to raw cue text when every word is hidden or blank", () => {
+    const document: SubtitleDocument = {
+      version: 1,
+      projectKey: "fallback",
+      cues: [{
+        cueId: "cue-1",
+        start: 1,
+        end: 2,
+        text: "폴백 텍스트",
+        enabled: true,
+        hidden: false,
+        words: [
+          { wordId: "word-1", s: 1, e: 1.5, t: "숨김", hidden: true },
+          { wordId: "word-2", s: 1.5, e: 2, t: "   ", hidden: false },
+        ],
+      }],
+    };
+    const transcript = subtitleDocumentToAutomationTranscript(document);
+    assert.deepEqual(transcript?.segments, [{ start: 1, end: 2, text: "폴백 텍스트" }]);
+  });
+
+  it("joins only visible words and trims their spacing", () => {
+    const document: SubtitleDocument = {
+      version: 1,
+      projectKey: "visible-words",
+      cues: [{
+        cueId: "cue-1",
+        start: 0,
+        end: 1,
+        text: "원본",
+        enabled: true,
+        hidden: false,
+        words: [
+          { wordId: "word-1", s: 0, e: 0.4, t: "  보이는  ", hidden: false },
+          { wordId: "word-2", s: 0.4, e: 0.7, t: "숨김", hidden: true },
+          { wordId: "word-3", s: 0.7, e: 1, t: "단어", hidden: false },
+        ],
+      }],
+    };
+    const transcript = subtitleDocumentToAutomationTranscript(document);
+    assert.deepEqual(transcript?.segments, [{ start: 0, end: 1, text: "보이는 단어" }]);
+  });
+
+  it("drops zero-length, reversed, and whitespace-only cues", () => {
+    const document: SubtitleDocument = {
+      version: 1,
+      projectKey: "degenerate",
+      cues: [
+        { cueId: "cue-1", start: 2, end: 2, text: "길이 없음", enabled: true, hidden: false, words: [] },
+        { cueId: "cue-2", start: 3, end: 2.5, text: "역행", enabled: true, hidden: false, words: [] },
+        { cueId: "cue-3", start: 4, end: 5, text: "   ", enabled: true, hidden: false, words: [] },
+      ],
+    };
+    assert.equal(subtitleDocumentToAutomationTranscript(document), null);
+  });
+
+  it("produces segments that survive automation normalization unchanged", () => {
+    const transcript = subtitleDocumentToAutomationTranscript(documentFixture());
+    assert.ok(transcript);
+    assert.deepEqual(normalizeSpeechSegments(transcript.segments, transcript.duration), transcript.segments);
+  });
 });
 
 describe("resolveAutomationTranscript", () => {
@@ -112,6 +174,12 @@ describe("resolveAutomationTranscript", () => {
     const transcript = resolveAutomationTranscript(null, documentFixture());
     assert.equal(transcript?.name, "자막: project-A");
     assert.equal(transcript?.segments.length, 2);
+  });
+
+  it("returns null when neither source can produce a transcript", () => {
+    assert.equal(resolveAutomationTranscript(null, null), null);
+    assert.equal(resolveAutomationTranscript(undefined, undefined), null);
+    assert.equal(resolveAutomationTranscript(null, { version: 1, projectKey: "empty", cues: [] }), null);
   });
 });
 

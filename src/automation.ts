@@ -365,7 +365,8 @@ function cueScore(segment: TimedSpeechSegment, keywords: readonly string[]): { s
   let score = matched ? 5 : 0;
   if (/[!?！？]/u.test(text)) score += 3;
   if (/["“”'‘’][^"“”'‘’]+["“”'‘’]/u.test(text)) score += 1;
-  if (/\b(?:중요|핵심|반드시|절대|비밀|결론|방법|이유|무료|주의)\b/iu.test(text)) score += 2;
+  // \b는 ASCII 단어 경계라 한글 옆에서는 절대 일치하지 않으므로 부분 문자열로 검사합니다.
+  if (/(?:중요|핵심|반드시|절대|비밀|결론|방법|이유|무료|주의)/u.test(text)) score += 2;
   if (text.length >= 8 && text.length <= 45) score += 1;
   return { score, reason: matched ? `키워드: ${matched}` : score >= 3 ? "강조 문장" : "리듬 변화" };
 }
