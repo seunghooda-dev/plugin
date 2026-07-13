@@ -17,6 +17,8 @@ import {
   type AssetItem,
 } from "./asset-library";
 import type { AssetRightsRegistry } from "./asset-rights";
+import { detectBeats } from "./audio-beats";
+import { parseWavPcm } from "./wav-pcm";
 import { element, numberOf, optionalElement, renderEmptyState, setText, toast, valueOf } from "./ui";
 
 const ASSET_ORDER_STORAGE_KEY = "shortflow.assetOrder.v1";
@@ -290,11 +292,27 @@ export function createAssetBrowserPanel(options: AssetBrowserPanelOptions): {
         event.stopPropagation();
         void previewAsset(asset).catch((error) => options.onError(error, "자산 미리듣기 실패"));
       });
+      const analyze = document.createElement("span");
+      analyze.className = "asset-preview-action";
+      analyze.textContent = "비트 분석";
+      analyze.setAttribute("role", "button");
+      analyze.setAttribute("tabindex", "0");
+      analyze.setAttribute("aria-label", `${asset.name} 비트 분석`);
+      analyze.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void analyzeBeats(asset).catch((error) => options.onError(error, "비트 분석 실패"));
+      });
+      analyze.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        void analyzeBeats(asset).catch((error) => options.onError(error, "비트 분석 실패"));
+      });
       const hint = document.createElement("span");
       hint.className = "drag-hint";
       hint.textContent = "↕";
       hint.title = "드래그해서 목록 순서 이동";
-      actions.append(preview, hint);
+      actions.append(preview, analyze, hint);
       card.append(icon, copy, actions);
       card.addEventListener("click", () => {
         selectedAssetId = asset.id;
@@ -400,6 +418,39 @@ export function createAssetBrowserPanel(options: AssetBrowserPanelOptions): {
     render();
     options.renderRights(asset);
     options.onActivity("success", `미리듣기: ${asset.name}`);
+  }
+
+  async function analyzeBeats(asset: AssetItem): Promise<void> {
+    // UXP에 Web Audio가 없어 압축 포맷은 디코딩할 수 없다 — WAV만 헤더에서 직접 파싱한다.
+    if (asset.extension.toLocaleLowerCase("en-US") !== ".wav") {
+      options.onActivity(
+        "warning",
+        `${asset.name}: 비트 분석은 WAV만 지원합니다(현재 환경에 오디오 디코더가 없어 WAV만 읽을 수 있습니다).`,
+      );
+      toast("비트 분석은 WAV 파일만 지원합니다.", "warning");
+      return;
+    }
+    const result = await options.runBusy(`${asset.name} 비트를 분석하고 있습니다…`, async () => {
+      const bytes = await assetBytes(asset);
+      const pcm = parseWavPcm(bytes);
+      return detectBeats(pcm.samples, pcm.sampleRate);
+    });
+    selectedAssetId = asset.id;
+    render();
+    options.renderRights(asset);
+    if (result.bpm > 0) {
+      options.onActivity(
+        "success",
+        `비트 분석: ${asset.name} · ${result.bpm} BPM · 비트 ${result.beatTimes.length}개`,
+      );
+      toast(`${asset.name}: ${result.bpm} BPM (비트 ${result.beatTimes.length}개)`, "success");
+    } else {
+      options.onActivity(
+        "info",
+        `비트 분석: ${asset.name} · 규칙적 템포를 찾지 못했습니다(비트 ${result.beatTimes.length}개).`,
+      );
+      toast(`${asset.name}: 템포 불명확`, "info");
+    }
   }
 
   async function insertAsset(asset: AssetItem): Promise<void> {

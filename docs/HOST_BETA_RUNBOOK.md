@@ -664,3 +664,14 @@ CDP 검증(`cdt-thumb-ai-1b.mjs`, 새 dist reload):
 - 생성 결과가 png/jpeg/webp가 아니거나 `assertPngResponse` 실패면 즉시 차단
 - 생성 바이트를 파일로 쓰지 않고 raw 바이트만으로 레퍼런스에 넣으려 하면 즉시 차단(레퍼런스는 token+nativePath 필수)
 - 출처가 "AI 생성"으로 기록되지 않으면 즉시 차단(권리 추적 무결성)
+
+### 25-j. BGM 비트 분석(Phase 5c) — Host 통과 + Web Audio 부재 발견(2026-07-13)
+
+음악/SFX 자산 카드에 "비트 분석" 액션을 추가했다(선택 WAV → BPM·비트 수 표시).
+
+**중요 Host 능력 발견(`cdt-audio-probe.mjs`)**: **UXP Premiere에 Web Audio가 전혀 없다** — `AudioContext`/`OfflineAudioContext`/`webkitAudioContext` 모두 false, `decodeAudioData` n/a, `FileReader`도 없음(Canvas와 동일한 벽). 오디오 파일을 PCM으로 디코딩할 네이티브 경로가 없어, **WAV은 RIFF 헤더에서 직접 파싱**(`src/wav-pcm.ts`)해 우회한다. MP3/AAC 등 압축 포맷은 디코더가 없어 미지원(카드에서 "WAV만 지원" 안내).
+
+**CDP 검증(`cdt-beat-analyze2.mjs`, `cdt-beat120.mjs`)**: 자산 루트 동기화 → 오디오 카드마다 "비트 분석" 액션 렌더 → 클릭 시 실제 분석. `shortflow_smoke.wav` → 156.2 BPM, **합성 120 BPM WAV(`host-smoke-assets/Music/beat-test-120bpm.wav`) → 120.2 BPM(정확)**, 콘솔 오류 0. 즉 WAV 읽기(`readAssetPreviewBytes`) → `parseWavPcm` → `detectBeats` 전 경로 Host 통과.
+
+- 재사용 스모크 자산: `host-smoke-assets/Music/beat-test-120bpm.wav`(gitignore 폴더, 합성 120 BPM 클릭). 비트 검출 회귀 확인용.
+- 남은 5d(자동 덕킹): 발화 구간 볼륨 엔벨로프 + 오디오 클립 Volume>Level 키프레임 적용. **키프레임 쓰기 가용성 미탐침** — 활성 시퀀스+오디오 클립 필요. 없으면(Canvas 패턴) 덕킹 계획을 마커/리포트로 출력.
