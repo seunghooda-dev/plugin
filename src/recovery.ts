@@ -2,6 +2,21 @@ export const RECOVERY_SCHEMA_VERSION = 1 as const;
 export const RECOVERY_STORAGE_KEY = "shortflow.recoveryJournal.v1";
 export const MAX_OPERATION_JOURNAL = 50;
 
+export const RECOVERY_CONFIRM_RESULT = "confirm" as const;
+
+export async function confirmDestructiveRecovery(
+  showModal: unknown,
+  options: unknown,
+): Promise<boolean> {
+  if (typeof showModal !== "function") return false;
+  try {
+    const result = await (showModal as (value: unknown) => unknown)(options);
+    return result === RECOVERY_CONFIRM_RESULT;
+  } catch {
+    return false;
+  }
+}
+
 export type OperationStatus =
   | "running"
   | "committed"

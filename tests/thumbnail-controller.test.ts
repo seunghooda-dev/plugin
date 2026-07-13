@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY,
   THUMBNAIL_STORAGE_KEY,
   ThumbnailController,
   type ThumbnailControllerAdapter,
@@ -343,6 +344,15 @@ class MemoryStorage implements ThumbnailStorage {
   }
 }
 
+class FailingRemoveStorage extends MemoryStorage {
+  removeCalls = 0;
+
+  removeItem(): void {
+    this.removeCalls += 1;
+    throw new Error("remove denied");
+  }
+}
+
 interface WrittenFile {
   name: string;
   bytes: Uint8Array;
@@ -350,9 +360,16 @@ interface WrittenFile {
 }
 
 class OutputFolder implements ThumbnailFolderEntry {
+  readonly name = "exports";
+  readonly isFolder = true;
   readonly files: WrittenFile[] = [];
+  createError: Error | null = null;
+  writeError: Error | null = null;
 
   async createFile(name: string, options?: { overwrite?: boolean }): Promise<ThumbnailFileEntry> {
+    const createError = this.createError;
+    this.createError = null;
+    if (createError) throw createError;
     if (options?.overwrite === false && this.files.some((file) => file.name === name)) {
       throw new Error(`duplicate output: ${name}`);
     }
@@ -360,6 +377,9 @@ class OutputFolder implements ThumbnailFolderEntry {
       name,
       isFile: true,
       write: (data, writeOptions) => {
+        const writeError = this.writeError;
+        this.writeError = null;
+        if (writeError) throw writeError;
         this.files.push({
           name,
           bytes: new Uint8Array(data.slice(0)),
@@ -372,7 +392,7 @@ class OutputFolder implements ThumbnailFolderEntry {
 
 class FakeLocalFileSystem implements ThumbnailLocalFileSystem {
   selection: ThumbnailFileEntry | ThumbnailFileEntry[] | null = null;
-  readonly entries = new Map<string, ThumbnailFileEntry>();
+  readonly entries = new Map<string, ThumbnailFileEntry | ThumbnailFolderEntry>();
   readonly output = new OutputFolder();
   folderGate: Deferred<ThumbnailFolderEntry | null> | null = null;
   getFolderCalls = 0;
@@ -381,13 +401,13 @@ class FakeLocalFileSystem implements ThumbnailLocalFileSystem {
     return this.selection;
   }
 
-  async createPersistentToken(entry: ThumbnailFileEntry): Promise<string> {
+  async createPersistentToken(entry: ThumbnailFileEntry | ThumbnailFolderEntry): Promise<string> {
     const token = `token:${String(entry.name)}`;
     this.entries.set(token, entry);
     return token;
   }
 
-  async getEntryForPersistentToken(token: string): Promise<ThumbnailFileEntry> {
+  async getEntryForPersistentToken(token: string): Promise<ThumbnailFileEntry | ThumbnailFolderEntry> {
     const entry = this.entries.get(token);
     if (!entry) throw new Error(`missing token: ${token}`);
     return entry;
@@ -545,6 +565,86 @@ describe("ThumbnailController DOM/UXP integration harness", () => {
       assert.match(svg, /^<\?xml[^]*<svg/u);
       assert.match(svg, /data:image\/png;base64,/u);
       assert.match(svg, /ShortFlow Studio thumbnail fallback/u);
+      await controller.dispose();
+    });
+  });
+
+  it("saves a 1280x720 SVG with no layers and reuses the persistent output folder", async () => {
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new MemoryStorage();
+    const firstDom = controllerDom(false).document;
+    await withDocument(firstDom, async () => {
+      const controller = createController(firstDom, fileSystem, storage);
+      await controller.initialize();
+      firstDom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      const svg = new TextDecoder().decode(fileSystem.output.files[0]!.bytes);
+      assert.match(svg, /<svg[^>]+width="1280" height="720"[^>]+viewBox="0 0 1280 720"/u);
+      assert.match(svg, /<rect width="100%" height="100%" fill="#111111"\/>/u);
+      assert.doesNotMatch(svg, /<image\b/iu);
+      assert.equal(storage.values.get(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY), "token:exports");
+      assert.equal(fileSystem.getFolderCalls, 1);
+      await controller.dispose();
+    });
+
+    fileSystem.output.files.splice(0);
+    const restoredDom = controllerDom(false).document;
+    await withDocument(restoredDom, async () => {
+      const controller = createController(restoredDom, fileSystem, storage);
+      await controller.initialize();
+      restoredDom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      assert.equal(fileSystem.getFolderCalls, 1, "저장된 폴더 토큰은 picker를 다시 열지 않아야 합니다.");
+      await controller.dispose();
+    });
+  });
+
+  it("clears a restored output token after createFile fails and opens the picker only on the next export", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const staleFolder = new OutputFolder();
+    staleFolder.createError = new Error("create denied");
+    fileSystem.entries.set("token:stale", staleFolder);
+    const storage = new MemoryStorage();
+    storage.values.set(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY, "token:stale");
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /create denied/u);
+      assert.equal(storage.values.get(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY), "");
+      assert.equal(fileSystem.getFolderCalls, 0, "실패한 호출에서 picker를 다시 열면 안 됩니다.");
+
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      assert.equal(fileSystem.getFolderCalls, 1);
+      await controller.dispose();
+    });
+  });
+
+  it("falls back to an empty token after removeItem and write fail, then reopens the picker", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.output.writeError = new Error("write denied");
+    const storage = new FailingRemoveStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /write denied/u);
+      assert.equal(storage.removeCalls, 1);
+      assert.equal(storage.values.get(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY), "");
+      assert.equal(fileSystem.getFolderCalls, 1, "실패한 호출에서 picker를 다시 열면 안 됩니다.");
+
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      assert.equal(fileSystem.getFolderCalls, 2);
       await controller.dispose();
     });
   });

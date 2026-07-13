@@ -13,6 +13,7 @@ import {
   readAssetPreviewBytes,
   reorderAssetIds,
   resolveAudioAssetDragTarget,
+  type AssetFolderOpenResult,
   type AssetItem,
 } from "./src/asset-library";
 import {
@@ -82,13 +83,14 @@ import {
   type AssetRightsInput,
   type AssetRightsRecord,
 } from "./src/asset-rights";
-import { SubtitleController, type SubtitleAiRequest } from "./src/subtitle-controller";
+import { SubtitleController, type SubtitleAiRequest, type SubtitleAnalysisRequest } from "./src/subtitle-controller";
 import { resolveAutomationTranscript, subtitleDocumentToAutomationTranscript } from "./src/automation-transcript";
 import { createSubtitleDocument } from "./src/subtitles";
 import { OpenAITextClient, chunkSubtitleCues } from "./src/openai-text";
 import { buildReferencePrompt, type ReferenceItem } from "./src/references";
-import { RecoveryManager, type OperationJournalEntry } from "./src/recovery";
+import { RecoveryManager, confirmDestructiveRecovery, type OperationJournalEntry } from "./src/recovery";
 import {
+  assertDiagnosticRedactionSelfCheck,
   buildDiagnosticsReport,
   diagnosticBundleToJSON,
   readRuntimeMember as moduleMember,
@@ -592,6 +594,42 @@ async function runSubtitleAI(request: SubtitleAiRequest): Promise<unknown> {
     : task();
 }
 
+async function runSubtitleAnalysis(request: SubtitleAnalysisRequest): Promise<unknown> {
+  ensureAiConsent("AI 자막 분석");
+  const batches = chunkSubtitleCues(request.document.cues).length;
+  const descriptor = {
+    action: request.action,
+    documentHash: deterministicHash(request.document),
+    cueCount: request.document.cues.length,
+    batchCount: batches,
+    model: "gpt-5.4-mini",
+  };
+  const task = () => new OpenAITextClient({
+    endpoint: settings.aiEndpoint,
+    onProgress: (completed, total) => activity.add("info", `AI 자막 분석 ${completed}/${total} 묶음 처리`),
+  }).analyzeSubtitles(request);
+  return aiQueueController
+    ? aiQueueController.run("text", descriptor, task, {
+      estimateUnits: Math.max(1, batches),
+      cacheTtlMs: 0,
+      confirmRequired: batches > 10,
+    })
+    : task();
+}
+
+async function runPromptEnrich(prompt: string): Promise<string> {
+  ensureAiConsent("AI 프롬프트 보강");
+  const descriptor = {
+    action: "prompt-enrich",
+    promptHash: deterministicHash(prompt),
+    model: "gpt-5.4-mini",
+  };
+  const task = () => new OpenAITextClient({ endpoint: settings.aiEndpoint }).enrichPrompt(prompt);
+  return aiQueueController
+    ? aiQueueController.run("text", descriptor, task, { estimateUnits: 1, cacheTtlMs: 0 })
+    : task();
+}
+
 function startSubtitlePlayheadTracking(): void {
   if (subtitlePlayheadTimer !== null) return;
   subtitlePlayheadTimer = setInterval(() => {
@@ -618,6 +656,45 @@ function recoveryStatusLabel(status: OperationJournalEntry["status"]): string {
     "rollback-failed": "복구 실패",
     interrupted: "중단됨",
   }[status];
+}
+
+interface UxpRecoveryDialogElement extends HTMLDialogElement {
+  uxpShowModal?: (options: {
+    title: string;
+    resize: "none";
+    size: { width: number; height: number };
+  }) => Promise<unknown>;
+}
+
+let recoveryRollbackPending = false;
+
+async function requestRecoveryRollbackConfirmation(entry: OperationJournalEntry): Promise<boolean> {
+  const dialog = optionalElement<UxpRecoveryDialogElement>("recovery-confirm-dialog");
+  const label = optionalElement<HTMLElement>("recovery-confirm-label");
+  const approve = optionalElement<HTMLButtonElement>("recovery-confirm-approve-btn");
+  const cancel = optionalElement<HTMLButtonElement>("recovery-confirm-cancel-btn");
+  if (!dialog || !label || !approve || !cancel || typeof dialog.uxpShowModal !== "function") {
+    return false;
+  }
+
+  label.textContent = entry.label;
+  const approveHandler = (): void => dialog.close("confirm");
+  const cancelHandler = (): void => dialog.close("cancel");
+  approve.addEventListener("click", approveHandler);
+  cancel.addEventListener("click", cancelHandler);
+  try {
+    return await confirmDestructiveRecovery(
+      dialog.uxpShowModal.bind(dialog),
+      {
+        title: "ShortFlow Studio · 복제 시퀀스 제거",
+        resize: "none",
+        size: { width: 420, height: 300 },
+      },
+    );
+  } finally {
+    approve.removeEventListener("click", approveHandler);
+    cancel.removeEventListener("click", cancelHandler);
+  }
 }
 
 function renderRecoveryJournal(): void {
@@ -661,9 +738,13 @@ function renderRecoveryJournal(): void {
 
 async function rollbackRecoveryEntry(entry: OperationJournalEntry): Promise<void> {
   if (!recoveryManager) return;
-  const confirmFn = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm;
-  if (confirmFn && !confirmFn(`원본은 유지하고 복제 시퀀스만 제거합니다. 계속하시겠습니까?\n${entry.label}`)) return;
+  if (recoveryRollbackPending) return;
+  recoveryRollbackPending = true;
   try {
+    if (!await requestRecoveryRollbackConfirmation(entry)) {
+      activity.add("warning", "명시적 확인을 받지 못해 복제 시퀀스 제거를 취소했습니다.");
+      return;
+    }
     await recoveryManager.rollback(entry.operationId, () => removeVerifiedClonedSequence(
       entry.clonePolicy.sourceId,
       entry.clonePolicy.cloneId,
@@ -672,8 +753,10 @@ async function rollbackRecoveryEntry(entry: OperationJournalEntry): Promise<void
     toast("원본을 유지하고 복제 시퀀스를 제거했습니다.", "success");
   } catch (error) {
     reportError(error, "복제 시퀀스 복구 실패");
+  } finally {
+    recoveryRollbackPending = false;
+    renderRecoveryJournal();
   }
-  renderRecoveryJournal();
 }
 
 function hostModule(moduleName: string): Record<string, unknown> | null {
@@ -838,6 +921,7 @@ async function handleRunDiagnostics(): Promise<void> {
 async function handleExportDiagnostics(): Promise<void> {
   const report = diagnosticsReport;
   if (!report) throw new Error("먼저 시스템 진단을 실행해 주세요.");
+  assertDiagnosticRedactionSelfCheck();
   const uxpRoot = hostModule("uxp");
   const fileSystem = moduleMember(uxpRoot, "storage", "localFileSystem") as {
     getFileForSaving?: (name: string, options: { types: string[] }) => Promise<unknown>;
@@ -1234,7 +1318,7 @@ async function handleExportCover(): Promise<void> {
 
 function ensureAssetLibrary(): AssetLibrary {
   if (!assetLibrary) {
-    assetLibrary = new AssetLibrary(createDefaultAssetLibraryAdapter());
+    assetLibrary = new AssetLibrary(createDefaultAssetLibraryAdapter({ allowFolderLaunch: true }));
   }
   return assetLibrary;
 }
@@ -1277,20 +1361,49 @@ async function handleChooseAssetRoot(): Promise<void> {
   await handleSyncAssets();
 }
 
+async function reportAssetFolderOpen(result: AssetFolderOpenResult, label: string): Promise<void> {
+  if (result.mode === "system-folder") {
+    activity.add("info", `시스템 파일 탐색기에서 ${label} 폴더를 열었습니다.`);
+    return;
+  }
+  if (result.selection) {
+    const normalizedPath = normalizeNativePath(result.selection.nativePath);
+    let selected = assets.find((asset) => asset.kind === "audio" && asset.normalizedPath === normalizedPath);
+    if (!selected) {
+      await handleSyncAssets();
+      selected = assets.find((asset) => asset.kind === "audio" && asset.normalizedPath === normalizedPath);
+    }
+    if (!selected) {
+      activity.add("warning", `${label} 폴더에서 선택한 오디오가 동기화 목록에 없습니다: ${result.selection.name}`);
+      toast("라이브러리 폴더 안의 오디오를 선택한 뒤 다시 동기화해 주세요.", "warning");
+      return;
+    }
+    selectedAssetId = selected.id;
+    renderAssets();
+    renderAssetRights(selected);
+    const list = optionalElement<HTMLElement>("asset-list");
+    const selectedCard = Array.from(list?.children ?? []).find((child) =>
+      (child as HTMLElement).dataset.assetId === selected?.id,
+    ) as HTMLElement | undefined;
+    selectedCard?.focus();
+    activity.add("info", `${label} 폴더 파일 선택기에서 오디오를 선택했습니다: ${selected.name}`);
+    toast("선택한 오디오를 목록에서 선택했습니다. 미리듣거나 타임라인에 삽입할 수 있습니다.", "success");
+    return;
+  }
+  activity.add("info", `${label} 폴더 찾아보기를 취소했습니다.`);
+}
+
 async function handleOpenAssetRoot(): Promise<void> {
-  await ensureAssetLibrary().openRootFolder();
-  activity.add("info", "시스템 파일 탐색기에서 자산 폴더를 열었습니다.");
+  await reportAssetFolderOpen(await ensureAssetLibrary().openRootFolder(), "자산 루트");
 }
 
 async function handleOpenAssetCategory(): Promise<void> {
   const category = optionalElement<HTMLSelectElement>("asset-category-select")?.value ?? "all";
   if (category === "all") {
-    await ensureAssetLibrary().openRootFolder();
-    activity.add("info", "시스템 파일 탐색기에서 자산 루트 폴더를 열었습니다.");
+    await handleOpenAssetRoot();
     return;
   }
-  await ensureAssetLibrary().openRelativeFolder(category);
-  activity.add("info", `시스템 파일 탐색기에서 선택 폴더를 열었습니다: ${category}`);
+  await reportAssetFolderOpen(await ensureAssetLibrary().openRelativeFolder(category), category);
 }
 
 function filteredAudioAssets(): AssetItem[] {
@@ -1783,6 +1896,7 @@ async function bootstrap(): Promise<void> {
       onActivity: (message) => activity.add("success", message),
       onError: (error, context) => reportError(error, context),
       onSelectionChange: (ids) => activity.add("info", `AI 참고 레퍼런스 ${ids.length}개 선택`),
+      enrichPromptProvider: runPromptEnrich,
     });
     await referenceController.initialize();
   } catch (error) {
@@ -1959,6 +2073,7 @@ async function bootstrap(): Promise<void> {
       onImportSrt: readSrtFile,
       onExportSrt: writeSrtFile,
       aiProvider: runSubtitleAI,
+      analysisProvider: runSubtitleAnalysis,
       onChange: (document) => {
         automationController?.setTranscript(subtitleDocumentToAutomationTranscript(document));
       },

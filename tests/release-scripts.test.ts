@@ -36,6 +36,22 @@ describe("internal beta release scripts contract", () => {
     );
   });
 
+  it("allows folders without widening the UXP launch allowlist", () => {
+    const manifest = JSON.parse(readProjectFile("public/manifest.json")) as {
+      requiredPermissions?: { launchProcess?: { schemes?: unknown[]; extensions?: unknown[] } };
+    };
+    const launch = manifest.requiredPermissions?.launchProcess;
+    assert.deepEqual(launch?.schemes, ["file"]);
+    assert.ok(launch?.extensions?.includes(""), "Adobe UXP requires an empty extension to open folders");
+    assert.equal(launch?.extensions?.includes("*"), false);
+    assert.equal(launch?.extensions?.includes("exe"), false);
+    assert.match(
+      readProjectFile("scripts/verify-dist.mjs"),
+      /if \(!seenExtensions\.has\(""\)\) \{[\s\S]*?시스템 폴더 열기용 빈 문자열/u,
+      "dist verification must fail when the folder extension contract is missing",
+    );
+  });
+
   it("keeps the beta evidence template aligned with the current Host gates", () => {
     const source = readProjectFile("scripts/collect-beta-evidence.mjs");
     for (const required of [

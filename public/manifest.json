@@ -19,6 +19,7 @@
     "launchProcess": {
       "schemes": ["file"],
       "extensions": [
+        "",
         "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma",
         "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "psd", "tif", "tiff", "webp",
         "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mxf", "webm", "wmv"

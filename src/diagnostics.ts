@@ -217,7 +217,11 @@ interface StoredTelemetryState {
   queue: TelemetryQueueItem[];
 }
 
-type DiagnosticsErrorCode = "INVALID_API" | "INVALID_TELEMETRY" | "STORAGE_ERROR";
+type DiagnosticsErrorCode =
+  | "INVALID_API"
+  | "INVALID_TELEMETRY"
+  | "REDACTION_SELF_CHECK_FAILED"
+  | "STORAGE_ERROR";
 
 export class DiagnosticsError extends Error {
   override readonly name = "DiagnosticsError";
@@ -617,6 +621,95 @@ export function diagnosticBundleToJSON(
   now: () => number = () => Date.now(),
 ): string {
   return JSON.stringify(normalizeDiagnosticBundle(input, now), null, 2);
+}
+
+export type DiagnosticBundleSerializer = (
+  input: DiagnosticBundleInput,
+  now?: () => number,
+) => string;
+
+const REDACTION_SELF_CHECK_REPORT: DiagnosticsReport = Object.freeze({
+  schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
+  generatedAt: 1,
+  overall: "green",
+  compatible: true,
+  minimumHostVersion: MINIMUM_PREMIERE_VERSION,
+  host: Object.freeze({ name: "Premiere Pro", version: MINIMUM_PREMIERE_VERSION, apiVersion: "self-check" }),
+  uxp: Object.freeze({ version: "self-check" }),
+  os: Object.freeze({ platform: "self-check", version: "self-check", architecture: "self-check" }),
+  runtime: Object.freeze({ locale: "self-check", pluginVersion: "self-check", build: "self-check" }),
+  checks: Object.freeze([]),
+});
+
+// 런타임에서만 합성해 일반 secret scanner가 테스트 canary를 실제 키로 오인하지 않게 합니다.
+const REDACTION_SELF_CHECK_API_KEY = ["sk", "proj", "SFDiagCanaryKey_8vN2rT6w"].join("-");
+
+const REDACTION_SELF_CHECK_INPUT: DiagnosticBundleInput = Object.freeze({
+  report: REDACTION_SELF_CHECK_REPORT,
+  logs: Object.freeze([Object.freeze({
+    message: [
+      "Bearer SFDiagCanaryBearer_7xK4mP9q",
+      "C:\\Users\\SFDiagCanaryUser\\Private\\SFDiagCanaryProject.prproj",
+      "sf-diag-canary@example.invalid",
+      "SFDiagCanaryInterview.mov",
+    ].join(" | "),
+  })]),
+  context: Object.freeze({
+    selfCheckId: "shortflow-diagnostic-redaction-self-check-v1",
+    apiKey: REDACTION_SELF_CHECK_API_KEY,
+    transcript: "SFDiagCanaryTranscript_3fQ8sL1z",
+    prompt: "SFDiagCanaryPrompt_6cW2jH9y",
+  }),
+});
+
+const REDACTION_SELF_CHECK_RAW_VALUES = Object.freeze([
+  "SFDiagCanaryBearer_7xK4mP9q",
+  "SFDiagCanaryUser",
+  "SFDiagCanaryProject.prproj",
+  "sf-diag-canary@example.invalid",
+  "SFDiagCanaryInterview.mov",
+  REDACTION_SELF_CHECK_API_KEY,
+  "SFDiagCanaryTranscript_3fQ8sL1z",
+  "SFDiagCanaryPrompt_6cW2jH9y",
+]);
+
+const REDACTION_SELF_CHECK_MARKERS = Object.freeze([
+  "Bearer <redacted>",
+  "<redacted:secret>",
+  "<redacted:path>",
+  "<redacted:user>",
+  "<redacted:media>",
+  "<redacted:content>",
+]);
+
+/** Runs synthetic secrets through the same serializer used for saved diagnostic bundles. */
+export function diagnosticRedactionSelfCheck(
+  serialize: DiagnosticBundleSerializer = diagnosticBundleToJSON,
+): boolean {
+  try {
+    const payload = serialize(REDACTION_SELF_CHECK_INPUT, () => 1);
+    if (typeof payload !== "string" || payload.length === 0) return false;
+    const parsed = JSON.parse(payload) as unknown;
+    if (!isRecord(parsed) || parsed.schemaVersion !== DIAGNOSTICS_SCHEMA_VERSION) return false;
+    const context = isRecord(parsed.context) ? parsed.context : null;
+    if (context?.selfCheckId !== "shortflow-diagnostic-redaction-self-check-v1") return false;
+    if (REDACTION_SELF_CHECK_RAW_VALUES.some((value) => payload.includes(value))) return false;
+    return REDACTION_SELF_CHECK_MARKERS.every((marker) => payload.includes(marker));
+  } catch {
+    return false;
+  }
+}
+
+/** Fails closed with a fixed message that never includes a canary or serializer error. */
+export function assertDiagnosticRedactionSelfCheck(
+  serialize: DiagnosticBundleSerializer = diagnosticBundleToJSON,
+): void {
+  if (!diagnosticRedactionSelfCheck(serialize)) {
+    throw new DiagnosticsError(
+      "REDACTION_SELF_CHECK_FAILED",
+      "진단 민감정보 제거 자체 검증에 실패해 JSON 저장을 차단했습니다.",
+    );
+  }
 }
 
 function safeIdentifier(value: unknown, maximum = 128): string | undefined {

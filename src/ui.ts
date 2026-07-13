@@ -230,5 +230,7 @@ export function renderEmptyState(target: HTMLElement, title: string, detail = ""
     paragraph.textContent = detail;
     wrapper.append(paragraph);
   }
-  target.replaceChildren(wrapper);
+  // Premiere 26.3 UXP can leave stale children behind after replaceChildren().
+  while (target.firstChild) target.removeChild(target.firstChild);
+  target.append(wrapper);
 }

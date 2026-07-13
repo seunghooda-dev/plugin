@@ -622,10 +622,11 @@ describe("AssetLibrary sync", () => {
 });
 
 describe("AssetLibrary open folder", () => {
-  it("uses shell.openPath when available", async () => {
+  it("uses shell.openPath only when folder launch permission is explicit", async () => {
     const root = mockFolder("Assets", "C:/Assets");
     const adapter = createAdapter(root);
     const opened: Array<{ path: string; text: string | undefined }> = [];
+    adapter.allowFolderLaunch = true;
     adapter.shell = {
       openPath: async (nativePath: string, developerText?: string) => {
         opened.push({ path: nativePath, text: developerText });
@@ -634,11 +635,17 @@ describe("AssetLibrary open folder", () => {
     };
     const library = new AssetLibrary(adapter);
     await library.selectRoot();
-    await library.openRootFolder();
+    assert.equal(library.getFolderOpenMode(), "system-folder");
+    const result = await library.openRootFolder();
     assert.deepEqual(opened, [{
       path: "C:/Assets",
       text: "ShortFlow Studio가 선택한 음악·효과음 폴더를 시스템 파일 탐색기에서 엽니다.",
     }]);
+    assert.deepEqual(result, {
+      mode: "system-folder",
+      folderNativePath: "C:/Assets",
+      selection: null,
+    });
   });
 
   it("opens a selected Music or SFX category folder by relative path", async () => {
@@ -648,6 +655,7 @@ describe("AssetLibrary open folder", () => {
     const root = mockFolder("Assets", "C:/Assets", [sfx]);
     const adapter = createAdapter(root);
     const opened: string[] = [];
+    adapter.allowFolderLaunch = true;
     adapter.shell = {
       openPath: async (nativePath: string) => {
         opened.push(nativePath);
@@ -660,6 +668,111 @@ describe("AssetLibrary open folder", () => {
     await library.openRelativeFolder("sfx/transitions");
 
     assert.deepEqual(opened, ["C:/Assets/SFX/Transitions"]);
+  });
+
+  it("uses an allowlisted media picker at the folder without launching the folder", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    const selected = mockFile("theme.WAV", "C:/Assets/theme.WAV");
+    let initialLocation: unknown;
+    let pickerTypes: string[] | undefined;
+    let opened = 0;
+    adapter.localFileSystem.getFileForOpening = async (options) => {
+      initialLocation = options?.initialLocation;
+      pickerTypes = options?.types;
+      assert.equal(options?.allowMultiple, false);
+      return selected;
+    };
+    adapter.shell = {
+      openPath: async () => {
+        opened += 1;
+        return "";
+      },
+    };
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    assert.equal(library.getFolderOpenMode(), "media-picker");
+    const result = await library.openRootFolder();
+
+    assert.equal(initialLocation, root);
+    assert.deepEqual(pickerTypes, ["aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma"]);
+    assert.equal(opened, 0);
+    assert.deepEqual(result, {
+      mode: "media-picker",
+      folderNativePath: "C:/Assets",
+      selection: {
+        name: "theme.WAV",
+        nativePath: "C:/Assets/theme.WAV",
+        extension: ".wav",
+        kind: "audio",
+      },
+    });
+  });
+
+  it("falls back to the media picker when an explicitly allowed folder launch fails", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    const selected = mockFile("theme.wav", "C:/Assets/theme.wav");
+    let launchAttempts = 0;
+    adapter.allowFolderLaunch = true;
+    adapter.shell = {
+      openPath: async () => {
+        launchAttempts += 1;
+        throw new Error("folder launch denied");
+      },
+    };
+    adapter.localFileSystem.getFileForOpening = async () => selected;
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    const result = await library.openRootFolder();
+
+    assert.equal(launchAttempts, 1);
+    assert.equal(result.mode, "media-picker");
+    assert.equal(result.selection?.nativePath, "C:/Assets/theme.wav");
+  });
+
+  it("reports media-picker cancellation without claiming the folder opened", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    adapter.localFileSystem.getFileForOpening = async () => null;
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    assert.deepEqual(await library.openRootFolder(), {
+      mode: "media-picker",
+      folderNativePath: "C:/Assets",
+      selection: null,
+    });
+  });
+
+  it("rejects a picker entry whose displayed and native extensions disagree", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    adapter.localFileSystem.getFileForOpening = async () =>
+      mockFile("theme.wav", "C:/Assets/theme.exe");
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRootFolder(),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+  });
+
+  it("rejects a picker entry outside the folder being browsed", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    adapter.localFileSystem.getFileForOpening = async () =>
+      mockFile("theme.wav", "C:/Outside/theme.wav");
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRootFolder(),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
   });
 
   it("rejects missing or unsafe relative folders without opening the root", async () => {
@@ -691,6 +804,7 @@ describe("AssetLibrary open folder", () => {
     const library = new AssetLibrary(createAdapter(root));
     await library.selectRoot();
 
+    assert.equal(library.getFolderOpenMode(), "unsupported");
     await assert.rejects(
       library.openRootFolder(),
       (error: unknown) => assertLibraryError(error, "UNSUPPORTED_API"),

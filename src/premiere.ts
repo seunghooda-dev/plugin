@@ -170,6 +170,17 @@ export interface InsertAssetPreflight {
   expectedContextKey?: string;
 }
 
+export interface AudioInsertSequenceProbe {
+  getAudioTrackCount(): Promise<number>;
+  getAudioTrack(trackIndex: number): Promise<unknown>;
+}
+
+export interface AudioInsertRange {
+  readonly start: number;
+  readonly end: number;
+  readonly duration: number;
+}
+
 export interface AutomationMarkerResult {
   cutMarkers: number;
   punchMarkers: number;
@@ -310,6 +321,17 @@ export function normalizePremierePath(value: string): string {
 export function sameMediaPath(left: string, right: string): boolean {
   const normalizedLeft = normalizePremierePath(left);
   return normalizedLeft !== "" && normalizedLeft === normalizePremierePath(right);
+}
+
+const AUDIO_INSERT_EXTENSIONS = new Set([
+  "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma",
+]);
+
+function isAudioInsertAssetPath(nativePath: string): boolean {
+  const filename = nativePath.replace(/\\/gu, "/").split("/").at(-1) ?? "";
+  const dot = filename.lastIndexOf(".");
+  if (dot <= 0 || dot === filename.length - 1) return false;
+  return AUDIO_INSERT_EXTENSIONS.has(filename.slice(dot + 1).toLocaleLowerCase("en-US"));
 }
 
 export function validatePremiereImportPath(value: unknown): string {
@@ -453,6 +475,26 @@ function commitActionFactories(project: Project, factories: readonly ActionFacto
     return false;
   }
   return Boolean(committed && allAdded);
+}
+
+/** Keeps every timeline transaction behind its asynchronous safety checks. */
+export async function commitTimelineInsertAfterPreflight(
+  preflight: () => unknown | Promise<unknown>,
+  commit: () => boolean,
+): Promise<void> {
+  await preflight();
+  let committed = false;
+  try {
+    committed = commit();
+  } catch {
+    committed = false;
+  }
+  if (!committed) {
+    throw new ShortFlowError(
+      "ASSET_INSERT_TRANSACTION_REJECTED",
+      "Premiere가 자산 삽입 transaction을 거부했습니다. 공개 API로 오디오 트랙 잠금 상태를 미리 확인할 수 없으므로 대상 트랙이 현재 편집 가능한지 확인해 주세요.",
+    );
+  }
 }
 
 function assertPositiveDimensions(width: number, height: number): void {
@@ -645,6 +687,204 @@ async function getClipTrackItems(track: unknown): Promise<Array<VideoClipTrackIt
   } catch {
     return [];
   }
+}
+
+const MAX_AUDIO_INSERT_TRACK_ITEMS = 5_000;
+const AUDIO_INSERT_TIME_EPSILON = 1e-6;
+
+export async function audioProjectItemDurationSeconds<TMediaType>(
+  clipProjectItem: {
+    getInPoint(mediaType: TMediaType): Promise<unknown>;
+    getOutPoint(mediaType: TMediaType): Promise<unknown>;
+  },
+  audioMediaType: TMediaType,
+): Promise<number> {
+  let inPoint: unknown;
+  let outPoint: unknown;
+  try {
+    [inPoint, outPoint] = await Promise.all([
+      clipProjectItem.getInPoint(audioMediaType),
+      clipProjectItem.getOutPoint(audioMediaType),
+    ]);
+  } catch {
+    throw new ShortFlowError(
+      "ASSET_AUDIO_DURATION_UNAVAILABLE",
+      "오디오 길이를 Premiere 공개 API로 확인하지 못해 타임라인 삽입을 중단했습니다.",
+    );
+  }
+  const start = tickTimeSeconds(inPoint, Number.NaN);
+  const end = tickTimeSeconds(outPoint, Number.NaN);
+  const duration = end - start;
+  if (
+    !Number.isFinite(start)
+    || !Number.isFinite(end)
+    || start < 0
+    || end <= start
+    || !Number.isFinite(duration)
+    || duration > 86_400
+  ) {
+    throw new ShortFlowError(
+      "ASSET_AUDIO_DURATION_UNAVAILABLE",
+      "오디오의 유효한 In/Out 길이를 확인하지 못해 타임라인 삽입을 중단했습니다.",
+    );
+  }
+  return duration;
+}
+
+export async function assertAudioInsertRangeAvailable(
+  sequence: AudioInsertSequenceProbe,
+  audioTrackIndex: number,
+  insertionTime: unknown,
+  durationSeconds: number,
+  clipTrackItemType: unknown,
+): Promise<AudioInsertRange> {
+  if (!Number.isInteger(audioTrackIndex) || audioTrackIndex < 0 || audioTrackIndex > 98) {
+    throw new ShortFlowError("INVALID_AUDIO_TRACK", "오디오 트랙 인덱스가 0~98 범위를 벗어났습니다.");
+  }
+  const start = tickTimeSeconds(insertionTime, Number.NaN);
+  const end = start + durationSeconds;
+  if (
+    !Number.isFinite(start)
+    || start < 0
+    || !Number.isFinite(durationSeconds)
+    || durationSeconds <= 0
+    || durationSeconds > 86_400
+    || !Number.isFinite(end)
+    || end <= start
+  ) {
+    throw new ShortFlowError(
+      "AUDIO_INSERT_RANGE_UNAVAILABLE",
+      "재생헤드와 오디오 삽입 구간을 확실히 계산하지 못해 삽입을 중단했습니다.",
+    );
+  }
+
+  let trackCountValue: unknown;
+  try {
+    trackCountValue = await sequence.getAudioTrackCount();
+  } catch {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      "현재 시퀀스의 오디오 트랙 수를 확인하지 못해 삽입을 중단했습니다.",
+    );
+  }
+  if (
+    typeof trackCountValue !== "number"
+    || !Number.isSafeInteger(trackCountValue)
+    || trackCountValue < 0
+  ) {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      "현재 시퀀스의 오디오 트랙 정보가 올바르지 않아 삽입을 중단했습니다.",
+    );
+  }
+  const trackCount = trackCountValue;
+  if (audioTrackIndex >= trackCount) {
+    throw new ShortFlowError(
+      "INVALID_AUDIO_TRACK",
+      `요청한 오디오 트랙 A${audioTrackIndex + 1}이 현재 시퀀스에 없습니다.`,
+    );
+  }
+
+  let track: unknown;
+  try {
+    track = await sequence.getAudioTrack(audioTrackIndex);
+  } catch {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}에 접근하지 못해 삽입을 중단했습니다.`,
+    );
+  }
+  if (!track || typeof track !== "object") {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}을 사용할 수 없어 삽입을 중단했습니다.`,
+    );
+  }
+  const getIndex = (track as { getIndex?: unknown }).getIndex;
+  const getTrackItems = (track as { getTrackItems?: unknown }).getTrackItems;
+  if (
+    typeof getIndex !== "function"
+    || typeof getTrackItems !== "function"
+    || clipTrackItemType === undefined
+    || clipTrackItemType === null
+  ) {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}의 공개 API를 사용할 수 없어 삽입을 중단했습니다.`,
+    );
+  }
+
+  let actualTrackIndexValue: unknown;
+  let items: unknown;
+  try {
+    actualTrackIndexValue = await getIndex.call(track);
+    items = await getTrackItems.call(track, clipTrackItemType, false);
+  } catch {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}의 클립 구간을 확인하지 못해 삽입을 중단했습니다.`,
+    );
+  }
+  if (
+    typeof actualTrackIndexValue !== "number"
+    || !Number.isSafeInteger(actualTrackIndexValue)
+    || actualTrackIndexValue !== audioTrackIndex
+    || !Array.isArray(items)
+  ) {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}의 식별 정보가 일치하지 않아 삽입을 중단했습니다.`,
+    );
+  }
+  if (items.length > MAX_AUDIO_INSERT_TRACK_ITEMS) {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}의 클립 수가 안전 검사 한도를 초과했습니다.`,
+    );
+  }
+
+  let collision = false;
+  try {
+    await forEachLimited(items, 16, async (item) => {
+      if (collision || !item || typeof item !== "object") {
+        if (!collision) throw new Error("Invalid audio track item.");
+        return;
+      }
+      const getStartTime = (item as { getStartTime?: unknown }).getStartTime;
+      const getEndTime = (item as { getEndTime?: unknown }).getEndTime;
+      if (typeof getStartTime !== "function" || typeof getEndTime !== "function") {
+        throw new Error("Audio track item range API is unavailable.");
+      }
+      const [itemStartValue, itemEndValue] = await Promise.all([
+        getStartTime.call(item),
+        getEndTime.call(item),
+      ]);
+      const itemStart = tickTimeSeconds(itemStartValue, Number.NaN);
+      const itemEnd = tickTimeSeconds(itemEndValue, Number.NaN);
+      if (!Number.isFinite(itemStart) || !Number.isFinite(itemEnd) || itemStart < 0 || itemEnd <= itemStart) {
+        throw new Error("Audio track item has an invalid range.");
+      }
+      if (
+        itemStart < end - AUDIO_INSERT_TIME_EPSILON
+        && itemEnd > start + AUDIO_INSERT_TIME_EPSILON
+      ) {
+        collision = true;
+      }
+    });
+  } catch {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_UNAVAILABLE",
+      `오디오 트랙 A${audioTrackIndex + 1}의 모든 클립 구간을 확인하지 못해 삽입을 중단했습니다.`,
+    );
+  }
+  if (collision) {
+    throw new ShortFlowError(
+      "AUDIO_TRACK_COLLISION",
+      `오디오 트랙 A${audioTrackIndex + 1}의 현재 재생헤드 구간에 기존 클립이 있습니다. 빈 구간으로 이동한 뒤 다시 시도해 주세요.`,
+    );
+  }
+
+  return Object.freeze({ start, end, duration: durationSeconds });
 }
 
 async function scanSelectedTrackItems(sequence: Sequence): Promise<Array<VideoClipTrackItem | AudioClipTrackItem>> {
@@ -2292,14 +2532,52 @@ export async function importAndInsertAsset(
   await assertActiveContextKey(contextKey);
   const editor = ppro.SequenceEditor.getEditor(sequence);
   const insertionTime = await sequence.getPlayerPosition();
-  await assertActiveContextKey(contextKey);
-  if (!commitActionFactories(
-    project,
-    [() => editor.createInsertProjectItemAction(projectItem, insertionTime, videoTrackIndex, audioTrackIndex, true)],
-    "ShortFlow: 음악/효과음 삽입",
-  )) {
-    throw new ShortFlowError("ASSET_INSERT_FAILED", "자산을 현재 재생 위치에 삽입하지 못했습니다.");
+  let audioDuration: number | undefined;
+  if (isAudioInsertAssetPath(assetPath)) {
+    let clipProjectItem: ReturnType<typeof ppro.ClipProjectItem.cast>;
+    let audioMediaType: typeof ppro.Constants.MediaType.AUDIO;
+    try {
+      clipProjectItem = ppro.ClipProjectItem.cast(projectItem);
+      audioMediaType = ppro.Constants.MediaType.AUDIO;
+    } catch {
+      throw new ShortFlowError(
+        "ASSET_AUDIO_DURATION_UNAVAILABLE",
+        "가져온 오디오의 공개 Premiere API를 확인하지 못해 타임라인 삽입을 중단했습니다.",
+      );
+    }
+    if (!clipProjectItem) {
+      throw new ShortFlowError(
+        "ASSET_AUDIO_DURATION_UNAVAILABLE",
+        "가져온 파일을 오디오 프로젝트 항목으로 확인하지 못해 타임라인 삽입을 중단했습니다.",
+      );
+    }
+    if (audioMediaType === undefined || audioMediaType === null) {
+      throw new ShortFlowError(
+        "ASSET_AUDIO_DURATION_UNAVAILABLE",
+        "Premiere의 공개 오디오 미디어 형식 상수를 확인하지 못해 타임라인 삽입을 중단했습니다.",
+      );
+    }
+    audioDuration = await audioProjectItemDurationSeconds(clipProjectItem, audioMediaType);
   }
+  await commitTimelineInsertAfterPreflight(
+    async () => {
+      if (audioDuration !== undefined) {
+        await assertAudioInsertRangeAvailable(
+          sequence,
+          audioTrackIndex,
+          insertionTime,
+          audioDuration,
+          premiereClipTrackItemType(),
+        );
+      }
+      await assertActiveContextKey(contextKey);
+    },
+    () => commitActionFactories(
+      project,
+      [() => editor.createInsertProjectItemAction(projectItem, insertionTime, videoTrackIndex, audioTrackIndex, true)],
+      "ShortFlow: 음악/효과음 삽입",
+    ),
+  );
   if (duration !== undefined) {
     const insertedAt = tickTimeSeconds(insertionTime, 0);
     const projectItemId = String(projectItem.getId());

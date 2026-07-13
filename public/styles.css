@@ -1958,8 +1958,8 @@ textarea {
 }
 
 .subtitle-ai-toolbar {
-  display: grid;
-  grid-template-columns: minmax(170px, 1fr) auto auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-top: 10px;
@@ -1971,7 +1971,8 @@ textarea {
 
 .subtitle-ai-copy {
   display: flex;
-  min-width: 0;
+  flex: 1 1 170px;
+  min-width: 170px;
   flex-direction: column;
   gap: 2px;
 }
@@ -2012,6 +2013,81 @@ textarea {
 
 .subtitle-list-heading .field-hint.is-warning {
   color: var(--warning);
+}
+
+.subtitle-analysis-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.subtitle-analysis-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subtitle-analysis-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.subtitle-analysis-item strong {
+  flex: 1 1 100%;
+  font-size: 9px;
+}
+
+.subtitle-analysis-reason {
+  color: var(--text-muted);
+  font-size: 8.5px;
+}
+
+.subtitle-analysis-cues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.subtitle-analysis-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 8.5px;
+}
+
+.subtitle-analysis-youtube {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.subtitle-analysis-youtube-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.subtitle-analysis-youtube-description {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 8.5px;
+  white-space: pre-wrap;
+}
+
+.subtitle-analysis-youtube-tags {
+  margin: 0;
+  color: var(--accent-bright);
+  font-size: 8.5px;
 }
 
 .subtitle-cue-list {
@@ -2511,6 +2587,67 @@ textarea {
   font-size: 8.5px;
 }
 
+.reference-enrich-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.reference-enrich-btn {
+  align-self: flex-start;
+  padding: 3px 6px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.reference-enrich-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.reference-enrich-btn:disabled {
+  opacity: 0.4;
+}
+
+.reference-enrich-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid rgba(139, 116, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(139, 116, 255, 0.055);
+}
+
+.reference-enrich-preview p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 8.5px;
+  white-space: pre-wrap;
+}
+
+.reference-enrich-apply-btn,
+.reference-enrich-cancel-btn {
+  align-self: flex-start;
+  padding: 3px 6px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 4px;
+  background: transparent;
+  font-size: 8px;
+}
+
+.reference-enrich-apply-btn {
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+
+.reference-enrich-cancel-btn {
+  color: var(--text-muted);
+}
+
 .reference-card-actions {
   display: flex;
   align-items: center;
@@ -3006,6 +3143,40 @@ input[type="color"] {
   }
 }
 
+.recovery-confirm-dialog {
+  width: min(420px, calc(100vw - 36px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+
+.recovery-confirm-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px;
+}
+
+.recovery-confirm-content h2,
+.recovery-confirm-content p {
+  margin: 0;
+}
+
+.recovery-confirm-label {
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+}
+
+.recovery-confirm-actions {
+  margin-top: 6px;
+}
+
 .toast-region {
   position: fixed;
   z-index: 1100;
@@ -3349,7 +3520,7 @@ input[type="color"] {
 
 @media (max-width: 760px) {
   .subtitle-ai-toolbar {
-    grid-template-columns: 1fr;
+    flex-direction: column;
     align-items: stretch;
   }
 

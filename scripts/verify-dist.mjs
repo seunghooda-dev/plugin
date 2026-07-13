@@ -14,6 +14,7 @@ const MAX_DIST_TOTAL_BYTES = 500 * 1024 * 1024;
 const REQUIRED_NETWORK_DOMAINS = ["https://api.openai.com"];
 const ALLOWED_LAUNCH_SCHEMES = new Set(["file"]);
 const ALLOWED_LAUNCH_EXTENSIONS = new Set([
+  "",
   "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "wav", "wma",
   "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "psd", "tif", "tiff", "webp",
   "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mxf", "webm", "wmv",
@@ -311,8 +312,8 @@ function validateManifest(manifest, packageJson) {
       } else {
         const seenExtensions = new Set();
         for (const extension of extensions) {
-          if (typeof extension !== "string" || !/^[a-z0-9]+$/u.test(extension)) {
-            fail(`launchProcess extension은 점 없는 소문자/숫자 문자열이어야 합니다: ${JSON.stringify(extension)}`);
+          if (typeof extension !== "string" || (extension !== "" && !/^[a-z0-9]+$/u.test(extension))) {
+            fail(`launchProcess extension은 폴더용 빈 문자열 또는 점 없는 소문자/숫자 문자열이어야 합니다: ${JSON.stringify(extension)}`);
             continue;
           }
           if (seenExtensions.has(extension)) {
@@ -322,6 +323,9 @@ function validateManifest(manifest, packageJson) {
           if (!ALLOWED_LAUNCH_EXTENSIONS.has(extension)) {
             fail(`내부 베타 launchProcess allowlist에 없는 확장자입니다: ${extension}`);
           }
+        }
+        if (!seenExtensions.has("")) {
+          fail("launchProcess extensions에는 시스템 폴더 열기용 빈 문자열이 필요합니다.");
         }
       }
     }

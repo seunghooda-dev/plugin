@@ -8,6 +8,11 @@ export type MaybePromise<T> = T | Promise<T>;
 
 export interface UxpLocalFileSystemAdapter {
   getFolder(options?: any): Promise<any>;
+  getFileForOpening?(options?: {
+    initialLocation?: any;
+    types?: string[];
+    allowMultiple?: boolean;
+  }): Promise<any>;
   createPersistentToken(entry: any): Promise<string>;
   getEntryForPersistentToken(token: string): Promise<any>;
 }
@@ -26,14 +31,39 @@ export interface AssetLibraryAdapter {
   localFileSystem: UxpLocalFileSystemAdapter;
   storage: KeyValueStorageAdapter;
   shell?: UxpShellAdapter;
+  /** Manifest launchProcess.extensions에 빈 문자열이 있을 때만 true로 설정합니다. */
+  allowFolderLaunch?: boolean;
 }
 
 export interface DefaultAdapterOptions {
   uxp?: any;
   storage?: any;
+  /** 기본값은 false입니다. 제한된 미디어 확장자 allowlist에서는 활성화하지 않습니다. */
+  allowFolderLaunch?: boolean;
 }
 
 export type AssetKind = "audio" | "image" | "video";
+
+export type AssetFolderOpenMode = "system-folder" | "media-picker" | "unsupported";
+
+export interface AssetFolderPickerSelection {
+  readonly name: string;
+  readonly nativePath: string;
+  readonly extension: string;
+  readonly kind: "audio";
+}
+
+export type AssetFolderOpenResult =
+  | {
+      readonly mode: "system-folder";
+      readonly folderNativePath: string;
+      readonly selection: null;
+    }
+  | {
+      readonly mode: "media-picker";
+      readonly folderNativePath: string;
+      readonly selection: AssetFolderPickerSelection | null;
+    };
 
 export interface AssetItem {
   id: string;
@@ -202,6 +232,10 @@ const AUDIO_EXTENSIONS = new Set([
   ".wav",
   ".wma",
 ]);
+
+const AUDIO_FILE_PICKER_TYPES = Object.freeze(
+  Array.from(AUDIO_EXTENSIONS, (extension) => extension.slice(1)),
+);
 
 const IMAGE_EXTENSIONS = new Set([
   ".bmp",
@@ -762,6 +796,9 @@ export function createDefaultAssetLibraryAdapter(
   if (uxp.shell) {
     adapter.shell = uxp.shell;
   }
+  if (options.allowFolderLaunch === true) {
+    adapter.allowFolderLaunch = true;
+  }
   return adapter;
 }
 
@@ -1173,14 +1210,24 @@ export class AssetLibrary {
     return sortAssets(filterAssets(assets, queryOrOptions), sortOptions);
   }
 
-  async openRootFolder(): Promise<void> {
-    const root = await this.requireRoot();
-    await this.openFolder(root);
+  getFolderOpenMode(): AssetFolderOpenMode {
+    if (this.adapter.allowFolderLaunch === true && typeof this.adapter.shell?.openPath === "function") {
+      return "system-folder";
+    }
+    if (typeof this.adapter.localFileSystem.getFileForOpening === "function") {
+      return "media-picker";
+    }
+    return "unsupported";
   }
 
-  async openRelativeFolder(relativeFolderPath: string): Promise<void> {
+  async openRootFolder(): Promise<AssetFolderOpenResult> {
+    const root = await this.requireRoot();
+    return this.openFolder(root);
+  }
+
+  async openRelativeFolder(relativeFolderPath: string): Promise<AssetFolderOpenResult> {
     const folder = await this.resolveRelativeFolder(relativeFolderPath);
-    await this.openFolder(folder);
+    return this.openFolder(folder);
   }
 
   async openAssetFile(asset: Pick<AssetItem, "id" | "nativePath" | "normalizedPath">): Promise<void> {
@@ -1250,15 +1297,7 @@ export class AssetLibrary {
     return current;
   }
 
-  async openFolder(folder: UxpEntry): Promise<void> {
-    const openPath = this.adapter.shell?.openPath;
-    if (typeof openPath !== "function") {
-      throw new AssetLibraryError(
-        "UNSUPPORTED_API",
-        "현재 Premiere Pro/UXP 환경에서는 시스템 파일 탐색기로 폴더 열기를 지원하지 않습니다.",
-      );
-    }
-
+  async openFolder(folder: UxpEntry): Promise<AssetFolderOpenResult> {
     const nativePath = entryNativePath(folder);
     if (!nativePath) {
       throw new AssetLibraryError(
@@ -1267,19 +1306,92 @@ export class AssetLibrary {
       );
     }
 
-    try {
-      const result = await openPath.call(
-        this.adapter.shell,
-        nativePath,
-        "ShortFlow Studio가 선택한 음악·효과음 폴더를 시스템 파일 탐색기에서 엽니다.",
-      );
-      if (typeof result === "string" && result.trim()) {
-        throw new Error(result);
+    const openPath = this.adapter.shell?.openPath;
+    let folderLaunchError: unknown;
+    if (this.adapter.allowFolderLaunch === true && typeof openPath === "function") {
+      try {
+        const result = await openPath.call(
+          this.adapter.shell,
+          nativePath,
+          "ShortFlow Studio가 선택한 음악·효과음 폴더를 시스템 파일 탐색기에서 엽니다.",
+        );
+        if (typeof result === "string" && result.trim()) {
+          throw new Error(result);
+        }
+        return Object.freeze({
+          mode: "system-folder",
+          folderNativePath: nativePath,
+          selection: null,
+        });
+      } catch (error) {
+        folderLaunchError = error;
       }
+    }
+
+    const getFileForOpening = this.adapter.localFileSystem.getFileForOpening;
+    if (typeof getFileForOpening !== "function") {
+      if (folderLaunchError !== undefined) {
+        throw filesystemError(
+          folderLaunchError,
+          "시스템 파일 탐색기에서 자산 폴더를 열지 못했습니다.",
+        );
+      }
+      throw new AssetLibraryError(
+        "UNSUPPORTED_API",
+        "현재 Premiere Pro/UXP 환경에서는 자산 폴더를 찾아볼 파일 선택기를 지원하지 않습니다.",
+      );
+    }
+
+    try {
+      const picked = await getFileForOpening.call(this.adapter.localFileSystem, {
+        initialLocation: folder,
+        types: [...AUDIO_FILE_PICKER_TYPES],
+        allowMultiple: false,
+      });
+      const selected = Array.isArray(picked) ? picked[0] : picked;
+      if (!selected) {
+        return Object.freeze({
+          mode: "media-picker",
+          folderNativePath: nativePath,
+          selection: null,
+        });
+      }
+
+      const selectedName = entryName(selected);
+      const selectedNativePath = entryNativePath(selected);
+      const selectedExtension = extensionOf(selectedName);
+      const normalizedFolderPath = normalizeNativePath(nativePath);
+      const normalizedSelectedPath = normalizeNativePath(selectedNativePath);
+      if (
+        !isFileEntry(selected) ||
+        !selectedName ||
+        !selectedNativePath ||
+        !normalizedFolderPath ||
+        !normalizedSelectedPath.startsWith(`${normalizedFolderPath}/`) ||
+        classifyAsset(selectedName) !== "audio" ||
+        classifyAsset(selectedNativePath) !== "audio" ||
+        extensionOf(selectedNativePath) !== selectedExtension
+      ) {
+        throw new AssetLibraryError(
+          "INVALID_ROOT",
+          "파일 선택기에서 지원되는 음악·효과음 파일을 선택해 주세요.",
+        );
+      }
+
+      return Object.freeze({
+        mode: "media-picker",
+        folderNativePath: nativePath,
+        selection: Object.freeze({
+          name: selectedName,
+          nativePath: selectedNativePath,
+          extension: selectedExtension,
+          kind: "audio",
+        }),
+      });
     } catch (error) {
       throw filesystemError(
         error,
-        "시스템 파일 탐색기에서 자산 폴더를 열지 못했습니다.",
+        "파일 선택기로 자산 폴더를 찾아보지 못했습니다.",
       );
     }
   }

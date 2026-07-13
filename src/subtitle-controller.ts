@@ -71,8 +71,10 @@ export interface SubtitleDomElement {
   parentElement: SubtitleDomElement | null;
   readonly children: readonly SubtitleDomElement[];
   readonly classList: SubtitleDomClassList;
+  readonly firstChild?: SubtitleDomElement | null;
   append(...nodes: SubtitleDomElement[]): void;
   replaceChildren(...nodes: SubtitleDomElement[]): void;
+  removeChild?(node: SubtitleDomElement): unknown;
   setAttribute(name: string, value: string): void;
   removeAttribute(name: string): void;
   getAttribute(name: string): string | null;
@@ -105,6 +107,30 @@ export interface SubtitleAiRequest {
   targetLanguage?: string;
 }
 
+export type SubtitleAnalysisAction = "interview-highlight" | "edit-outline" | "youtube-metadata";
+
+export interface SubtitleAnalysisRequest {
+  action: SubtitleAnalysisAction;
+  document: SubtitleDocument;
+}
+
+export interface SubtitleHighlight {
+  cueId: string;
+  reason: string;
+}
+
+export interface EditOutlineSegment {
+  order: number;
+  cueIds: string[];
+  label: string;
+  reason: string;
+}
+
+export type SubtitleAnalysisResult =
+  | { action: "interview-highlight"; highlights: SubtitleHighlight[] }
+  | { action: "edit-outline"; segments: EditOutlineSegment[] }
+  | { action: "youtube-metadata"; title: string; description: string; tags: string[] };
+
 export interface SubtitleAiValidationOptions {
   maxCueCount?: number;
 }
@@ -118,6 +144,7 @@ export interface SubtitleControllerOptions {
   onImportSrt?: () => MaybePromise<string | null | undefined>;
   onExportSrt?: (srt: string, suggestedName: string) => MaybePromise<void>;
   aiProvider?: (request: SubtitleAiRequest) => MaybePromise<unknown>;
+  analysisProvider?: (request: SubtitleAnalysisRequest) => MaybePromise<unknown>;
   validateAiResponse?: (
     payload: unknown,
     request: SubtitleAiRequest,
@@ -319,6 +346,58 @@ export function validateAiSubtitleResponse(
   return normalized;
 }
 
+export function validateAnalysisResponse(
+  payload: unknown,
+  request: SubtitleAnalysisRequest,
+): SubtitleAnalysisResult {
+  if (!isRecord(payload)) throw new Error("AI 자막 분석 응답 형식이 올바르지 않습니다.");
+  const cueIds = new Set(request.document.cues.map((cue) => cue.cueId));
+
+  if (request.action === "interview-highlight") {
+    const raw = Array.isArray(payload.highlights) ? payload.highlights : [];
+    const highlights: SubtitleHighlight[] = [];
+    for (const item of raw) {
+      if (!isRecord(item)) continue;
+      if (typeof item.cueId !== "string" || !cueIds.has(item.cueId)) continue;
+      if (typeof item.reason !== "string" || !item.reason.trim()) continue;
+      highlights.push({ cueId: item.cueId, reason: item.reason.trim().slice(0, 200) });
+    }
+    return { action: "interview-highlight", highlights };
+  }
+
+  if (request.action === "edit-outline") {
+    const raw = Array.isArray(payload.segments) ? payload.segments : [];
+    const segments: EditOutlineSegment[] = [];
+    for (const item of raw) {
+      if (!isRecord(item)) continue;
+      const segmentCueIds = Array.isArray(item.cueIds)
+        ? item.cueIds.filter((id): id is string => typeof id === "string" && cueIds.has(id))
+        : [];
+      if (segmentCueIds.length === 0) continue;
+      if (typeof item.label !== "string" || typeof item.reason !== "string") continue;
+      const order = segments.length + 1;
+      segments.push({
+        order,
+        cueIds: segmentCueIds,
+        label: item.label.trim().slice(0, 60) || `구간 ${order}`,
+        reason: item.reason.trim().slice(0, 200),
+      });
+    }
+    return { action: "edit-outline", segments };
+  }
+
+  const title = typeof payload.title === "string" ? payload.title.trim().slice(0, 100) : "";
+  const description = typeof payload.description === "string" ? payload.description.trim().slice(0, 5_000) : "";
+  const tags = Array.isArray(payload.tags)
+    ? payload.tags
+      .filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0)
+      .map((tag) => tag.trim().slice(0, 30))
+      .slice(0, 15)
+    : [];
+  if (!title) throw new Error("AI 유튜브 메타데이터 응답에 제목이 없습니다.");
+  return { action: "youtube-metadata", title, description, tags };
+}
+
 function defaultDom(): SubtitleDomDocument {
   const candidate = (globalThis as unknown as { document?: unknown }).document;
   if (!candidate) throw new Error("자막 편집기에 DOM document가 필요합니다.");
@@ -359,6 +438,17 @@ function cleanTargetLanguage(value: string): string {
   return clean;
 }
 
+// Premiere 26.3 UXP can leave stale children behind after replaceChildren()
+// (same host bug as the asset list; confirmed live with duplicated cue rows).
+// Remove explicitly when the DOM supports it; mock DOMs fall back safely.
+function clearElementChildren(element: SubtitleDomElement): void {
+  if (typeof element.removeChild === "function") {
+    while (element.firstChild) element.removeChild(element.firstChild);
+    return;
+  }
+  element.replaceChildren();
+}
+
 function closestWithData(
   start: SubtitleDomElement | null | undefined,
   key: string,
@@ -388,6 +478,7 @@ export class SubtitleController {
   private selectedCueId = "";
   private selectedWordId = "";
   private activePosition: ActiveSubtitlePosition | null = null;
+  private analysisResult: SubtitleAnalysisResult | null = null;
   private lastPlayheadSeconds = Number.NaN;
   private autosaveTimer: unknown = null;
   private saveQueue: Promise<void> = Promise.resolve();
@@ -447,6 +538,10 @@ export class SubtitleController {
     return Boolean(this.busyAction);
   }
 
+  get analysis(): SubtitleAnalysisResult | null {
+    return this.analysisResult;
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) return;
     const lifecycle = ++this.lifecycleGeneration;
@@ -503,8 +598,10 @@ export class SubtitleController {
     this.selectedCueId = "";
     this.selectedWordId = "";
     this.activePosition = null;
+    this.analysisResult = null;
     this.lastPlayheadSeconds = Number.NaN;
     this.render();
+    this.renderAnalysisPanel();
     this.emitChange();
     if (restoredCueCount > 0) {
       this.options.onActivity?.(`프로젝트 자막 자동 저장 ${restoredCueCount}개를 복원했습니다.`);
@@ -526,7 +623,9 @@ export class SubtitleController {
     this.recordDocumentChange();
     this.selectedCueId = "";
     this.selectedWordId = "";
+    this.analysisResult = null;
     this.render();
+    this.renderAnalysisPanel();
     this.emitChange();
     this.scheduleAutosave();
   }
@@ -703,6 +802,26 @@ export class SubtitleController {
     });
   }
 
+  /** Read-only: unlike runAi, this never mutates the document (no commit/undo/autosave). */
+  async runAnalysis(action: SubtitleAnalysisAction): Promise<void> {
+    if (!this.options.analysisProvider) throw new Error("AI 자막 분석 provider가 연결되지 않았습니다.");
+    await this.runBusy(`AI 분석 ${action}`, async () => {
+      const requestRevision = this.documentRevision;
+      const requestLoadGeneration = this.projectLoadGeneration;
+      const request: SubtitleAnalysisRequest = { action, document: this.document };
+      const payload = await this.options.analysisProvider?.(request);
+      this.assertAiRequestCurrent(requestRevision, requestLoadGeneration, request.document.projectKey);
+      this.analysisResult = validateAnalysisResponse(payload, request);
+      this.options.onActivity?.(
+        action === "interview-highlight" ? "AI 인터뷰 발췌 결과를 표시했습니다."
+          : action === "edit-outline" ? "AI 편집 구성안을 표시했습니다."
+            : "AI 유튜브 메타데이터를 표시했습니다.",
+      );
+    });
+    // Render after runBusy clears isBusy so the seek buttons are not created disabled.
+    this.renderAnalysisPanel();
+  }
+
   async flushAutosave(): Promise<void> {
     if (this.autosaveTimer !== null) this.clearTimer(this.autosaveTimer);
     this.autosaveTimer = null;
@@ -750,10 +869,26 @@ export class SubtitleController {
     this.bind(this.required("subtitle-ai-reflow-btn"), "click", () => guarded(() => this.runAi("reflow"), "AI 자막 줄바꿈 실패"));
     this.bind(this.required("subtitle-ai-review-btn"), "click", () => guarded(() => this.runAi("review"), "AI 자막 검토 실패"));
     this.bind(this.required("subtitle-ai-translate-btn"), "click", () => guarded(() => this.runAi("translate"), "AI 자막 번역 실패"));
+    this.bind(this.required("subtitle-ai-highlight-btn"), "click", () => guarded(() => this.runAnalysis("interview-highlight"), "AI 인터뷰 발췌 실패"));
+    this.bind(this.required("subtitle-ai-outline-btn"), "click", () => guarded(() => this.runAnalysis("edit-outline"), "AI 편집 구성안 실패"));
+    this.bind(this.required("subtitle-ai-youtube-btn"), "click", () => guarded(() => this.runAnalysis("youtube-metadata"), "AI 유튜브 메타데이터 실패"));
     this.bind(this.required("subtitle-max-chars-input"), "change", () => this.render());
     const list = this.required("subtitle-cue-list");
     this.bind(list, "click", (event) => guarded(() => this.handleListClick(event), "자막 편집 실패"));
     this.bind(list, "keydown", (event) => guarded(() => this.handleListKeydown(event), "자막 키보드 편집 실패"));
+    const analysisPanel = this.optional("subtitle-analysis-panel");
+    if (analysisPanel) {
+      this.bind(analysisPanel, "click", (event) => guarded(() => this.handleAnalysisPanelClick(event), "AI 분석 결과 이동 실패"));
+    }
+  }
+
+  private async handleAnalysisPanelClick(event: SubtitleDomEvent): Promise<void> {
+    const panel = this.optional("subtitle-analysis-panel");
+    if (!panel) return;
+    const target = closestWithData(event.target, "subtitleAction", panel);
+    if (!target || target.disabled || target.dataset.subtitleAction !== "seek-analysis-cue") return;
+    const cueId = target.dataset.cueId ?? "";
+    if (cueId) await this.seekToWord(cueId);
   }
 
   private async importFromAdapter(): Promise<void> {
@@ -884,7 +1019,9 @@ export class SubtitleController {
     this.documentValue = this.history.commit(safe);
     this.recordDocumentChange();
     this.reconcileSelection();
+    this.analysisResult = null;
     this.render();
+    this.renderAnalysisPanel();
     this.emitChange();
     this.scheduleAutosave();
     this.options.onActivity?.(message);
@@ -893,7 +1030,9 @@ export class SubtitleController {
   private afterHistoryChange(message: string): void {
     this.recordDocumentChange();
     this.reconcileSelection();
+    this.analysisResult = null;
     this.render();
+    this.renderAnalysisPanel();
     this.emitChange();
     this.scheduleAutosave();
     this.options.onActivity?.(message);
@@ -984,7 +1123,7 @@ export class SubtitleController {
 
   private render(): void {
     const list = this.required("subtitle-cue-list");
-    list.replaceChildren();
+    clearElementChildren(list);
     this.renderedCueElements.clear();
     this.renderedWordElements.clear();
     this.activeDomDirty = true;
@@ -1110,6 +1249,9 @@ export class SubtitleController {
       ["subtitle-ai-reflow-btn", empty || !this.options.aiProvider],
       ["subtitle-ai-review-btn", empty || !this.options.aiProvider],
       ["subtitle-ai-translate-btn", empty || !this.options.aiProvider],
+      ["subtitle-ai-highlight-btn", empty || !this.options.analysisProvider],
+      ["subtitle-ai-outline-btn", empty || !this.options.analysisProvider],
+      ["subtitle-ai-youtube-btn", empty || !this.options.analysisProvider],
       ["subtitle-import-btn", !this.options.onImportSrt],
     ];
     states.forEach(([id, disabled]) => {
@@ -1118,6 +1260,75 @@ export class SubtitleController {
     });
     const root = this.optional("subtitle-editor");
     root?.setAttribute("aria-busy", String(this.isBusy));
+  }
+
+  private cueLabel(cueId: string): string {
+    const cue = this.documentValue.cues.find((candidate) => candidate.cueId === cueId);
+    if (!cue) return cueId;
+    const text = cue.text.length > 24 ? `${cue.text.slice(0, 24)}…` : cue.text;
+    return `${secondsToSrtTime(cue.start).slice(0, 8)} ${text}`;
+  }
+
+  private seekButton(cueId: string): SubtitleDomElement {
+    // Carries data-subtitle-action/data-cue-id for the delegated panel handler;
+    // no per-button listener so repeated renders never leak cleanups.
+    return this.actionButton(this.cueLabel(cueId), "seek-analysis-cue", cueId);
+  }
+
+  private renderAnalysisPanel(): void {
+    const panel = this.optional("subtitle-analysis-panel");
+    if (!panel) return;
+    clearElementChildren(panel);
+    const result = this.analysisResult;
+    if (!result) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+
+    if (result.action === "interview-highlight") {
+      if (result.highlights.length === 0) {
+        panel.append(this.create("p", "subtitle-analysis-empty", "유효한 하이라이트를 찾지 못했습니다."));
+        return;
+      }
+      const list = this.create("ul", "subtitle-analysis-list");
+      for (const highlight of result.highlights) {
+        const item = this.create("li", "subtitle-analysis-item");
+        item.append(this.seekButton(highlight.cueId), this.create("span", "subtitle-analysis-reason", highlight.reason));
+        list.append(item);
+      }
+      panel.append(list);
+      return;
+    }
+
+    if (result.action === "edit-outline") {
+      if (result.segments.length === 0) {
+        panel.append(this.create("p", "subtitle-analysis-empty", "구성안을 생성하지 못했습니다."));
+        return;
+      }
+      const list = this.create("ol", "subtitle-analysis-list");
+      for (const segment of result.segments) {
+        const item = this.create("li", "subtitle-analysis-item");
+        const cues = this.create("div", "subtitle-analysis-cues");
+        segment.cueIds.forEach((cueId) => cues.append(this.seekButton(cueId)));
+        item.append(
+          this.create("strong", "", `${segment.order}. ${segment.label}`),
+          this.create("span", "subtitle-analysis-reason", segment.reason),
+          cues,
+        );
+        list.append(item);
+      }
+      panel.append(list);
+      return;
+    }
+
+    const copy = this.create("div", "subtitle-analysis-youtube");
+    copy.append(
+      this.create("p", "subtitle-analysis-youtube-title", result.title),
+      this.create("p", "subtitle-analysis-youtube-description", result.description),
+      this.create("p", "subtitle-analysis-youtube-tags", result.tags.map((tag) => `#${tag}`).join(" ")),
+    );
+    panel.append(copy);
   }
 
   private renderMeta(): void {

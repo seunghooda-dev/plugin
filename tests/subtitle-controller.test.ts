@@ -137,6 +137,17 @@ class FakeElement implements SubtitleDomElement {
     return result;
   }
 
+  get firstChild(): FakeElement | null {
+    return this.children[0] ?? null;
+  }
+
+  removeChild(node: FakeElement): FakeElement {
+    const index = this.children.indexOf(node);
+    if (index >= 0) this.children.splice(index, 1);
+    node.parentElement = null;
+    return node;
+  }
+
   focus(): void {
     this.focused = true;
   }
@@ -295,6 +306,10 @@ const CONTROL_IDS: ReadonlyArray<[string, string, string?]> = [
   ["subtitle-ai-reflow-btn", "button"],
   ["subtitle-ai-review-btn", "button"],
   ["subtitle-ai-translate-btn", "button"],
+  ["subtitle-ai-highlight-btn", "button"],
+  ["subtitle-ai-outline-btn", "button"],
+  ["subtitle-ai-youtube-btn", "button"],
+  ["subtitle-analysis-panel", "div"],
   ["subtitle-max-chars-input", "input", "19"],
   ["subtitle-translate-language-input", "input", "영어"],
   ["subtitle-cue-list", "div"],
@@ -1022,6 +1037,141 @@ describe("SubtitleController SRT, autosave, and provider boundaries", () => {
     controller.setDocument(sampleDocument());
     await assert.rejects(() => controller.runAi("review"), /cueId/u);
     assert.equal(controller.document.cues[0]?.cueId, "cue-1");
+  });
+
+  it("runs an AI analysis without mutating the document or history", async () => {
+    const dom = editorDom();
+    const changes: string[] = [];
+    const controller = new SubtitleController({
+      dom,
+      storage: null,
+      analysisProvider: () => ({ highlights: [{ cueId: "cue-1", reason: "핵심 발언" }] }),
+      onChange: (document) => changes.push(document.projectKey),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    changes.length = 0;
+    const before = controller.document;
+    await controller.runAnalysis("interview-highlight");
+    assert.deepEqual(controller.analysis, {
+      action: "interview-highlight",
+      highlights: [{ cueId: "cue-1", reason: "핵심 발언" }],
+    });
+    assert.deepEqual(controller.document, before);
+    assert.equal(changes.length, 0);
+    assert.equal(dom.getElementById("subtitle-undo-btn")?.disabled, true);
+  });
+
+  it("seeks to a cue when an analysis result button is clicked via panel delegation", async () => {
+    const dom = editorDom();
+    const seeks: string[] = [];
+    const controller = new SubtitleController({
+      dom,
+      storage: null,
+      analysisProvider: () => ({ highlights: [{ cueId: "cue-1", reason: "핵심 발언" }] }),
+      onSeek: (_seconds, cueId) => { seeks.push(cueId); },
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await controller.runAnalysis("interview-highlight");
+
+    const panel = dom.getElementById("subtitle-analysis-panel")!;
+    const seekButton = panel
+      .querySelectorAll(".subtitle-action-button")
+      .find((button) => button.dataset.subtitleAction === "seek-analysis-cue");
+    assert.ok(seekButton, "분석 패널에 seek 버튼이 렌더링되어야 합니다.");
+    // Delegated handler on the panel resolves the click — buttons carry no own listener.
+    panel.emit("click", seekButton);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(seeks, ["cue-1"]);
+  });
+
+  it("filters interview-highlight entries that reference an unknown cueId", async () => {
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      analysisProvider: () => ({
+        highlights: [
+          { cueId: "cue-1", reason: "실제 큐" },
+          { cueId: "no-such-cue", reason: "존재하지 않는 큐" },
+        ],
+      }),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await controller.runAnalysis("interview-highlight");
+    assert.deepEqual(controller.analysis, {
+      action: "interview-highlight",
+      highlights: [{ cueId: "cue-1", reason: "실제 큐" }],
+    });
+  });
+
+  it("drops edit-outline segments left empty after cueId filtering and renumbers order", async () => {
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      analysisProvider: () => ({
+        segments: [
+          { order: 1, cueIds: ["no-such-cue"], label: "가짜 구간", reason: "무효" },
+          { order: 2, cueIds: ["cue-1"], label: "도입부", reason: "인사" },
+          { order: 3, cueIds: ["cue-2", "unknown"], label: "본론", reason: "설명" },
+        ],
+      }),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await controller.runAnalysis("edit-outline");
+    assert.deepEqual(controller.analysis, {
+      action: "edit-outline",
+      segments: [
+        { order: 1, cueIds: ["cue-1"], label: "도입부", reason: "인사" },
+        { order: 2, cueIds: ["cue-2"], label: "본론", reason: "설명" },
+      ],
+    });
+  });
+
+  it("rejects a youtube-metadata response with no title", async () => {
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      analysisProvider: () => ({ title: "", description: "설명", tags: [] }),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await assert.rejects(() => controller.runAnalysis("youtube-metadata"), /제목/u);
+    assert.equal(controller.analysis, null);
+  });
+
+  it("clears a stale analysis result after the document changes", async () => {
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      analysisProvider: () => ({ highlights: [{ cueId: "cue-1", reason: "핵심 발언" }] }),
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    await controller.runAnalysis("interview-highlight");
+    assert.ok(controller.analysis);
+    controller.editWord("cue-1", "word-1", "수정됨");
+    assert.equal(controller.analysis, null);
+  });
+
+  it("prevents duplicate analysis execution while a provider is pending", async () => {
+    let release: ((value: unknown) => void) | undefined;
+    const pending = new Promise<unknown>((resolve) => { release = resolve; });
+    const controller = new SubtitleController({
+      dom: editorDom(),
+      storage: null,
+      analysisProvider: () => pending,
+    });
+    await controller.initialize();
+    controller.setDocument(sampleDocument());
+    const first = controller.runAnalysis("interview-highlight");
+    await assert.rejects(() => controller.runAnalysis("edit-outline"), /이미 진행 중/u);
+    release?.({ highlights: [] });
+    await first;
+    assert.equal(controller.isBusy, false);
   });
 
   it("rejects translation-language prompt content before the provider runs", async () => {

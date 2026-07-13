@@ -5,11 +5,14 @@ import { describe, it } from "node:test";
 
 import {
   ShortFlowError,
+  assertAudioInsertRangeAvailable,
   assertAutomationPlan,
+  audioProjectItemDurationSeconds,
   buildExportFilename,
   buildSafeZoneItemAlignmentActions,
   centeredPosition,
   cloneSequence,
+  commitTimelineInsertAfterPreflight,
   errorMessage,
   exportTimestamp,
   joinNativePath,
@@ -693,6 +696,18 @@ describe("Premiere import path boundary", () => {
     assert.match(bulkBody, /assertActiveContextKey\(contextKey\)/u);
   });
 
+  it("keeps the production insert transaction behind the audio collision gate", () => {
+    const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
+    const functionStart = source.indexOf("export async function importAndInsertAsset");
+    const functionEnd = source.indexOf("export function errorMessage", functionStart);
+    const body = source.slice(functionStart, functionEnd);
+    assert.match(body, /audioProjectItemDurationSeconds\(clipProjectItem, audioMediaType\)/u);
+    assert.match(body, /commitTimelineInsertAfterPreflight/u);
+    const guardIndex = body.indexOf("assertAudioInsertRangeAvailable(");
+    const actionIndex = body.indexOf("createInsertProjectItemAction(");
+    assert.ok(guardIndex >= 0 && guardIndex < actionIndex);
+  });
+
   it("rechecks the source Host context immediately before cloning for automation", () => {
     const source = readFileSync(path.resolve(__dirname, "../../src/premiere.ts"), "utf8");
     const cloneStart = source.indexOf("async function cloneSequence");
@@ -778,6 +793,133 @@ describe("errorMessage", () => {
     const message = errorMessage(new Error(`Authorization: Bearer ${secret}`));
     assert.equal(message.includes(secret), false);
     assert.match(message, /REDACTED/u);
+  });
+});
+
+describe("audio timeline insertion collision gate", () => {
+  function trackItem(start: number, end: number) {
+    return {
+      getStartTime: async () => ({ seconds: start }),
+      getEndTime: async () => ({ seconds: end }),
+    };
+  }
+
+  function sequenceProbe(
+    items: readonly unknown[],
+    options: { count?: number; actualIndex?: number; getItemsError?: boolean } = {},
+  ) {
+    const count = options.count ?? 2;
+    const actualIndex = options.actualIndex ?? 1;
+    return {
+      getAudioTrackCount: async () => count,
+      getAudioTrack: async () => ({
+        getIndex: async () => actualIndex,
+        getTrackItems: (type: unknown, includeEmpty: boolean) => {
+          assert.equal(type, "clip");
+          assert.equal(includeEmpty, false);
+          if (options.getItemsError) throw new Error("track unavailable");
+          return [...items];
+        },
+      }),
+    };
+  }
+
+  function transactionCounter() {
+    let calls = 0;
+    return {
+      project: {
+        executeTransaction: () => {
+          calls += 1;
+          return true;
+        },
+      },
+      calls: () => calls,
+    };
+  }
+
+  it("derives a finite audio duration only from public ClipProjectItem In/Out APIs", async () => {
+    const requestedTypes: string[] = [];
+    assert.equal(await audioProjectItemDurationSeconds({
+      getInPoint: async (mediaType: string) => {
+        requestedTypes.push(mediaType);
+        return { seconds: 0.5 };
+      },
+      getOutPoint: async (mediaType: string) => {
+        requestedTypes.push(mediaType);
+        return { seconds: 3 };
+      },
+    }, "audio"), 2.5);
+    assert.deepEqual(requestedTypes, ["audio", "audio"]);
+
+    await assert.rejects(
+      audioProjectItemDurationSeconds({
+        getInPoint: async () => ({ seconds: 0 }),
+        getOutPoint: async () => ({ seconds: 0 }),
+      }, "audio"),
+      (error: unknown) => assertShortFlowError(error, "ASSET_AUDIO_DURATION_UNAVAILABLE"),
+    );
+  });
+
+  it("allows clips adjacent to both insertion boundaries and commits once", async () => {
+    const sequence = sequenceProbe([trackItem(0, 5), trackItem(7, 9)]);
+    const transaction = transactionCounter();
+    await commitTimelineInsertAfterPreflight(
+      () => assertAudioInsertRangeAvailable(sequence, 1, { seconds: 5 }, 2, "clip"),
+      () => transaction.project.executeTransaction(),
+    );
+    assert.equal(transaction.calls(), 1);
+  });
+
+  it("blocks an occupied playhead interval before executeTransaction", async () => {
+    const sequence = sequenceProbe([trackItem(4.5, 5.5)]);
+    const transaction = transactionCounter();
+    await assert.rejects(
+      commitTimelineInsertAfterPreflight(
+        () => assertAudioInsertRangeAvailable(sequence, 1, { seconds: 5 }, 2, "clip"),
+        () => transaction.project.executeTransaction(),
+      ),
+      (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_COLLISION"),
+    );
+    assert.equal(transaction.calls(), 0);
+  });
+
+  it("blocks a nonexistent or unavailable audio track before executeTransaction", async () => {
+    for (const scenario of [
+      { sequence: sequenceProbe([], { count: 1 }), code: "INVALID_AUDIO_TRACK" },
+      { sequence: sequenceProbe([], { getItemsError: true }), code: "AUDIO_TRACK_UNAVAILABLE" },
+      { sequence: sequenceProbe([], { actualIndex: 0 }), code: "AUDIO_TRACK_UNAVAILABLE" },
+    ]) {
+      const transaction = transactionCounter();
+      await assert.rejects(
+        commitTimelineInsertAfterPreflight(
+          () => assertAudioInsertRangeAvailable(scenario.sequence, 1, { seconds: 5 }, 2, "clip"),
+          () => transaction.project.executeTransaction(),
+        ),
+        (error: unknown) => assertShortFlowError(error, scenario.code),
+      );
+      assert.equal(transaction.calls(), 0, scenario.code);
+    }
+  });
+
+  it("reports transaction rejection without claiming the track is locked", async () => {
+    let transactionCalls = 0;
+    await assert.rejects(
+      commitTimelineInsertAfterPreflight(
+        async () => undefined,
+        () => {
+          transactionCalls += 1;
+          return false;
+        },
+      ),
+      (error: unknown) => {
+        assertShortFlowError(error, "ASSET_INSERT_TRANSACTION_REJECTED");
+        assert.ok(error instanceof ShortFlowError);
+        assert.match(error.message, /잠금 상태를 미리 확인할 수 없/u);
+        assert.doesNotMatch(error.message, /잠겼/u);
+        return true;
+      },
+    );
+    assert.equal(transactionCalls, 1);
   });
 });
 

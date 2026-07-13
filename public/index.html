@@ -1108,7 +1108,20 @@
                 <input id="subtitle-translate-language-input" type="text" value="영어" maxlength="64" autocomplete="off" placeholder="번역 언어" />
                 <button id="subtitle-ai-translate-btn" class="secondary-button" type="button" disabled>번역</button>
               </div>
+              <div class="button-cluster subtitle-ai-actions">
+                <button id="subtitle-ai-highlight-btn" class="secondary-button" type="button" disabled>인터뷰 발췌</button>
+                <button id="subtitle-ai-outline-btn" class="secondary-button" type="button" disabled>편집 구성안</button>
+                <button id="subtitle-ai-youtube-btn" class="secondary-button" type="button" disabled>유튜브 메타데이터</button>
+              </div>
             </div>
+
+            <div
+              id="subtitle-analysis-panel"
+              class="subtitle-analysis-panel"
+              aria-label="AI 자막 분석 결과"
+              aria-live="polite"
+              hidden
+            ></div>
 
             <div class="subtitle-list-heading">
               <strong>편집 큐</strong>
@@ -1951,6 +1964,20 @@
         <span>Premiere Pro에서 작업이 완료될 때까지 기다려 주세요.</span>
       </div>
     </div>
+
+    <dialog id="recovery-confirm-dialog" class="recovery-confirm-dialog" aria-labelledby="recovery-confirm-title" aria-describedby="recovery-confirm-description">
+      <div class="recovery-confirm-content">
+        <p class="eyebrow">NON-DESTRUCTIVE RECOVERY</p>
+        <h2 id="recovery-confirm-title">복제 시퀀스 제거</h2>
+        <p id="recovery-confirm-description">원본 시퀀스는 유지하고, 복구 기록과 일치하는 검증된 복제 시퀀스만 제거합니다.</p>
+        <strong id="recovery-confirm-label" class="recovery-confirm-label"></strong>
+        <p class="action-note">이 작업은 명시적으로 확인한 경우에만 실행됩니다.</p>
+        <div class="form-actions aligned-end recovery-confirm-actions">
+          <button id="recovery-confirm-cancel-btn" class="secondary-button" type="button">취소</button>
+          <button id="recovery-confirm-approve-btn" class="danger-button" type="button">복제본 제거</button>
+        </div>
+      </div>
+    </dialog>
 
     <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
 

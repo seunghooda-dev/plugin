@@ -11,10 +11,12 @@ import {
   TELEMETRY_STORAGE_KEY,
   DiagnosticsError,
   TelemetryManager,
+  assertDiagnosticRedactionSelfCheck,
   buildDiagnosticsReport,
   compareVersions,
   createDefaultTelemetryAdapter,
   diagnosticBundleToJSON,
+  diagnosticRedactionSelfCheck,
   guardApi,
   normalizeDiagnosticBundle,
   normalizeTelemetryPayload,
@@ -536,6 +538,57 @@ describe("anonymous diagnostic bundle", () => {
     assert.ok(Object.isFrozen(bundle));
     assert.ok(Object.isFrozen(bundle.logs));
     assert.ok(Object.isFrozen(bundle.context));
+  });
+});
+
+describe("active diagnostic redaction self-check", () => {
+  it("passes canaries through the production diagnostic JSON serializer", () => {
+    assert.equal(diagnosticRedactionSelfCheck(), true);
+    assert.doesNotThrow(() => assertDiagnosticRedactionSelfCheck());
+  });
+
+  it("fails closed when a serializer leaves synthetic sensitive values intact", () => {
+    let unsafePayload = "";
+    const passed = diagnosticRedactionSelfCheck((input) => {
+      unsafePayload = JSON.stringify(input);
+      return unsafePayload;
+    });
+
+    assert.equal(passed, false);
+    assert.match(unsafePayload, /SFDiagCanaryBearer|SFDiagCanaryTranscript|sk-proj-SFDiagCanaryKey/u);
+    assert.equal(JSON.stringify(passed).includes("SFDiagCanary"), false);
+  });
+
+  it("rejects marker-only or malformed output that did not serialize the self-check input", () => {
+    const markerOnly = JSON.stringify({
+      schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
+      context: {},
+      values: [
+        "Bearer <redacted>",
+        "<redacted:secret>",
+        "<redacted:path>",
+        "<redacted:user>",
+        "<redacted:media>",
+        "<redacted:content>",
+      ],
+    });
+    assert.equal(diagnosticRedactionSelfCheck(() => markerOnly), false);
+    assert.equal(diagnosticRedactionSelfCheck(() => "not-json"), false);
+  });
+
+  it("throws only a fixed safe error when serialization fails with canaries in the cause", () => {
+    assert.throws(
+      () => assertDiagnosticRedactionSelfCheck((input) => {
+        throw new Error(`unsafe serializer: ${JSON.stringify(input.context)}`);
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof DiagnosticsError);
+        assert.equal(error.code, "REDACTION_SELF_CHECK_FAILED");
+        assert.equal(error.causeValue, undefined);
+        assert.doesNotMatch(error.message, /SFDiagCanary|sk-proj-|Bearer|@example/u);
+        return true;
+      },
+    );
   });
 });
 

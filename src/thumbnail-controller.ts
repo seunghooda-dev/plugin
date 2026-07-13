@@ -32,6 +32,7 @@ import {
 import { bind, element, valueOf } from "./ui";
 
 export const THUMBNAIL_STORAGE_KEY = "shortflow.thumbnail.layers.v1";
+export const THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY = "shortflow.thumbnail.outputFolderToken.v1";
 export const THUMBNAIL_FILE_TYPES = Object.freeze(["png", "jpg", "jpeg", "webp"] as const);
 export const THUMBNAIL_AI_PRESETS = Object.freeze([
   "basic",
@@ -70,8 +71,8 @@ export interface ThumbnailLocalFileSystem {
     allowMultiple?: boolean;
     types?: readonly string[];
   }): Promise<ThumbnailFileEntry | ThumbnailFileEntry[] | null | undefined>;
-  createPersistentToken(entry: ThumbnailFileEntry): Promise<string>;
-  getEntryForPersistentToken(token: string): Promise<ThumbnailFileEntry>;
+  createPersistentToken(entry: ThumbnailFileEntry | ThumbnailFolderEntry): Promise<string>;
+  getEntryForPersistentToken(token: string): Promise<ThumbnailFileEntry | ThumbnailFolderEntry>;
   getFolder(): Promise<ThumbnailFolderEntry | null | undefined>;
 }
 
@@ -186,7 +187,15 @@ function fileUrl(entry: ThumbnailFileEntry): string {
 function isUsableFileEntry(entry: unknown): entry is ThumbnailFileEntry {
   if (typeof entry !== "object" || entry === null) return false;
   const candidate = entry as ThumbnailFileEntry;
-  return candidate.isFile !== false && fileName(candidate).length > 0;
+  return candidate.isFile !== false
+    && typeof (entry as Partial<ThumbnailFolderEntry>).createFile !== "function"
+    && fileName(candidate).length > 0;
+}
+
+function isUsableFolderEntry(entry: unknown): entry is ThumbnailFolderEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  const candidate = entry as ThumbnailFolderEntry;
+  return candidate.isFolder !== false && typeof candidate.createFile === "function";
 }
 
 function validLayout(value: unknown): value is ThumbnailLayoutId {
@@ -971,12 +980,15 @@ export class ThumbnailController {
       }
       await this.renderCanvas();
       const bytes = await canvasToImageBytes(element<HTMLCanvasElement>("thumbnail-canvas"), format);
-      const folder = await this.adapter.localFileSystem.getFolder();
+      const folder = await this.resolveOutputFolder();
       if (!folder) return;
       const name = timestampName(this.now(), format);
-      const entry = await folder.createFile(name, { overwrite: false });
-      if (typeof entry.write !== "function") throw new Error(`생성한 ${format.toUpperCase()} 파일에 쓰기 기능이 없습니다.`);
-      await entry.write(bytesToArrayBuffer(bytes), { format: this.adapter.binaryFormat });
+      const entry = await this.writeExportFile(
+        folder,
+        name,
+        bytes,
+        `생성한 ${format.toUpperCase()} 파일에 쓰기 기능이 없습니다.`,
+      );
       this.options.onActivity?.(`${fileName(entry) || name} 썸네일을 저장했습니다.`);
     });
   }
@@ -996,14 +1008,91 @@ export class ThumbnailController {
         },
       });
       const bytes = utf8Encode(svg);
-      const folder = await this.adapter.localFileSystem.getFolder();
+      const folder = await this.resolveOutputFolder();
       if (!folder) return;
       const name = timestampSvgName(this.now());
-      const entry = await folder.createFile(name, { overwrite: false });
-      if (typeof entry.write !== "function") throw new Error("생성한 SVG 파일에 쓰기 기능이 없습니다.");
-      await entry.write(bytesToArrayBuffer(bytes), { format: this.adapter.binaryFormat });
+      const entry = await this.writeExportFile(
+        folder,
+        name,
+        bytes,
+        "생성한 SVG 파일에 쓰기 기능이 없습니다.",
+      );
       this.options.onActivity?.(`${fileName(entry) || name} SVG fallback 썸네일을 저장했습니다.`);
     });
+  }
+
+  private async writeExportFile(
+    folder: ThumbnailFolderEntry,
+    name: string,
+    bytes: Uint8Array,
+    missingWriteMessage: string,
+  ): Promise<ThumbnailFileEntry> {
+    try {
+      const entry = await folder.createFile(name, { overwrite: false });
+      if (typeof entry.write !== "function") throw new Error(missingWriteMessage);
+      await entry.write(bytesToArrayBuffer(bytes), { format: this.adapter.binaryFormat });
+      return entry;
+    } catch (error) {
+      await this.clearOutputFolderTokenBestEffort();
+      throw error;
+    }
+  }
+
+  private async clearOutputFolderTokenBestEffort(): Promise<void> {
+    const storage = this.adapter.storage;
+    if (!storage) return;
+    if (storage.removeItem) {
+      try {
+        await storage.removeItem(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY);
+        return;
+      } catch {
+        // removeItem 실패 시 빈 토큰 저장으로 권한 재사용을 막습니다.
+      }
+    }
+    try {
+      await storage.setItem(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY, "");
+    } catch {
+      // token 정리 실패가 원래 파일 저장 오류를 가리지 않게 합니다.
+    }
+  }
+
+  private async resolveOutputFolder(): Promise<ThumbnailFolderEntry | null> {
+    const storage = this.adapter.storage;
+    if (storage) {
+      let stored: unknown;
+      try {
+        stored = await storage.getItem(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY);
+      } catch {
+        this.options.onActivity?.("저장된 썸네일 출력 폴더 권한을 읽지 못해 폴더를 다시 선택합니다.");
+      }
+      const token = typeof stored === "string" ? stored.trim() : "";
+      if (token) {
+        try {
+          const restored = await this.adapter.localFileSystem.getEntryForPersistentToken(token);
+          if (isUsableFolderEntry(restored)) return restored;
+        } catch {
+          // 만료되거나 이동된 출력 폴더는 아래에서 다시 선택합니다.
+        }
+        await this.clearOutputFolderTokenBestEffort();
+      }
+    }
+
+    const folder = await this.adapter.localFileSystem.getFolder();
+    if (!folder) return null;
+    if (!isUsableFolderEntry(folder)) {
+      throw new Error("썸네일 출력 위치에는 파일이 아닌 폴더를 선택해 주세요.");
+    }
+    if (storage) {
+      try {
+        const tokenValue = await this.adapter.localFileSystem.createPersistentToken(folder);
+        const token = typeof tokenValue === "string" ? tokenValue.trim() : "";
+        if (!token) throw new Error("썸네일 출력 폴더의 영구 접근 권한을 만들지 못했습니다.");
+        await storage.setItem(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY, token);
+      } catch {
+        this.options.onActivity?.("썸네일은 저장하지만 출력 폴더 권한을 기억하지 못해 다음 저장 때 다시 선택해야 합니다.");
+      }
+    }
+    return folder;
   }
 
   private async svgHrefForLayer(layer: ThumbnailLayer): Promise<string> {
@@ -1019,7 +1108,7 @@ export class ThumbnailController {
       throw new Error(`레이어 ${layer.id}의 SVG 이미지 경로를 찾지 못했습니다.`);
     }
     const entry = await this.adapter.localFileSystem.getEntryForPersistentToken(record.token);
-    if (typeof entry.read !== "function") {
+    if (!isUsableFileEntry(entry) || typeof entry.read !== "function") {
       if (record.url) return record.url;
       throw new Error(`${record.name} 파일을 SVG에 포함할 수 없습니다.`);
     }

@@ -143,6 +143,12 @@ const FEATURE_IDS = {
 const OPERATIONAL_UI_IDS = [
   "recovery-count",
   "recovery-list",
+  "recovery-confirm-dialog",
+  "recovery-confirm-title",
+  "recovery-confirm-description",
+  "recovery-confirm-label",
+  "recovery-confirm-cancel-btn",
+  "recovery-confirm-approve-btn",
   "run-diagnostics-btn",
   "export-diagnostics-btn",
   "diagnostics-summary",
@@ -393,6 +399,10 @@ function assertOperationalUiContracts(document: StaticDocument): void {
   const recoveryList = elementById(document, "recovery-list");
   assert.equal(recoveryList.attributes["aria-live"], "polite");
   assert.equal(recoveryList.attributes["aria-relevant"], "additions text");
+  const recoveryDialog = elementById(document, "recovery-confirm-dialog");
+  assert.equal(recoveryDialog.tag, "dialog");
+  assert.equal(recoveryDialog.attributes["aria-labelledby"], "recovery-confirm-title");
+  assert.equal(recoveryDialog.attributes["aria-describedby"], "recovery-confirm-description");
 
   const runButton = elementById(document, "run-diagnostics-btn");
   const exportButton = elementById(document, "export-diagnostics-btn");
@@ -421,12 +431,20 @@ function assertOperationalSourceContracts(source: string): void {
   assert.match(source, /bind\("export-diagnostics-btn",\s*"click",\s*guarded\(handleExportDiagnostics/);
   assert.match(source, /button\.type\s*=\s*"button";[\s\S]*?button\.textContent\s*=\s*"복제본 제거";/);
   assert.match(source, /removeVerifiedClonedSequence\(/);
+  assert.match(source, /dialog\.uxpShowModal\.bind\(dialog\)/);
+  assert.match(source, /if \(!await requestRecoveryRollbackConfirmation\(entry\)\)/);
+  assert.doesNotMatch(source, /globalThis as unknown as \{ confirm\?/);
 
   assert.equal(tokenCount(source, "collectDiagnosticsReport"), 2, "diagnostics collection must occur only in its click handler");
   assert.equal(tokenCount(source, "handleRunDiagnostics"), 2, "diagnostics execution must have only its declaration and click binding");
   assert.equal(tokenCount(source, "handleExportDiagnostics"), 2, "diagnostics export must have only its declaration and click binding");
   assert.equal(tokenCount(source, "TelemetryManager"), 0, "the panel must not start an automatic telemetry sender");
 
+  const exportHandler = /async function handleExportDiagnostics\(\): Promise<void> \{[\s\S]*?\n\}/u.exec(source)?.[0] ?? "";
+  const selfCheckIndex = exportHandler.indexOf("assertDiagnosticRedactionSelfCheck();");
+  const pickerIndex = exportHandler.indexOf("getFileForSaving?.(");
+  assert.ok(selfCheckIndex >= 0, "diagnostics export must run the active redaction self-check");
+  assert.ok(pickerIndex > selfCheckIndex, "redaction self-check must run before opening the save picker");
   assert.match(source, /diagnosticBundleToJSON\(\{[\s\S]*?reportPurpose:\s*"user-initiated-local-export"/);
   assert.match(source, /getFileForSaving\?\.\([\s\S]*?ShortFlow_Diagnostics_/);
   assert.match(source, /await file\.write\(payload,/);

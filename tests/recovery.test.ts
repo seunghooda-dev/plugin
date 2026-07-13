@@ -10,8 +10,10 @@ import {
   RECOVERY_STORAGE_KEY,
   RecoveryError,
   RecoveryManager,
+  RECOVERY_CONFIRM_RESULT,
   type BeginOperationInput,
   type OperationJournalEntry,
+  confirmDestructiveRecovery,
   type RecoveryStorage,
   createPreviewDiff,
   redactRecoveryData,
@@ -19,6 +21,26 @@ import {
   validateCloneBeforeMutation,
   validateOperationId,
 } from "../src/recovery";
+
+describe("destructive recovery confirmation", () => {
+  it("fails closed when the UXP modal is missing, cancelled, malformed, or throws", async () => {
+    assert.equal(await confirmDestructiveRecovery(undefined, {}), false);
+    assert.equal(await confirmDestructiveRecovery(() => "cancel", {}), false);
+    assert.equal(await confirmDestructiveRecovery(() => "reasonCanceled", {}), false);
+    assert.equal(await confirmDestructiveRecovery(() => true, {}), false);
+    assert.equal(await confirmDestructiveRecovery(() => { throw new Error("dialog unavailable"); }, {}), false);
+  });
+
+  it("allows recovery only after the explicit UXP modal result", async () => {
+    let received: unknown;
+    const options = { title: "remove verified clone" };
+    assert.equal(await confirmDestructiveRecovery((value: unknown) => {
+      received = value;
+      return Promise.resolve(RECOVERY_CONFIRM_RESULT);
+    }, options), true);
+    assert.equal(received, options);
+  });
+});
 
 class MemoryStorage implements RecoveryStorage {
   readonly values = new Map<string, string>();

@@ -15,6 +15,9 @@ export interface ReferenceControllerOptions {
   onActivity?: (message: string) => void;
   onError?: (error: unknown, context: string) => void;
   onSelectionChange?: (selectedReferenceIds: readonly string[]) => void;
+  enrichPromptProvider?: (prompt: string) => Promise<string>;
+  /** Injectable for tests; defaults to the UXP-backed library. */
+  library?: ReferenceLibrary;
 }
 
 function entryName(entry: ReferenceFileEntry): string {
@@ -41,12 +44,14 @@ function tagsText(tags: readonly string[]): string {
  * 파일 바이너리는 AI 실행 시에만 읽고, 카드에는 UXP가 제공한 URL만 사용합니다.
  */
 export class ReferenceController {
-  private readonly library = new ReferenceLibrary(createDefaultReferenceAdapter());
+  private readonly library: ReferenceLibrary;
   private readonly selectedReferenceIds = new Set<string>();
   private stagedEntries: ReferenceFileEntry[] = [];
   private dragFromIndex = -1;
 
-  constructor(private readonly options: ReferenceControllerOptions = {}) {}
+  constructor(private readonly options: ReferenceControllerOptions = {}) {
+    this.library = options.library ?? new ReferenceLibrary(createDefaultReferenceAdapter());
+  }
 
   async initialize(): Promise<void> {
     this.bindEvents();
@@ -254,6 +259,48 @@ export class ReferenceController {
     source.addEventListener("change", saveMetadata);
     tags.addEventListener("change", saveMetadata);
 
+    const enrichRow = document.createElement("div");
+    enrichRow.className = "reference-enrich-row";
+    const enrichBtn = document.createElement("button");
+    enrichBtn.type = "button";
+    enrichBtn.className = "reference-enrich-btn";
+    enrichBtn.textContent = "AI 보강";
+    enrichBtn.disabled = !this.options.enrichPromptProvider;
+    enrichBtn.setAttribute("aria-label", `${item.name} 활용 메모 AI 보강`);
+    enrichBtn.addEventListener("click", () => void this.guard(async () => {
+      const provider = this.options.enrichPromptProvider;
+      if (!provider) return;
+      if (!notes.value.trim()) throw new Error("보강할 활용 메모를 먼저 입력해 주세요.");
+      enrichBtn.disabled = true;
+      let enriched: string;
+      try {
+        enriched = await provider(notes.value);
+      } finally {
+        enrichBtn.disabled = false;
+      }
+      enrichRow.querySelector(".reference-enrich-preview")?.remove();
+      const preview = document.createElement("div");
+      preview.className = "reference-enrich-preview";
+      const previewText = document.createElement("p");
+      previewText.textContent = enriched;
+      const applyBtn = document.createElement("button");
+      applyBtn.type = "button";
+      applyBtn.className = "reference-enrich-apply-btn";
+      applyBtn.textContent = "적용";
+      applyBtn.addEventListener("click", () => {
+        notes.value = enriched;
+        saveMetadata();
+      });
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "reference-enrich-cancel-btn";
+      cancelBtn.textContent = "취소";
+      cancelBtn.addEventListener("click", () => preview.remove());
+      preview.append(previewText, applyBtn, cancelBtn);
+      enrichRow.append(preview);
+    }, "AI 프롬프트 보강 실패"));
+    enrichRow.append(enrichBtn);
+
     const actions = document.createElement("div");
     actions.className = "reference-card-actions";
     if (!item.unavailable) {
@@ -313,14 +360,15 @@ export class ReferenceController {
     });
     card.addEventListener("dragend", () => { this.dragFromIndex = -1; });
 
-    card.append(this.previewFor(item), copy, source, tags, notes, actions);
+    card.append(this.previewFor(item), copy, source, tags, notes, enrichRow, actions);
     return card;
   }
 
   private render(): void {
     const target = element<HTMLElement>("reference-list");
     const items = this.library.items;
-    target.replaceChildren();
+    // Premiere 26.3 UXP can leave stale children behind after replaceChildren().
+    while (target.firstChild) target.removeChild(target.firstChild);
     if (items.length === 0) {
       renderEmptyState(target, "등록된 레퍼런스가 없습니다", "이미지 또는 동영상 파일을 선택해 보드에 추가해 주세요.");
       return;
