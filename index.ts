@@ -44,6 +44,7 @@ import {
 } from "./src/ai";
 import {
   initializeThumbnailController,
+  type ThumbnailAIInput,
   type ThumbnailController,
 } from "./src/thumbnail-controller";
 import { SpeechController } from "./src/speech-controller";
@@ -840,13 +841,13 @@ function selectedReferencePromptItems(selectedIds: readonly string[]): Reference
 }
 
 async function handleThumbnailAI(
-  pngBytes: Uint8Array,
+  input: ThumbnailAIInput,
   preset: string,
   prompt: string,
 ): Promise<{ bytes: Uint8Array; name: string }> {
   ensureAiConsent("썸네일 AI");
   const client = imageAIClient ?? createImageAIClient();
-  const images = [{ bytes: pngBytes, filename: "shortflow-thumbnail.png", mimeType: "image/png" }];
+  const images = [{ bytes: input.bytes, filename: input.filename, mimeType: input.mimeType }];
   const selectedReferences = referenceController
     ? await referenceController.getSelectedImageInputs()
     : [];

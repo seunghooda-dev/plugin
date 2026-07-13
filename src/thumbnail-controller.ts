@@ -22,6 +22,7 @@ import {
   type ThumbnailAdjustments,
   type ThumbnailBadgeOverlay,
   type ThumbnailExportFormat,
+  type ThumbnailImageMimeType,
   type ThumbnailLayer,
   type ThumbnailLayoutId,
   type ThumbnailOverlay,
@@ -96,13 +97,20 @@ export type ThumbnailAIResult =
       name?: string;
     };
 
+// AI 보정에 넘길 입력 이미지. Canvas 제한 Host에서는 합성 PNG 대신 원본 레이어 바이트(png/jpeg/webp)를 싣는다.
+export interface ThumbnailAIInput {
+  readonly bytes: Uint8Array;
+  readonly mimeType: "image/png" | "image/jpeg" | "image/webp";
+  readonly filename: string;
+}
+
 export interface ThumbnailControllerOptions {
   adapter?: ThumbnailControllerAdapter;
   storageKey?: string;
   onActivity?: (message: string) => void;
   onError?: (error: unknown, context: string) => void;
   onAIRequest?: (
-    pngBytes: Uint8Array,
+    input: ThumbnailAIInput,
     preset: string,
     prompt: string,
   ) => MaybePromise<ThumbnailAIResult>;
@@ -266,6 +274,23 @@ function normalizeBytes(value: unknown, maximum = MAX_THUMBNAIL_AI_RESULT_BYTES)
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   }
   throw new TypeError("AI가 유효한 이미지 바이트를 반환하지 않았습니다.");
+}
+
+// 원본 레이어 바이트를 AI 입력으로 감싼다. gpt-image-2가 받는 png/jpeg/webp만 통과시키고 filename을 mime에서 합성한다.
+function thumbnailAiInput(
+  bytes: Uint8Array,
+  mimeType: ThumbnailImageMimeType,
+): ThumbnailAIInput | null {
+  switch (mimeType) {
+    case "image/png":
+      return { bytes: bytes.slice(), mimeType, filename: "thumbnail-source.png" };
+    case "image/jpeg":
+      return { bytes: bytes.slice(), mimeType, filename: "thumbnail-source.jpg" };
+    case "image/webp":
+      return { bytes: bytes.slice(), mimeType, filename: "thumbnail-source.webp" };
+    default:
+      return null;
+  }
 }
 
 function aiResultBytes(result: ThumbnailAIResult): { bytes: Uint8Array; name?: string } {
@@ -1116,16 +1141,34 @@ export class ThumbnailController {
     return thumbnailBytesToDataUrl(bytes, inferThumbnailImageMime(fileName(entry), bytes));
   }
 
+  // Canvas 제한 Host에서 편집할 레이어의 원본 바이트를 AI 입력으로 만든다(합성 없이). 선택 레이어, 없으면 첫 레이어.
+  private async selectedLayerAiInput(): Promise<ThumbnailAIInput | null> {
+    const layers = this.stateValue.layers;
+    if (layers.length === 0) return null;
+    const selected = layers.find((layer) => layer.id === this.stateValue.selectedLayerId) ?? layers[0];
+    return selected ? this.layerSourceAiInput(selected) : null;
+  }
+
+  private async layerSourceAiInput(layer: ThumbnailLayer): Promise<ThumbnailAIInput | null> {
+    const record = this.sources.get(layer.id) ?? this.sources.get(layer.source);
+    if (!record) return null;
+    const historyItem = this.historyItems.find((item) => item.id === record.id || item.url === record.url);
+    if (historyItem) return thumbnailAiInput(historyItem.bytes, "image/png");
+    if (record.token) {
+      const entry = await this.adapter.localFileSystem.getEntryForPersistentToken(record.token);
+      if (isUsableFileEntry(entry) && typeof entry.read === "function") {
+        const bytes = normalizeBytes(await entry.read({ format: this.adapter.binaryFormat }), MAX_THUMBNAIL_SOURCE_BYTES);
+        return thumbnailAiInput(bytes, inferThumbnailImageMime(fileName(entry), bytes));
+      }
+    }
+    return null;
+  }
+
   private async runAI(): Promise<void> {
     const button = element<HTMLButtonElement>("thumb-ai-run-btn");
     const card = button.closest<HTMLElement>(".thumb-ai-card");
     if (button.disabled || card?.hidden) {
       throw new Error("썸네일 AI 보정은 내부 베타에서 비활성화되어 있습니다.");
-    }
-    const detectedLimit = this.detectCanvasLimit();
-    if (detectedLimit) {
-      this.setCanvasLimited(detectedLimit);
-      throw new Error(`현재 환경에서는 썸네일 AI 입력 이미지를 만들 수 없습니다: ${detectedLimit}`);
     }
     if (!this.options.onAIRequest) {
       throw new Error("AI 실행 콜백이 연결되지 않았습니다. index.ts에서 onAIRequest를 주입해 주세요.");
@@ -1147,15 +1190,31 @@ export class ThumbnailController {
     }
     button.disabled = true;
     try {
-      await this.renderCanvas();
-      const inputBytes = await canvasToPngBytes(element<HTMLCanvasElement>("thumbnail-canvas"));
-      const result = aiResultBytes(await this.options.onAIRequest(inputBytes, preset, prompt));
+      const limit = this.detectCanvasLimit();
+      let input: ThumbnailAIInput;
+      if (limit) {
+        // Canvas가 합성 PNG를 못 만드는 Host에서는 선택 레이어의 원본 이미지를 편집한다.
+        this.setCanvasLimited(limit);
+        const sourceInput = await this.selectedLayerAiInput();
+        if (!sourceInput) {
+          throw new Error(
+            `현재 환경은 썸네일 합성 미리보기를 만들 수 없어(${limit}) 선택한 레이어의 원본 이미지를 편집합니다. 먼저 편집할 이미지를 추가·선택해 주세요.`,
+          );
+        }
+        input = sourceInput;
+      } else {
+        await this.renderCanvas();
+        const bytes = await canvasToPngBytes(element<HTMLCanvasElement>("thumbnail-canvas"));
+        input = { bytes, mimeType: "image/png", filename: "shortflow-thumbnail.png" };
+      }
+      const result = aiResultBytes(await this.options.onAIRequest(input, preset, prompt));
       if (result.bytes.byteLength === 0) throw new Error("AI가 빈 이미지 데이터를 반환했습니다.");
       this.addAIResult(result.bytes, result.name, preset, prompt);
       await this.persist();
       this.syncUI();
       this.requestRender();
-      this.options.onActivity?.(`${preset} AI 보정 결과를 새 레이어로 추가했습니다.`);
+      const scope = limit ? "선택 레이어 원본" : "합성 썸네일";
+      this.options.onActivity?.(`${scope}을 ${preset} AI 보정해 새 레이어로 추가했습니다.`);
     } finally {
       button.disabled = false;
     }

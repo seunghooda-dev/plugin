@@ -5,6 +5,7 @@ import {
   THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY,
   THUMBNAIL_STORAGE_KEY,
   ThumbnailController,
+  type ThumbnailAIInput,
   type ThumbnailControllerAdapter,
   type ThumbnailFileEntry,
   type ThumbnailFolderEntry,
@@ -1317,6 +1318,69 @@ describe("ThumbnailController deeper layer, restore, and capability coverage", (
       aiButton.emit("click");
       await waitUntil(() => errors.length === 1);
       assert.match(errors[0] ?? "", /비활성화/u);
+      await controller.dispose();
+    });
+  });
+
+  it("feeds the selected layer source bytes to AI when the UXP Canvas cannot rasterize a composite", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("photo.png")];
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    let captured: ThumbnailAIInput | null = null;
+    await withDocument(dom, async () => {
+      const controller = new ThumbnailController({
+        adapter: adapter(fileSystem, storage),
+        now: () => Date.UTC(2026, 6, 12, 1, 2, 3),
+        imageFactory: loadedImage,
+        onError: (error, context) =>
+          errors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`),
+        onAIRequest: (input) => {
+          captured = input;
+          return { bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 9, 9]), name: "AI 결과" };
+        },
+      });
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 1);
+      dom.getElementById("thumb-ai-run-btn")!.emit("click");
+      await waitUntil(() => captured !== null);
+      // 합성 PNG가 아니라 원본 레이어 바이트(read())가 mime·filename과 함께 전달돼야 합니다.
+      const input = captured as unknown as ThumbnailAIInput;
+      assert.equal(input.mimeType, "image/png");
+      assert.equal(input.filename, "thumbnail-source.png");
+      assert.deepEqual([...input.bytes], [0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+      // 결과는 새 레이어로 추가됩니다.
+      await waitUntil(() => controller.state.layers.length === 2);
+      assert.equal(errors.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("asks for an image first when the Canvas is limited and no layer exists", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    let called = false;
+    await withDocument(dom, async () => {
+      const controller = new ThumbnailController({
+        adapter: adapter(fileSystem, storage),
+        now: () => Date.UTC(2026, 6, 12, 1, 2, 3),
+        imageFactory: loadedImage,
+        onError: (error, context) =>
+          errors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`),
+        onAIRequest: () => {
+          called = true;
+          return new Uint8Array([1]);
+        },
+      });
+      await controller.initialize();
+      dom.getElementById("thumb-ai-run-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /편집할 이미지를 추가·선택/u);
+      assert.equal(called, false);
       await controller.dispose();
     });
   });

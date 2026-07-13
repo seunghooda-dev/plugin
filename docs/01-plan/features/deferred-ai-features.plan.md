@@ -24,7 +24,8 @@
 
 | Phase | 내용 | 규모 | 상태 |
 |---|---|---|---|
-| **1** | **썸네일 이미지 AI 숨김 해제 + 실제 gpt-image-2 Host 검증** (basic/vivid/upscale/remove-bg/chat) — #5의 편집·대화 부분 | 소(코드 존재, 속성·계약·문서만) | 진행 |
+| **1** | **썸네일 이미지 AI 숨김 해제 + 실제 gpt-image-2 Host 검증** (basic/vivid/upscale/remove-bg/chat) — #5의 편집·대화 부분 | 소(코드 존재, 속성·계약·문서만) | 완료(UI) |
+| **1b** | **Canvas 비의존 입력 경로** — Host에서 합성 대신 선택 레이어 원본 바이트를 gpt-image-2 입력으로 | 소~중 | 구현 완료·Host 검증 대기 |
 | 2 | #5 A/B 자동 판단 — 썸네일 변형 2~3종 생성·비교 UI. 자동 "판정"은 약속하지 않고 나란히 보여주는 수동 선택부터 | 중 | 대기 |
 | 3 | #4 AI 이미지 생성(text→image) — `OpenAIImageClient`에 생성 메서드 추가, 프롬프트→이미지, 레퍼런스/썸네일 연계 | 중~대 | 대기 |
 | 4 | #4 AI 영상 생성 — 코드 전무, provider·비용·오케스트레이션 설계 필요. 최대 규모, 별도 Plan 권장 | 대 | 대기 |
@@ -48,7 +49,9 @@
 
 실제 실행 시 `detectCanvasLimit()`가 발동해 **"현재 환경에서는 썸네일 AI 입력 이미지를 만들 수 없습니다 — Premiere UXP Canvas가 이미지 합성/텍스트 렌더링/PNG·JPG 내보내기 미지원"** 토스트로 차단됨. 이는 PNG/JPG 내보내기가 비활성인 것과 **동일한 근본 원인** — gpt-image-2에 넘길 입력 PNG 바이트를 UXP Canvas가 만들지 못한다. 따라서 UI를 켜도 현재 Host에서 실제 AI 보정은 실행되지 않는다.
 
-**Phase 1b (설계 필요)**: Canvas 비의존 입력 경로. 후보 — (a) 합성 캔버스 대신 선택 레이어의 **원본 이미지 바이트**를 gpt-image-2 입력으로 사용(합성/텍스트 오버레이는 편집 후 재적용), (b) SVG fallback을 서버 없이 래스터화할 방법 탐색(현재 없음). (a)가 유력하나 "무엇을 편집하는가"(합성본 vs 원본)가 바뀌므로 별도 Design 문서로 다룬다. 이 블로커 해소 전까지 썸네일 AI는 UI 노출·코드 완비 상태이나 Host 실행 불가로 기록한다.
+**Phase 1b (설계 필요)**: Canvas 비의존 입력 경로. 후보 — (a) 합성 캔버스 대신 선택 레이어의 **원본 이미지 바이트**를 gpt-image-2 입력으로 사용(합성/텍스트 오버레이는 편집 후 재적용), (b) SVG fallback을 서버 없이 래스터화할 방법 탐색(현재 없음). (a)가 유력하나 "무엇을 편집하는가"(합성본 vs 원본)가 바뀌므로 별도 Design 문서로 다룬다.
+
+**→ Phase 1b 구현 완료 (2026-07-13)**: 설계는 `docs/02-design/features/thumbnail-ai-canvas-independent.design.md`. (a)안 채택 — `runAI`가 `detectCanvasLimit()`이면 upfront throw 대신 선택(없으면 첫) 레이어의 원본 바이트(history item bytes 또는 persistent token read)를 mime/filename과 함께 AI에 넘긴다. `onAIRequest` 포트를 `ThumbnailAIInput{bytes,mimeType,filename}`으로 바꿔 Host에서 원본이 JPEG/WebP여도 실을 수 있게 했다(Canvas 없이 PNG 변환 불가). Canvas 정상 환경은 기존대로 합성 PNG를 편집한다. 단위 테스트 2개 추가(원본 바이트 전달·레이어 없음 안내), `npm run check` green. **남은 것**: 실제 Premiere에서 import→basic 실행→gpt-image-2 200으로 새 레이어 추가 Host 검증.
 
 ## 5. 리스크
 
