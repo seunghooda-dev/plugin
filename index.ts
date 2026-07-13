@@ -8,6 +8,7 @@ import {
   alignSelectedVideoToSafeZone,
   applyAutomationPlan,
   choosePersistentFile,
+  applyClipMotion,
   choosePersistentFolder,
   createShort,
   createShortsFromMarkers,
@@ -779,6 +780,34 @@ async function handleInsertMogrt(): Promise<void> {
   toast("MOGRT를 현재 재생 위치에 삽입했습니다.", "success");
 }
 
+function motionDirectionOf(value: string): "left" | "right" | "top" | "bottom" {
+  return value === "right" || value === "top" || value === "bottom" ? value : "left";
+}
+
+function motionEasingOf(value: string): "linear" | "ease-out" | "spring" | "bounce" {
+  return value === "spring" || value === "bounce" || value === "linear" ? value : "ease-out";
+}
+
+async function handleApplyClipMotion(): Promise<void> {
+  const result = await busy.during("클립 모션을 적용하고 있습니다…", () => applyClipMotion({
+    kind: valueOf("motion-kind-select") === "out" ? "out" : "in",
+    direction: motionDirectionOf(valueOf("motion-direction-select")),
+    easing: motionEasingOf(valueOf("motion-easing-select")),
+    durationSeconds: Math.max(0.1, Math.min(10, numberOf("motion-duration-input", 0.6))),
+    fade: checkedOf("motion-fade-checkbox"),
+    scope: "selected",
+  }));
+  const detail = result.warnings.length > 0 ? ` · ${result.warnings.join(" ")}` : "";
+  activity.add(
+    result.changed > 0 ? "success" : "warning",
+    `클립 모션: ${result.changed}/${result.discovered}개 클립에 적용${detail}`,
+  );
+  toast(
+    result.changed > 0 ? `${result.changed}개 클립에 모션을 적용했습니다.` : "모션이 적용된 클립이 없습니다.",
+    result.changed > 0 ? "success" : "warning",
+  );
+}
+
 async function handleExportVideo(): Promise<void> {
   syncSettingsFromUI();
   if (!finalQCController) throw new Error("최종 QC 게이트가 초기화되지 않았습니다. 플러그인 패널을 다시 열어 주세요.");
@@ -1086,6 +1115,7 @@ function bindCoreEvents(): void {
   bind("export-video-btn", "click", guarded(handleExportVideo, "영상 내보내기 실패"));
   bind("export-cover-btn", "click", guarded(handleExportCover, "커버 저장 실패"));
   bind("stt-from-sequence-btn", "click", guarded(transcribeActiveSequence, "시퀀스 자막 생성 실패"));
+  bind("motion-apply-btn", "click", guarded(handleApplyClipMotion, "클립 모션 적용 실패"));
   bind("choose-asset-root-btn", "click", guarded(() => assetBrowserPanel.chooseRoot(), "자산 폴더 선택 실패"));
   bind("open-asset-root-btn", "click", guarded(() => assetBrowserPanel.openRoot(), "자산 폴더 열기 실패"));
   bind("sync-assets-btn", "click", guarded(() => assetBrowserPanel.sync(), "자산 동기화 실패"));

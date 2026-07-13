@@ -43,6 +43,14 @@ import type {
   VideoClipTrackItem,
   premierepro,
 } from "@adobe/premierepro";
+import {
+  computeMotionSamples,
+  motionOpacity,
+  slidePosition,
+  type MotionDirection,
+  type MotionEasing,
+  type MotionKind,
+} from "./motion";
 
 // UXP host modules are injected by Premiere at runtime and intentionally stay external in Vite.
 function unavailableHostModule<T extends object>(moduleName: string, cause: unknown): T {
@@ -1563,6 +1571,139 @@ async function buildReframeActions(
     return { actions, warning: warnings.join(" ") };
   }
   return { actions };
+}
+
+export interface ClipMotionOptions {
+  kind: MotionKind;
+  direction: MotionDirection;
+  easing: MotionEasing;
+  durationSeconds: number;
+  fade: boolean;
+  scope: ReframeScope;
+}
+
+export interface ClipMotionResult {
+  discovered: number;
+  changed: number;
+  warnings: string[];
+}
+
+async function findOpacityParam(item: VideoClipTrackItem): Promise<ComponentParam | null> {
+  const chain = await item.getComponentChain();
+  if (!chain) return null;
+  const count = Number(chain.getComponentCount()) || 0;
+  for (let index = 0; index < count; index += 1) {
+    const component = chain.getComponentAtIndex(index);
+    if (!component) continue;
+    const displayName = String(await component.getDisplayName()).toLocaleLowerCase();
+    const matchName = String(await component.getMatchName()).toLocaleLowerCase();
+    if (!(matchName.includes("opacity") || displayName.includes("opacity") || displayName.includes("불투명"))) {
+      continue;
+    }
+    const paramCount = Number(component.getParamCount()) || 0;
+    for (let p = 0; p < paramCount; p += 1) {
+      const param = component.getParam(p);
+      if (!param) continue;
+      const name = String(param.displayName ?? "").toLocaleLowerCase();
+      if (paramCount === 1 || name.includes("opacity") || name.includes("불투명")) return param;
+    }
+    if (paramCount > 0) return component.getParam(0);
+  }
+  return null;
+}
+
+async function buildClipMotionActions(
+  item: VideoClipTrackItem,
+  options: ClipMotionOptions,
+  frameWidth: number,
+  frameHeight: number,
+): Promise<{ actions: ActionFactory[]; warning?: string }> {
+  const samples = computeMotionSamples(options.kind, options.easing, options.durationSeconds);
+  if (samples.length === 0) return { actions: [], warning: "모션 길이가 올바르지 않습니다." };
+  const component = await findMotionComponent(item);
+  if (!component) return { actions: [], warning: "Motion 구성 요소를 찾지 못한 클립을 건너뛰었습니다." };
+  const params = await motionParams(component);
+  if (!params.position) return { actions: [], warning: "위치 파라미터를 찾지 못한 클립을 건너뛰었습니다." };
+  const position = params.position;
+  if (typeof position.areKeyframesSupported === "function" && !(await position.areKeyframesSupported())) {
+    return { actions: [], warning: "위치 키프레임을 지원하지 않는 클립을 건너뛰었습니다." };
+  }
+  const restValue = keyframeValue(await position.getStartValue());
+  if (typeof restValue !== "object" || restValue === null || !("x" in restValue) || !("y" in restValue)) {
+    return { actions: [], warning: "위치 값 형식을 인식하지 못한 클립을 건너뛰었습니다." };
+  }
+  const restX = Number((restValue as { x: unknown }).x);
+  const restY = Number((restValue as { y: unknown }).y);
+  if (!Number.isFinite(restX) || !Number.isFinite(restY)) {
+    return { actions: [], warning: "위치 값을 읽지 못한 클립을 건너뛰었습니다." };
+  }
+  const normalized = Math.abs(restX) <= 2 && Math.abs(restY) <= 2;
+  const horizontal = options.direction === "left" || options.direction === "right";
+  const slideAmount = normalized ? 1 : horizontal ? frameWidth : frameHeight;
+
+  const actions: ActionFactory[] = [];
+  for (const sample of samples) {
+    const point = slidePosition(restX, restY, options.direction, sample.progress, slideAmount);
+    actions.push(() => {
+      const keyframe = position.createKeyframe(ppro.PointF(point.x, point.y));
+      keyframe.position = ppro.TickTime.createWithSeconds(sample.timeSeconds);
+      return position.createAddKeyframeAction(keyframe);
+    });
+  }
+
+  if (options.fade) {
+    const opacity = await findOpacityParam(item);
+    if (opacity && (typeof opacity.areKeyframesSupported !== "function" || (await opacity.areKeyframesSupported()))) {
+      for (const sample of samples) {
+        const value = motionOpacity(sample.progress);
+        actions.push(() => {
+          const keyframe = opacity.createKeyframe(value);
+          keyframe.position = ppro.TickTime.createWithSeconds(sample.timeSeconds);
+          return opacity.createAddKeyframeAction(keyframe);
+        });
+      }
+    }
+  }
+
+  return { actions };
+}
+
+/** 선택 비디오 클립에 방향별 등장/퇴장 슬라이드(+선택적 페이드) 키프레임을 적용한다. */
+export async function applyClipMotion(options: ClipMotionOptions): Promise<ClipMotionResult> {
+  if (!(options.durationSeconds > 0)) {
+    throw new ShortFlowError("INVALID_MOTION", "모션 길이는 0보다 커야 합니다.");
+  }
+  const { project, sequence } = await getActiveContext();
+  const items = await allVideoItems(sequence, options.scope);
+  if (items.length === 0) {
+    throw new ShortFlowError("NO_SELECTED_VIDEO", "모션을 적용할 비디오 클립을 선택해 주세요.");
+  }
+  const frame = await sequence.getFrameSize();
+  const frameWidth = Math.round(Number(frame.width)) || 1920;
+  const frameHeight = Math.round(Number(frame.height)) || 1080;
+  const limited = items.slice(0, 200);
+  const actions: ActionFactory[] = [];
+  const warnings: string[] = [];
+  let changed = 0;
+  for (const item of limited) {
+    try {
+      const built = await buildClipMotionActions(item, options, frameWidth, frameHeight);
+      if (built.actions.length > 0) {
+        actions.push(...built.actions);
+        changed += 1;
+      }
+      if (built.warning) warnings.push(built.warning);
+    } catch (error) {
+      warnings.push(`클립 모션 실패: ${errorMessage(error)}`);
+    }
+  }
+  if (items.length > limited.length) {
+    warnings.push(`안전 제한 때문에 ${items.length - limited.length}개 클립은 건너뛰었습니다.`);
+  }
+  if (actions.length > 0 && !commitActionFactories(project, actions, "ShortFlow: 클립 모션")) {
+    throw new ShortFlowError("MOTION_COMMIT_FAILED", "클립 모션 작업을 적용하지 못했습니다.");
+  }
+  return { discovered: items.length, changed, warnings: [...new Set(warnings)] };
 }
 
 async function reframeSequence(

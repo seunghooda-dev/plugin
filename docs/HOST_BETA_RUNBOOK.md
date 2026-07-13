@@ -674,6 +674,15 @@ CDP 검증(`cdt-thumb-ai-1b.mjs`, 새 dist reload):
 - 16kHz 모노 WAV ≈ 0.05MB/s → Whisper 25MB 상한에서 약 8분. 더 긴 것은 In/Out 범위(`range:"inout"`) 또는 후속 MP3 압축 필요.
 - 즉시 차단 조건: 추출 오디오를 STT에 넘길 때 원본 바이트가 아닌 빈/변조 바이트를 넘기면 차단.
 
+### 25-l. 고급 클립 모션(gap-2) — UI·배선 Host 통과, 키프레임 적용 사용자 게이트(2026-07-13)
+
+참고 플러그인 모션 탭 이식: 선택 비디오 클립에 방향별 등장/퇴장 슬라이드 + easing(linear/ease-out/spring/bounce) + 선택적 불투명도 페이드. `src/motion.ts`(순수: easing 곡선·fps 샘플·slidePosition·motionOpacity)로 키프레임 값을 계산하고, premiere.ts `applyClipMotion`이 클립 Motion **position**과 **Opacity** 파라미터에 `createAddKeyframeAction`(Keyframe.position=TickTime)으로 적용(reframe의 검증된 컴포넌트 탐색 확장, **QE 아님**). Premiere 내장 보간은 Linear/Bezier뿐이라 spring/bounce는 촘촘한 샘플로 근사.
+
+**CDP 검증(`cdt-motion.mjs`)**: 숏폼 탭 "클립 모션" 카드 렌더(kind/direction/easing/duration/fade/버튼 모두 254×34, grid 붕괴 없음) → "적용" 클릭 시 `allVideoItems("selected")`까지 정상 도달해 "비디오 클립을 선택해 주세요" 안내(콘솔 0). **실제 키프레임 쓰기는 선택된 비디오 클립이 필요** — UXP CDT가 ppro 선택을 못 몰아(awaitPromise·Input 도메인 없음) 사용자가 타임라인에서 클립 선택 후 검증. 위치 좌표계는 정규화(|x|≤2→center 0.5)·픽셀 자동 감지해 슬라이드 스케일 조정.
+
+- 좌표계·키프레임 시간(클립 상대 0-based) 가정은 실제 클립으로 최종 확인 필요. 어긋나면 위치/타이밍 보정.
+- 즉시 차단 조건: 기존 위치/불투명 키프레임을 파괴적으로 덮어써 원본 애니메이션을 잃으면 차단.
+
 ### 25-j. BGM 비트 분석(Phase 5c) — Host 통과 + Web Audio 부재 발견(2026-07-13)
 
 음악/SFX 자산 카드에 "비트 분석" 액션을 추가했다(선택 WAV → BPM·비트 수 표시).

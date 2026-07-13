@@ -96,3 +96,27 @@ export function directionOffset(direction: MotionDirection): { x: number; y: num
       return { x: 0, y: 0 };
   }
 }
+
+/**
+ * 제자리 위치(rest, 정규화)에서 방향으로 (1-progress)*slideAmount 만큼 벗어난 위치.
+ * progress=1이면 제자리, progress=0이면 화면 밖. spring은 progress>1로 살짝 넘겨 오버슈트한다.
+ */
+export function slidePosition(
+  restX: number,
+  restY: number,
+  direction: MotionDirection,
+  progress: number,
+  slideAmount = 1,
+): { x: number; y: number } {
+  const offset = directionOffset(direction);
+  const factor = (1 - progress) * slideAmount;
+  return {
+    x: round(restX + offset.x * factor, 5),
+    y: round(restY + offset.y * factor, 5),
+  };
+}
+
+/** 진행도를 0~100 불투명도로 매핑(오버슈트는 클램프). */
+export function motionOpacity(progress: number): number {
+  return round(Math.max(0, Math.min(100, progress * 100)), 3);
+}

@@ -528,6 +528,17 @@ strong {
   height: 72px;
 }
 
+.motion-card {
+  margin-top: 16px;
+}
+
+.motion-fade-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
 .metric-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

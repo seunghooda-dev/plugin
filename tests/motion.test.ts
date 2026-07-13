@@ -5,6 +5,8 @@ import {
   computeMotionSamples,
   directionOffset,
   easeProgress,
+  motionOpacity,
+  slidePosition,
   type MotionEasing,
 } from "../src/motion";
 
@@ -73,5 +75,28 @@ describe("directionOffset", () => {
     assert.deepEqual(directionOffset("right"), { x: 1, y: 0 });
     assert.deepEqual(directionOffset("top"), { x: 0, y: -1 });
     assert.deepEqual(directionOffset("bottom"), { x: 0, y: 1 });
+  });
+});
+
+describe("slidePosition", () => {
+  it("is at rest when progress is 1 and offscreen when progress is 0", () => {
+    assert.deepEqual(slidePosition(0.5, 0.5, "left", 1), { x: 0.5, y: 0.5 });
+    assert.deepEqual(slidePosition(0.5, 0.5, "left", 0), { x: -0.5, y: 0.5 });
+    assert.deepEqual(slidePosition(0.5, 0.5, "bottom", 0), { x: 0.5, y: 1.5 });
+  });
+
+  it("overshoots past rest when spring progress exceeds 1", () => {
+    const pos = slidePosition(0.5, 0.5, "left", 1.1); // progress>1
+    assert.ok(pos.x > 0.5); // rest를 지나 반대쪽으로 오버슈트
+  });
+});
+
+describe("motionOpacity", () => {
+  it("maps progress to 0-100 and clamps overshoot", () => {
+    assert.equal(motionOpacity(0), 0);
+    assert.equal(motionOpacity(1), 100);
+    assert.equal(motionOpacity(0.5), 50);
+    assert.equal(motionOpacity(1.2), 100);
+    assert.equal(motionOpacity(-0.1), 0);
   });
 });

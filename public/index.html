@@ -468,6 +468,61 @@
               </button>
             </div>
           </form>
+
+          <div class="settings-card motion-card">
+            <div class="section-heading">
+              <span class="section-number" aria-hidden="true">＋</span>
+              <div>
+                <h3>클립 모션</h3>
+                <p>선택한 비디오 클립에 등장·퇴장 슬라이드와 페이드를 적용합니다.</p>
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="motion-kind-select">모션</label>
+                <div class="select-wrap">
+                  <select id="motion-kind-select">
+                    <option value="in" selected>등장 (In)</option>
+                    <option value="out">퇴장 (Out)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="motion-direction-select">방향</label>
+                <div class="select-wrap">
+                  <select id="motion-direction-select">
+                    <option value="left" selected>왼쪽에서</option>
+                    <option value="right">오른쪽에서</option>
+                    <option value="top">위에서</option>
+                    <option value="bottom">아래에서</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="motion-easing-select">이징</label>
+                <div class="select-wrap">
+                  <select id="motion-easing-select">
+                    <option value="ease-out" selected>Ease Out</option>
+                    <option value="spring">Spring</option>
+                    <option value="bounce">Bounce</option>
+                    <option value="linear">Linear</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="motion-duration-input">길이(초)</label>
+                <input id="motion-duration-input" type="number" min="0.1" max="10" step="0.1" value="0.6" />
+              </div>
+            </div>
+            <label class="motion-fade-row">
+              <input id="motion-fade-checkbox" type="checkbox" checked />
+              불투명도 페이드 함께
+            </label>
+            <button id="motion-apply-btn" class="secondary-button full-width-button" type="button">
+              선택 클립에 모션 적용
+            </button>
+            <span class="field-hint">타임라인에서 비디오 클립을 선택한 뒤 적용하세요. 위치·불투명도 키프레임이 추가됩니다.</span>
+          </div>
         </section>
 
         <section
