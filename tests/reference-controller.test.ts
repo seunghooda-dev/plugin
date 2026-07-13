@@ -588,6 +588,35 @@ describe("ReferenceController AI 이미지 생성", () => {
     }
   });
 
+  it("size select 값이 undefined여도(UXP 초기 상태) 기본 크기로 생성한다", async () => {
+    const dom = installDom();
+    registerGenControls(dom);
+    try {
+      const { library } = createSeededLibrary();
+      const calls: Array<{ prompt: string; size: string }> = [];
+      const controller = new ReferenceController({
+        library,
+        generatedImageProvider: async (prompt, size) => {
+          calls.push({ prompt, size });
+          return mockPngFile("g.png");
+        },
+      });
+      await controller.initialize();
+
+      dom.doc.getElementById("reference-gen-prompt-input")!.value = "노을 실루엣";
+      // UXP는 사용자가 건드리기 전 select .value가 undefined일 수 있다.
+      (dom.doc.getElementById("reference-gen-size-select") as unknown as { value: unknown }).value = undefined;
+      dom.doc.getElementById("reference-gen-btn")!.dispatch("click");
+      await flush();
+
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.size, "1024x1024");
+      assert.equal(controller.items.length, 1);
+    } finally {
+      dom.restore();
+    }
+  });
+
   it("프롬프트가 비어 있으면 provider를 호출하지 않고 오류를 알린다", async () => {
     const dom = installDom();
     registerGenControls(dom);

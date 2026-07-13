@@ -535,7 +535,8 @@ export class OpenAIImageClient {
       model: OPENAI_IMAGE_MODEL,
       prompt,
       size,
-      quality: "high",
+      // 생성은 편집(high)보다 낮은 medium으로 — 레퍼런스 용도에 충분하고 응답이 빨라 타임아웃 위험을 줄인다.
+      quality: "medium",
       output_format: "png",
       n: 1,
     });

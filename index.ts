@@ -920,7 +920,10 @@ async function runReferenceImageGen(prompt: string, size: string): Promise<Refer
   ensureAiConsent("AI 이미지 생성");
   const client = imageAIClient ?? createImageAIClient();
   const genSize = imageGenerateSize(size);
-  const request = genSize ? { prompt, size: genSize } : { prompt };
+  // gpt-image-2 생성은 수십 초가 걸릴 수 있어 기본 60초 타임아웃으로는 부족하다 — 넉넉히 준다.
+  const request = genSize
+    ? { prompt, size: genSize, timeoutMs: 120_000 }
+    : { prompt, timeoutMs: 120_000 };
   const descriptor = {
     model: settings.aiModel,
     kind: "generate",
@@ -931,6 +934,7 @@ async function runReferenceImageGen(prompt: string, size: string): Promise<Refer
     ? await aiQueueController.run("image", descriptor, () => client.generateImage(request), {
       estimateUnits: 5,
       cacheTtlMs: 0,
+      maxRetries: 1,
     })
     : await client.generateImage(request);
   return writeGeneratedReferenceFile(bytes);

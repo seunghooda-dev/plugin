@@ -645,3 +645,22 @@ CDP 검증(`cdt-thumb-ai-1b.mjs`, 새 dist reload):
 
 - Canvas 제한 시 원본 바이트가 아니라 빈/합성 바이트를 보내면 즉시 차단(합성은 Canvas 없이는 불가하므로 반드시 원본이어야 함)
 - gpt-image-2에 png/jpeg/webp 외 mime나 확장자 불일치 filename을 실으면 즉시 차단(`editImage` 거부 전에 컨트롤러가 걸러야 함)
+
+### 25-i. 레퍼런스 AI 이미지 생성(Phase 3) — Host 통과, Host 전용 버그 2건 발견·수정(2026-07-13)
+
+레퍼런스 보드에 프롬프트→이미지 생성(gpt-image-2 `images/generations`)을 추가했다. 생성 바이트를 UXP `getDataFolder()`(네이티브 피커 불필요)에 `ai-gen-<ts>.png`로 쓰고 `addEntries`로 레퍼런스에 추가한다(출처 "AI 생성 (gpt-image-2)"). CDP로 해피패스까지 자동 검증 가능(피커 없음).
+
+**CDP 검증(`cdt-ref-unique.mjs`)**: 프롬프트 입력·size select 미조작 상태에서 실행 → AI 큐에 이미지 작업 `running` 생성 → ~36초 후 **레퍼런스 미리보기 추가(previews=1)**. 즉 실제 gpt-image-2 200 → 데이터 폴더 PNG 쓰기 → `addEntries` → 카드 렌더까지 **전 경로 Host 통과, 콘솔 오류 0**.
+
+이 과정에서 단위 테스트로 못 잡는 **Host 전용 버그 2건**을 CDP로 찾아 고쳤다.
+
+1. **UXP `<select>.value` undefined → `valueOf(...).trim()` 크래시.** 사용자가 size 드롭다운을 건드리기 전 `.value`가 undefined라 `valueOf`가 throw → 생성 작업이 큐에 생기지도 않고 "Cannot read properties of undefined (reading 'trim')"로 실패했다. 진단 단서: 스크립트가 size 값을 명시 설정한 런에서만 작업이 생성됐다. 수정 — `element(...).value ?? ""`로 방어적 읽기 + 첫 옵션 `selected`. (테스트 하네스의 FakeElement는 `.value=""` 기본이라 못 잡음 → undefined 케이스 단위 테스트 추가.)
+2. **기본 60초 타임아웃 < gpt-image-2 생성 시간.** size를 설정해 작업이 실제 실행된 초기 런은 "OpenAI API 요청 시간이 초과되었습니다"로 실패(재시도까지 각 60초라 버튼이 100초+ 잠긴 것처럼 보임). 수정 — 생성 요청 `timeoutMs: 120초` + 품질 `high`→`medium`(레퍼런스 용도 충분·응답 빠름) + 큐 `maxRetries: 1`.
+
+교훈: fetch 상태 스파이는 클라이언트가 스파이 설치 **전** 생성되면 원본 `fetch`를 잡아 요청을 놓친다(오해 유발). 상태는 **AI 큐 패널의 작업 행**(`.ai-job-row is-<state>`)에서 직접 읽는 것이 정확하다. 또 큐는 reload 후에도 작업을 저장하므로, 낡은 실패 작업과 해시 충돌을 피하려면 **유니크 프롬프트**로 검증한다.
+
+즉시 차단 조건(이미지 생성):
+
+- 생성 결과가 png/jpeg/webp가 아니거나 `assertPngResponse` 실패면 즉시 차단
+- 생성 바이트를 파일로 쓰지 않고 raw 바이트만으로 레퍼런스에 넣으려 하면 즉시 차단(레퍼런스는 token+nativePath 필수)
+- 출처가 "AI 생성"으로 기록되지 않으면 즉시 차단(권리 추적 무결성)

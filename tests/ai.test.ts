@@ -637,6 +637,7 @@ describe("generateImage text-to-image", () => {
     assert.equal(body.prompt, "a red fox"); // cleanPrompt strips angle brackets and trims
     assert.equal(body.size, "1024x1024"); // default
     assert.equal(body.output_format, "png");
+    assert.equal(body.quality, "medium"); // 생성은 편집(high)보다 빠른 medium
     assert.equal(body.n, 1);
   });
   it("honors a provided size", async () => {

@@ -168,11 +168,12 @@ export class ReferenceController {
     if (!this.options.generatedImageProvider) {
       throw new Error("이미지 생성 콜백이 연결되지 않았습니다. index.ts에서 generatedImageProvider를 주입해 주세요.");
     }
-    const prompt = valueOf("reference-gen-prompt-input").trim();
+    // UXP <select>/<textarea>는 사용자가 건드리기 전 .value가 undefined일 수 있어 방어적으로 읽는다.
+    const prompt = (element<HTMLTextAreaElement>("reference-gen-prompt-input").value ?? "").trim();
     if (!prompt) {
       throw new Error("생성할 이미지를 설명하는 프롬프트를 입력해 주세요.");
     }
-    const size = valueOf("reference-gen-size-select").trim() || "1024x1024";
+    const size = (element<HTMLSelectElement>("reference-gen-size-select").value ?? "").trim() || "1024x1024";
     const button = element<HTMLButtonElement>("reference-gen-btn");
     button.disabled = true;
     try {
