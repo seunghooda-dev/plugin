@@ -1628,6 +1628,10 @@ async function buildClipMotionActions(
   if (typeof position.areKeyframesSupported === "function" && !(await position.areKeyframesSupported())) {
     return { actions: [], warning: "위치 키프레임을 지원하지 않는 클립을 건너뛰었습니다." };
   }
+  if (typeof position.isTimeVarying === "function" && position.isTimeVarying()) {
+    // 이미 위치 키프레임이 있는 클립은 기존 애니메이션을 파괴하지 않도록 건너뛴다.
+    return { actions: [], warning: "위치 키프레임이 이미 있는 클립은 기존 애니메이션을 보존했습니다." };
+  }
   const restValue = keyframeValue(await position.getStartValue());
   if (typeof restValue !== "object" || restValue === null || !("x" in restValue) || !("y" in restValue)) {
     return { actions: [], warning: "위치 값 형식을 인식하지 못한 클립을 건너뛰었습니다." };
@@ -1653,7 +1657,8 @@ async function buildClipMotionActions(
 
   if (options.fade) {
     const opacity = await findOpacityParam(item);
-    if (opacity && (typeof opacity.areKeyframesSupported !== "function" || (await opacity.areKeyframesSupported()))) {
+    const opacityHasKeyframes = opacity && typeof opacity.isTimeVarying === "function" && opacity.isTimeVarying();
+    if (opacity && !opacityHasKeyframes && (typeof opacity.areKeyframesSupported !== "function" || (await opacity.areKeyframesSupported()))) {
       for (const sample of samples) {
         const value = motionOpacity(sample.progress);
         actions.push(() => {
