@@ -1,23 +1,23 @@
-// BGM 오디오의 비트 온셋과 BPM를 검출하는 순수 함수 (Web Audio·Premiere Host 비의존, 모노 PCM 입력)
+// BGM 오디오의 템포(BPM)와 비트 그리드를 검출하는 순수 함수 (Web Audio·Premiere Host 비의존, 모노 PCM 입력).
 
 export interface BeatDetectionResult {
-  /** 추정 BPM. 신뢰도가 낮으면 0(불명확). */
+  /** 추정 BPM. 규칙적 템포를 못 찾으면 0(불명확). */
   readonly bpm: number;
-  /** 검출된 비트 온셋 시각(초), 오름차순. */
+  /** 추정 템포의 비트 그리드 시각(초), 오름차순. bpm=0이면 빈 배열. */
   readonly beatTimes: number[];
 }
 
 const FRAME_SIZE = 1024;
 const HOP = 512;
-const MIN_ONSET_GAP_SECONDS = 0.1;
-const LOCAL_WINDOW = 10; // 에너지 플럭스 지역 평균 창(프레임)
-const THRESHOLD_MULTIPLIER = 1.5; // 지역 평균 대비 온셋 판정 배수
-const FLOOR_FRACTION = 0.1; // 전역 플럭스 최대 대비 최소 비율(잡음 억제)
-const MAX_IOI_CV = 0.5; // 인터-온셋 간격 변동계수 상한(초과 시 BPM 불명확)
+const MIN_BPM = 60;
+const MAX_BPM = 180;
+// 자기상관 피크가 평균의 이 배수 미만이면 비음악(노이즈·발화)으로 보고 BPM 불명확 처리.
+const CONFIDENCE_RATIO = 4;
 
 /**
- * 모노 PCM에서 에너지 플럭스 온셋을 찾고 인터-온셋 간격의 중앙값으로 BPM를 추정한다.
- * 자동 컷이 아니라 사용자 배치(마커·컷 정렬)의 근사 근거로 쓰는 것을 목표로 한다.
+ * 온셋 강도(에너지 플럭스) 엔벨로프의 자기상관으로 우세 템포를 찾는다. 중앙값-IOI 방식은
+ * 서브비트 온셋이 많은 실제 음악에서 실패하므로 자기상관을 쓴다. 자동 컷이 아니라 사용자
+ * 배치(마커·컷 정렬)의 근사 근거가 목표다.
  */
 export function detectBeats(samples: Float32Array, sampleRate: number): BeatDetectionResult {
   if (
@@ -30,7 +30,7 @@ export function detectBeats(samples: Float32Array, sampleRate: number): BeatDete
   }
 
   const frameCount = Math.floor((samples.length - FRAME_SIZE) / HOP) + 1;
-  if (frameCount <= 1) return { bpm: 0, beatTimes: [] };
+  if (frameCount <= 8) return { bpm: 0, beatTimes: [] };
 
   const energy = new Float64Array(frameCount);
   for (let f = 0; f < frameCount; f += 1) {
@@ -43,76 +43,76 @@ export function detectBeats(samples: Float32Array, sampleRate: number): BeatDete
     energy[f] = sum / FRAME_SIZE;
   }
 
+  // 양의 에너지 플럭스(온셋 강도) + 가장 강한 온셋 위치(그리드 위상 기준).
   const flux = new Float64Array(frameCount);
-  let globalPeak = 0;
+  let fluxMean = 0;
+  let strongestFrame = 0;
+  let strongestFlux = 0;
   for (let f = 1; f < frameCount; f += 1) {
     const delta = energy[f]! - energy[f - 1]!;
     const positive = delta > 0 ? delta : 0;
     flux[f] = positive;
-    if (positive > globalPeak) globalPeak = positive;
+    fluxMean += positive;
+    if (positive > strongestFlux) {
+      strongestFlux = positive;
+      strongestFrame = f;
+    }
   }
-  if (globalPeak <= 0) return { bpm: 0, beatTimes: [] };
+  fluxMean /= frameCount;
+  if (strongestFlux <= 0) return { bpm: 0, beatTimes: [] };
+
+  // 평균(DC) 제거 엔벨로프 — 자기상관이 지속 에너지가 아닌 변동에 반응하도록.
+  const envelope = new Float64Array(frameCount);
+  for (let f = 0; f < frameCount; f += 1) {
+    const centered = flux[f]! - fluxMean;
+    envelope[f] = centered > 0 ? centered : 0;
+  }
 
   const frameTime = HOP / sampleRate;
-  const minGapFrames = Math.max(1, Math.round(MIN_ONSET_GAP_SECONDS / frameTime));
-  const floor = globalPeak * FLOOR_FRACTION;
+  const bpm = estimateTempo(envelope, frameCount, frameTime);
+  if (bpm <= 0) return { bpm: 0, beatTimes: [] };
 
-  const onsetFrames: number[] = [];
-  let lastOnset = Number.NEGATIVE_INFINITY;
-  for (let f = 1; f < frameCount; f += 1) {
-    const value = flux[f]!;
-    if (value < floor) continue;
-
-    let windowSum = 0;
-    let windowCount = 0;
-    for (let j = f - LOCAL_WINDOW; j <= f + LOCAL_WINDOW; j += 1) {
-      if (j >= 0 && j < frameCount) {
-        windowSum += flux[j]!;
-        windowCount += 1;
-      }
-    }
-    const localMean = windowCount > 0 ? windowSum / windowCount : 0;
-    if (value <= localMean * THRESHOLD_MULTIPLIER) continue;
-
-    const prev = f > 0 ? flux[f - 1]! : 0;
-    const next = f + 1 < frameCount ? flux[f + 1]! : 0;
-    if (value < prev || value < next) continue; // 지역 최대만
-
-    if (f - lastOnset < minGapFrames) {
-      // 최소 간격 안이면 더 강한 온셋으로 교체
-      const lastIndex = onsetFrames.length - 1;
-      if (lastIndex >= 0 && value > flux[onsetFrames[lastIndex]!]!) {
-        onsetFrames[lastIndex] = f;
-        lastOnset = f;
-      }
-      continue;
-    }
-    onsetFrames.push(f);
-    lastOnset = f;
-  }
-
-  const beatTimes = onsetFrames.map((frame) => frame * frameTime);
-  return { bpm: estimateBpm(beatTimes), beatTimes };
+  const duration = frameCount * frameTime;
+  return { bpm, beatTimes: beatGrid(bpm, strongestFrame * frameTime, duration) };
 }
 
-function estimateBpm(onsetTimes: readonly number[]): number {
-  if (onsetTimes.length < 2) return 0;
-  const intervals: number[] = [];
-  for (let i = 1; i < onsetTimes.length; i += 1) {
-    intervals.push(onsetTimes[i]! - onsetTimes[i - 1]!);
+function estimateTempo(envelope: Float64Array, frameCount: number, frameTime: number): number {
+  const autocorrelation = (lag: number): number => {
+    let sum = 0;
+    for (let i = 0; i + lag < frameCount; i += 1) sum += envelope[i]! * envelope[i + lag]!;
+    return sum / (frameCount - lag);
+  };
+
+  let bestBpm = 0;
+  let bestScore = -1;
+  let scoreSum = 0;
+  let scoreCount = 0;
+  // 0.5 BPM 간격으로 후보 lag의 자기상관을 본다.
+  for (let bpmTenths = MIN_BPM * 10; bpmTenths <= MAX_BPM * 10; bpmTenths += 5) {
+    const bpm = bpmTenths / 10;
+    const lag = Math.round(60 / bpm / frameTime);
+    if (lag < 2 || lag >= frameCount) continue;
+    const score = autocorrelation(lag);
+    scoreSum += score;
+    scoreCount += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = bpm;
+    }
   }
-  const sorted = [...intervals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)]!;
-  if (!Number.isFinite(median) || median <= 0) return 0;
 
-  const mean = intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
-  const variance =
-    intervals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / intervals.length;
-  const cv = mean > 0 ? Math.sqrt(variance) / mean : Number.POSITIVE_INFINITY;
-  if (cv > MAX_IOI_CV) return 0;
+  if (scoreCount === 0 || bestScore <= 0) return 0;
+  const average = scoreSum / scoreCount;
+  if (average <= 0 || bestScore < average * CONFIDENCE_RATIO) return 0;
+  return Math.round(bestBpm * 10) / 10;
+}
 
-  let bpm = 60 / median;
-  while (bpm < 60) bpm *= 2;
-  while (bpm > 180) bpm /= 2;
-  return Math.round(bpm * 10) / 10;
+function beatGrid(bpm: number, phaseAnchorSeconds: number, duration: number): number[] {
+  const period = 60 / bpm;
+  const phase = (((phaseAnchorSeconds % period) + period) % period);
+  const grid: number[] = [];
+  for (let time = phase; time <= duration + 1e-9; time += period) {
+    grid.push(Math.round(time * 1000) / 1000);
+  }
+  return grid;
 }
