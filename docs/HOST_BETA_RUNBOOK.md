@@ -563,6 +563,18 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **수정**: `subtitle-controller.ts`에 `clearElementChildren()`(removeChild 반복, mock은 replaceChildren fallback)을 추가해 큐 리스트·분석 패널 렌더에 적용, `reference-controller.ts` 목록 렌더와 `ui.ts` `renderEmptyState()`에도 동일 패턴 적용.
 - **재검증**: 수정 빌드를 `Plugin.load`로 재로드 후 SRT import ×3 반복 — 매회 정확히 2 rows(중복 없음), 메타 `DOM 큐 2/2` 일치. 25-8 안전 차단도 수정 빌드에서 재통과.
 
+### 25-b. 추가 CDP 검증 기록 — 2026-07-13 (진행 중)
+
+- **테스트 시퀀스 생성**: 전용 스모크 프로젝트 `ShortFlow_HostSmoke_20260712`에 시퀀스가 0개라, §12 관례에 따라 공개 API(`project.createSequence("SF_CDP_SMOKE")` + `setActiveSequence`)로 테스트 시퀀스를 생성·활성화했다. 테스트 MP4 import 포함, 기존 콘텐츠 변경 없음.
+- **FR-02(재생 위치→단어 하이라이트) Host 통과**: 활성 시퀀스 playhead 0초 상태에서 자막 편집기 첫 단어 chip("첫")에 `is-active`/`aria-current` 부여를 확인 — 패널 폴링→`findActiveSubtitle`→DOM 반영 경로가 실제 Host에서 동작.
+- **FR-01(단어 클릭→playhead) 미확정**: 두 번째 큐 단어(1.3s) 클릭 후 playhead가 0에 머묾. 생성 직후의 **빈 시퀀스(길이 0)** 라 Premiere가 시퀀스 끝(0s)으로 클램프했을 가능성이 유력. 클립 삽입으로 길이 확보 후 재검증 필요(스크립트 준비 중 사용자 인터럽트로 보류).
+- **API 키 입력 필드 키보드 불가(사용자 제보) → 원인 확정·수정 완료(2026-07-13)**: 마스킹 이벤트 로거로 사용자 실클릭을 관찰한 결과, 클릭이 input에 한 번도 도달하지 않았고(주변 SPAN/P만 타깃) input들의 실측 rect가 전부 **0×0**이었다. 이중 근본 원인:
+  1. **UXP가 `input[type="text"]` 등 속성 선택자 규칙을 적용하지 못함** — 공유 사이징 규칙(width/height/border)이 input에만 미적용. bare `input` 선택자로 전환해 해결(checkbox는 후행 `.checkbox-row input` 1×1 규칙이, range는 명시 리셋이 덮어씀). 전환 후 `subtitle-translate` input이 117×34로 복구된 것으로 1차 확인.
+  2. **UXP가 `display: grid` 컨테이너를 0×0으로 붕괴시킴**(§14 `.two-column-layout`에서 이미 확인된 것과 동일) — `.form-grid`·`.browser-toolbar`·`.safe-zone-box-controls`·`.final-qc-waiver`·`.thumbnail-inspector`(media)·`.subtitle-reflow-controls`(media) 6곳을 flex-wrap 등가 레이아웃으로 전환.
+  - 수정 빌드 재로드 후 실측: `ai-api-key-input` 254×34, `ai-model-input` 254×34, `subtitle-max-chars-input` 62×34 — 클릭·입력 가능 상태로 복구. 런타임 `<style>` 주입은 UXP에서 반영되지 않아(주입 실험 무효과) 스타일시트 수정+리로드로만 검증 가능했다.
+  - 부수 확인: CDT에 `Input.dispatchKeyEvent` 도메인 없음(원격 키 주입 불가), 프로그램적 값 설정+`input` 이벤트는 정상(저장 경로 무결), 패널이 OS 포커스가 없을 때 `document.activeElement`는 null.
+  - 남은 grid 사용처(입력 미포함 표시용 다수)는 시각 이상 시 개별 판단. 사용자 실타이핑 최종 확인은 새 API key 입력 시점에 수행.
+
 즉시 차단 조건(신규 기능):
 
 - 읽기 전용 분석 3종 중 하나라도 자막 문서를 변경(cue/word/timing 변동)하면 즉시 차단
