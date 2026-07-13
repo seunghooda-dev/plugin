@@ -555,7 +555,75 @@ describe("ReferenceController AI 이미지 생성", () => {
     dom.doc.register("reference-gen-prompt-input", "textarea");
     dom.doc.register("reference-gen-size-select", "select");
     dom.doc.register("reference-gen-btn", "button");
+    dom.doc.register("reference-video-seconds-select", "select");
+    dom.doc.register("reference-video-btn", "button");
   }
+
+  function mockMp4File(name: string): ReferenceFileEntry {
+    const nativePath = `C:\\References\\${name}`;
+    return {
+      name,
+      nativePath,
+      url: `file:///${nativePath.replace(/\\/gu, "/")}`,
+      isFile: true,
+      read: async () => Uint8Array.from([0, 0, 0, 24, 102, 116, 121, 112]),
+    } as unknown as ReferenceFileEntry;
+  }
+
+  it("provider가 돌려준 영상 파일을 'AI 생성 (Sora)' 출처로 레퍼런스에 추가한다", async () => {
+    const dom = installDom();
+    registerGenControls(dom);
+    try {
+      const { library } = createSeededLibrary();
+      const calls: Array<{ prompt: string; seconds: string }> = [];
+      const controller = new ReferenceController({
+        library,
+        generatedVideoProvider: async (prompt, seconds) => {
+          calls.push({ prompt, seconds });
+          return mockMp4File("ai-gen.mp4");
+        },
+      });
+      await controller.initialize();
+
+      dom.doc.getElementById("reference-gen-prompt-input")!.value = "잔잔한 바다 파도";
+      dom.doc.getElementById("reference-video-seconds-select")!.value = "16";
+      dom.doc.getElementById("reference-video-btn")!.dispatch("click");
+      await flush();
+
+      assert.deepEqual(calls, [{ prompt: "잔잔한 바다 파도", seconds: "16" }]);
+      assert.equal(controller.items.length, 1);
+      assert.match(controller.items[0]?.source ?? "", /Sora/u);
+      assert.equal(controller.items[0]?.type, "video");
+    } finally {
+      dom.restore();
+    }
+  });
+
+  it("영상 프롬프트가 비어 있으면 provider를 호출하지 않는다", async () => {
+    const dom = installDom();
+    registerGenControls(dom);
+    try {
+      const { library } = createSeededLibrary();
+      let called = false;
+      const errors: string[] = [];
+      const controller = new ReferenceController({
+        library,
+        generatedVideoProvider: async () => {
+          called = true;
+          return mockMp4File("x.mp4");
+        },
+        onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+      });
+      await controller.initialize();
+      dom.doc.getElementById("reference-gen-prompt-input")!.value = "   ";
+      dom.doc.getElementById("reference-video-btn")!.dispatch("click");
+      await flush();
+      assert.equal(called, false);
+      assert.match(errors[0] ?? "", /프롬프트/u);
+    } finally {
+      dom.restore();
+    }
+  });
 
   it("provider가 돌려준 파일 엔트리를 'AI 생성' 출처로 레퍼런스에 추가한다", async () => {
     const dom = installDom();

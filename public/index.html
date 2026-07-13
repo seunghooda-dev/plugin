@@ -1251,6 +1251,19 @@
                   </button>
                 </div>
                 <span class="field-hint">gpt-image-2로 생성해 레퍼런스로 추가합니다. 출처는 “AI 생성”으로 기록됩니다.</span>
+                <div class="ai-gen-controls">
+                  <div class="select-wrap">
+                    <select id="reference-video-seconds-select" name="referenceVideoSeconds">
+                      <option value="8" selected>8초</option>
+                      <option value="16">16초</option>
+                      <option value="20">20초</option>
+                    </select>
+                  </div>
+                  <button id="reference-video-btn" class="secondary-button" type="button">
+                    영상 생성
+                  </button>
+                </div>
+                <span class="field-hint">Sora로 세로 영상(720×1280)을 생성해 레퍼런스로 추가합니다. 생성에 수 분이 걸릴 수 있습니다.</span>
               </div>
             </form>
 

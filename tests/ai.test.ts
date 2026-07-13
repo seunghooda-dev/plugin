@@ -660,6 +660,104 @@ describe("generateImage text-to-image", () => {
   });
 });
 
+function videoFetch(options: {
+  pollsUntilComplete?: number;
+  failStatus?: boolean;
+  neverComplete?: boolean;
+  emptyContent?: boolean;
+} = {}) {
+  const { pollsUntilComplete = 1, failStatus = false, neverComplete = false, emptyContent = false } = options;
+  let polls = 0;
+  return async (url: string, init: Record<string, unknown>) => {
+    const method = (init?.method as string) ?? "GET";
+    if (url.endsWith("/videos") && method === "POST") {
+      return mockResponse(200, { id: "video_abc123", status: "queued" });
+    }
+    if (/\/videos\/video_abc123$/u.test(url) && method === "GET") {
+      polls += 1;
+      if (failStatus) {
+        return mockResponse(200, { id: "video_abc123", status: "failed", error: { message: "content policy" } });
+      }
+      if (neverComplete) return mockResponse(200, { id: "video_abc123", status: "in_progress", progress: 40 });
+      return mockResponse(200, { id: "video_abc123", status: polls >= pollsUntilComplete ? "completed" : "in_progress" });
+    }
+    if (/\/videos\/video_abc123\/content/u.test(url)) {
+      const bytes = emptyContent
+        ? new Uint8Array(0)
+        : new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 1, 2, 3]);
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+        text: async () => "",
+      };
+    }
+    return mockResponse(404, { error: { message: "unexpected" } });
+  };
+}
+
+describe("generateVideo (Sora)", () => {
+  it("requires a stored API key", async () => {
+    const { adapter } = createAdapter();
+    const client = new OpenAIImageClient(adapter);
+    await assert.rejects(client.generateVideo({ prompt: "a wave" }), expectCode("MISSING_API_KEY"));
+  });
+  it("rejects an empty prompt", async () => {
+    const { client } = await readyClient(videoFetch());
+    await assert.rejects(client.generateVideo({ prompt: "   " }), expectCode("INVALID_INPUT"));
+  });
+  it("rejects an unsupported size or seconds", async () => {
+    const { client } = await readyClient(videoFetch());
+    await assert.rejects(
+      client.generateVideo({ prompt: "a wave", size: "9999x9999" as never }),
+      expectCode("INVALID_INPUT"),
+    );
+    await assert.rejects(
+      client.generateVideo({ prompt: "a wave", seconds: "99" as never }),
+      expectCode("INVALID_INPUT"),
+    );
+  });
+  it("creates, polls to completion, and downloads the MP4 bytes", async () => {
+    const { client, calls } = await readyClient(videoFetch({ pollsUntilComplete: 2 }));
+    const bytes = await client.generateVideo({ prompt: "  a calm ocean  " });
+    assert.ok(bytes instanceof Uint8Array && bytes.byteLength > 0);
+    const create = calls.find((c) => c.url.endsWith("/videos") && c.init.method === "POST");
+    assert.ok(create);
+    const body = JSON.parse(create!.init.body as string) as Record<string, unknown>;
+    assert.equal(body.model, "sora-2");
+    assert.equal(body.prompt, "a calm ocean");
+    assert.equal(body.size, "1280x720"); // default
+    assert.equal(body.seconds, "8"); // default
+    assert.ok(calls.some((c) => /\/videos\/video_abc123$/u.test(c.url))); // polled
+    assert.ok(calls.some((c) => /\/content/u.test(c.url))); // downloaded
+  });
+  it("honors size, seconds, and model", async () => {
+    const { client, calls } = await readyClient(videoFetch());
+    await client.generateVideo({ prompt: "a wave", size: "720x1280", seconds: "16", model: "sora-2-pro" });
+    const body = JSON.parse(
+      (calls.find((c) => c.init.method === "POST")!.init.body) as string,
+    ) as Record<string, unknown>;
+    assert.equal(body.size, "720x1280");
+    assert.equal(body.seconds, "16");
+    assert.equal(body.model, "sora-2-pro");
+  });
+  it("throws when the job fails", async () => {
+    const { client } = await readyClient(videoFetch({ failStatus: true }));
+    await assert.rejects(client.generateVideo({ prompt: "a wave" }), expectCode("API_ERROR"));
+  });
+  it("times out if the job never completes", async () => {
+    const { client } = await readyClient(videoFetch({ neverComplete: true }));
+    await assert.rejects(
+      client.generateVideo({ prompt: "a wave", pollIntervalMs: 1000, pollTimeoutMs: 10000 }),
+      expectCode("TIMEOUT"),
+    );
+  });
+  it("rejects empty video content", async () => {
+    const { client } = await readyClient(videoFetch({ emptyContent: true }));
+    await assert.rejects(client.generateVideo({ prompt: "a wave" }), expectCode("INVALID_RESPONSE"));
+  });
+});
+
 describe("editImage input edge shapes", () => {
   it("rejects a non-array images payload", async () => {
     const { client } = await readyClient();

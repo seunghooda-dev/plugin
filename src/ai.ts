@@ -35,6 +35,29 @@ export interface ImageGenerateRequest {
   timeoutMs?: number;
 }
 
+export type VideoGenerateSize =
+  | "1280x720"
+  | "720x1280"
+  | "1920x1080"
+  | "1080x1920"
+  | "848x480"
+  | "480x848";
+export type VideoGenerateSeconds = "8" | "16" | "20";
+export type VideoGenerateModel = "sora-2" | "sora-2-pro";
+
+export interface VideoGenerateRequest {
+  prompt: string;
+  size?: VideoGenerateSize;
+  seconds?: VideoGenerateSeconds;
+  model?: VideoGenerateModel;
+  /** 개별 HTTP 요청 타임아웃. */
+  timeoutMs?: number;
+  /** 생성 완료까지 전체 폴링 마감(기본 10분). */
+  pollTimeoutMs?: number;
+  /** 폴링 간격(기본 8초). */
+  pollIntervalMs?: number;
+}
+
 export interface SecureStorageAdapter {
   setItem(key: string, value: Uint8Array): Promise<any> | any;
   getItem(key: string): Promise<any> | any;
@@ -163,6 +186,60 @@ function buildGeneratePrompt(prompt: string): string {
     throw new AIClientError("INVALID_INPUT", "생성할 이미지를 설명하는 프롬프트를 입력해 주세요.");
   }
   return cleaned;
+}
+
+export const MAX_VIDEO_RESPONSE_BYTES = 200 * 1024 * 1024;
+const VIDEO_SIZES: readonly VideoGenerateSize[] = [
+  "1280x720",
+  "720x1280",
+  "1920x1080",
+  "1080x1920",
+  "848x480",
+  "480x848",
+];
+const VIDEO_SECONDS: readonly VideoGenerateSeconds[] = ["8", "16", "20"];
+
+function buildVideoPrompt(prompt: string): string {
+  const cleaned = cleanPrompt(prompt);
+  if (!cleaned) {
+    throw new AIClientError("INVALID_INPUT", "생성할 영상을 설명하는 프롬프트를 입력해 주세요.");
+  }
+  return cleaned;
+}
+
+function normalizeVideoSize(size: VideoGenerateSize | undefined): VideoGenerateSize {
+  if (size === undefined) return "1280x720";
+  if (!VIDEO_SIZES.includes(size)) {
+    throw new AIClientError("INVALID_INPUT", "지원하는 영상 크기를 선택해 주세요.");
+  }
+  return size;
+}
+
+function normalizeVideoSeconds(seconds: VideoGenerateSeconds | undefined): VideoGenerateSeconds {
+  if (seconds === undefined) return "8";
+  if (!VIDEO_SECONDS.includes(seconds)) {
+    throw new AIClientError("INVALID_INPUT", "지원하는 영상 길이(8·16·20초)를 선택해 주세요.");
+  }
+  return seconds;
+}
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const number = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+  return Math.max(min, Math.min(max, number));
+}
+
+async function readVideoJob(response: any): Promise<any> {
+  try {
+    return await response.json();
+  } catch {
+    throw new AIClientError("INVALID_RESPONSE", "OpenAI 영상 작업 응답을 JSON으로 읽지 못했습니다.");
+  }
+}
+
+function videoJobErrorMessage(job: any): string {
+  const message = job?.error?.message ?? job?.error;
+  if (typeof message !== "string") return "";
+  return message.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 300);
 }
 
 function isPrivateIpv4(hostname: string): boolean {
@@ -566,6 +643,83 @@ export class OpenAIImageClient {
       throw new AIClientError("INVALID_RESPONSE", "OpenAI 응답에 b64_json 이미지가 없습니다.");
     }
     return assertPngResponse(decodeBase64(base64));
+  }
+
+  // Sora 영상 생성: 작업 생성(POST /videos) → 완료까지 폴링(GET /videos/{id}) → MP4 다운로드(GET /videos/{id}/content).
+  async generateVideo(request: VideoGenerateRequest): Promise<Uint8Array> {
+    const prompt = buildVideoPrompt(request?.prompt);
+    const size = normalizeVideoSize(request?.size);
+    const seconds = normalizeVideoSeconds(request?.seconds);
+    const model: VideoGenerateModel = request?.model === "sora-2-pro" ? "sora-2-pro" : "sora-2";
+    const apiKey = await this.requireApiKey();
+    const requestTimeout = request?.timeoutMs ?? this.timeoutMs;
+
+    const createResponse = await this.fetchWithRetry(
+      `${this.endpoint}/videos`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt, size, seconds }),
+      },
+      apiKey,
+      requestTimeout,
+    );
+    if (!createResponse?.ok) await this.throwApiError(createResponse, apiKey);
+    let job = await readVideoJob(createResponse);
+    const videoId = typeof job?.id === "string" ? job.id.trim() : "";
+    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(videoId)) {
+      throw new AIClientError("INVALID_RESPONSE", "OpenAI 영상 작업 id가 올바르지 않습니다.");
+    }
+
+    const pollInterval = clampInt(request?.pollIntervalMs, 8_000, 1_000, 60_000);
+    const pollDeadline = clampInt(request?.pollTimeoutMs, 600_000, 10_000, 3_600_000);
+    let status = typeof job?.status === "string" ? job.status : "queued";
+    let waited = 0;
+    while (status !== "completed") {
+      if (status === "failed") {
+        const message = redactSecret(videoJobErrorMessage(job), apiKey);
+        throw new AIClientError("API_ERROR", `OpenAI 영상 생성이 실패했습니다${message ? `: ${message}` : ""}`);
+      }
+      if (waited >= pollDeadline) {
+        throw new AIClientError("TIMEOUT", "OpenAI 영상 생성이 시간 안에 끝나지 않았습니다.", { retryable: true });
+      }
+      await this.adapter.sleep(pollInterval);
+      waited += pollInterval;
+      const statusResponse = await this.fetchWithRetry(
+        `${this.endpoint}/videos/${videoId}`,
+        { method: "GET", headers: { Authorization: `Bearer ${apiKey}` } },
+        apiKey,
+        requestTimeout,
+      );
+      if (!statusResponse?.ok) await this.throwApiError(statusResponse, apiKey);
+      job = await readVideoJob(statusResponse);
+      status = typeof job?.status === "string" ? job.status : status;
+    }
+
+    const contentResponse = await this.fetchWithRetry(
+      `${this.endpoint}/videos/${videoId}/content?variant=video`,
+      { method: "GET", headers: { Authorization: `Bearer ${apiKey}` } },
+      apiKey,
+      requestTimeout,
+    );
+    if (!contentResponse?.ok) await this.throwApiError(contentResponse, apiKey);
+    let buffer: ArrayBuffer;
+    try {
+      buffer = await contentResponse.arrayBuffer();
+    } catch {
+      throw new AIClientError("INVALID_RESPONSE", "OpenAI 영상 데이터를 읽지 못했습니다.");
+    }
+    const bytes = new Uint8Array(buffer);
+    if (bytes.byteLength === 0) {
+      throw new AIClientError("INVALID_RESPONSE", "OpenAI 영상 응답이 비어 있습니다.");
+    }
+    if (bytes.byteLength > MAX_VIDEO_RESPONSE_BYTES) {
+      throw new AIClientError(
+        "INVALID_RESPONSE",
+        `OpenAI 영상 응답은 ${Math.floor(MAX_VIDEO_RESPONSE_BYTES / (1024 * 1024))}MB 이하여야 합니다.`,
+      );
+    }
+    return bytes.slice();
   }
 
   private async requireApiKey(): Promise<string> {

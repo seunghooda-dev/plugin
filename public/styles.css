@@ -509,7 +509,7 @@ strong {
   flex: 1 1 auto;
 }
 
-.ai-gen-controls #reference-gen-btn {
+.ai-gen-controls button {
   flex: 0 0 auto;
   white-space: nowrap;
 }

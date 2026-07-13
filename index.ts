@@ -897,7 +897,10 @@ function imageGenerateSize(value: string): ImageGenerateSize | undefined {
 }
 
 // 생성 바이트를 플러그인 데이터 폴더에 PNG로 쓰고, 레퍼런스 라이브러리가 토큰화할 수 있는 파일 엔트리를 돌려준다.
-async function writeGeneratedReferenceFile(bytes: Uint8Array): Promise<ReferenceFileEntry> {
+async function writeGeneratedReferenceFile(
+  bytes: Uint8Array,
+  extension: "png" | "mp4" = "png",
+): Promise<ReferenceFileEntry> {
   let uxp: any;
   try {
     uxp = require("uxp");
@@ -907,13 +910,45 @@ async function writeGeneratedReferenceFile(bytes: Uint8Array): Promise<Reference
   const storage = uxp?.storage;
   const fileSystem = storage?.localFileSystem;
   if (!fileSystem || typeof fileSystem.getDataFolder !== "function") {
-    throw new Error("UXP 데이터 폴더 API를 사용할 수 없어 생성 이미지를 저장하지 못했습니다.");
+    throw new Error("UXP 데이터 폴더 API를 사용할 수 없어 생성 결과를 저장하지 못했습니다.");
   }
   const folder = await fileSystem.getDataFolder();
-  const file = await folder.createFile(`ai-gen-${Date.now()}.png`, { overwrite: true });
+  const file = await folder.createFile(`ai-gen-${Date.now()}.${extension}`, { overwrite: true });
   const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   await file.write(buffer, { format: storage?.formats?.binary });
   return file as ReferenceFileEntry;
+}
+
+function videoGenerateSeconds(value: string): "8" | "16" | "20" | undefined {
+  return value === "8" || value === "16" || value === "20" ? value : undefined;
+}
+
+async function runReferenceVideoGen(prompt: string, seconds: string): Promise<ReferenceFileEntry> {
+  ensureAiConsent("AI 영상 생성");
+  const client = imageAIClient ?? createImageAIClient();
+  const genSeconds = videoGenerateSeconds(seconds);
+  // 짧은 세로 숏폼 기본. Sora 생성은 수 분이 걸릴 수 있어 폴링 마감을 넉넉히 준다.
+  const request = {
+    prompt,
+    size: "720x1280" as const,
+    ...(genSeconds ? { seconds: genSeconds } : {}),
+    timeoutMs: 120_000,
+    pollTimeoutMs: 900_000,
+  };
+  const descriptor = {
+    model: settings.aiModel,
+    kind: "video-generate",
+    seconds: genSeconds ?? "8",
+    promptHash: deterministicHash(prompt),
+  };
+  const bytes = aiQueueController
+    ? await aiQueueController.run("video", descriptor, () => client.generateVideo(request), {
+      estimateUnits: 20,
+      cacheTtlMs: 0,
+      maxRetries: 0,
+    })
+    : await client.generateVideo(request);
+  return writeGeneratedReferenceFile(bytes, "mp4");
 }
 
 async function runReferenceImageGen(prompt: string, size: string): Promise<ReferenceFileEntry> {
@@ -1055,6 +1090,7 @@ async function bootstrap(): Promise<void> {
       onSelectionChange: (ids) => activity.add("info", `AI 참고 레퍼런스 ${ids.length}개 선택`),
       enrichPromptProvider: runPromptEnrich,
       generatedImageProvider: runReferenceImageGen,
+      generatedVideoProvider: runReferenceVideoGen,
     });
     await referenceController.initialize();
   } catch (error) {
