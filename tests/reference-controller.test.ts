@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  MAX_IMAGE_INPUTS,
+  MAX_REFERENCE_PROMPT_ITEMS,
+  REFERENCE_STORAGE_KEY,
   ReferenceLibrary,
+  serializeReferences,
   type ReferenceFileEntry,
+  type ReferenceItem,
   type ReferenceLibraryAdapter,
 } from "../src/references";
 import { ReferenceController } from "../src/reference-controller";
@@ -378,6 +383,167 @@ describe("ReferenceController AI 프롬프트 보강", () => {
 
       assert.equal(dom.list.querySelectorAll(".reference-enrich-preview").length, 0);
       assert.equal(library.items[0]?.notes, "원본 메모");
+    } finally {
+      dom.restore();
+    }
+  });
+});
+
+function mockMediaFile(name: string): ReferenceFileEntry {
+  const nativePath = `C:\\References\\${name}`;
+  return {
+    name,
+    nativePath,
+    url: `file:///${nativePath.replace(/\\/gu, "/")}`,
+    isFile: true,
+    read: async () => Uint8Array.from([1, 2, 3]),
+  } as unknown as ReferenceFileEntry;
+}
+
+function createCardLibrary(): { library: ReferenceLibrary; store: Map<string, string> } {
+  const store = new Map<string, string>();
+  const entriesByToken = new Map<string, ReferenceFileEntry>();
+  let tokenCount = 0;
+  const adapter: ReferenceLibraryAdapter = {
+    localFileSystem: {
+      getFileForOpening: async () => null,
+      createPersistentToken: async (entry: ReferenceFileEntry) => {
+        tokenCount += 1;
+        const token = `card-token-${tokenCount}`;
+        entriesByToken.set(token, entry);
+        return token;
+      },
+      getEntryForPersistentToken: async (token: string) => {
+        const entry = entriesByToken.get(token);
+        if (!entry) throw new Error(`expired token: ${token}`);
+        return entry;
+      },
+    },
+    storage: {
+      getItem: async (key: string) => store.get(key) ?? null,
+      setItem: async (key: string, value: string) => { store.set(key, value); },
+      removeItem: async (key: string) => { store.delete(key); },
+    },
+    binaryFormat: "binary-format",
+  } as unknown as ReferenceLibraryAdapter;
+  const library = new ReferenceLibrary(adapter, {
+    idFactory: (_entry, index) => `card-${index}`,
+    now: () => 1,
+  });
+  return { library, store };
+}
+
+function aiCheckboxes(list: FakeElement): FakeElement[] {
+  return list.querySelectorAll("input").filter((input) => input.type === "checkbox");
+}
+
+describe("ReferenceController 카드 상태와 AI 선택 상한", () => {
+  it("만료된 레퍼런스 카드는 접근 만료를 표시하고 AI 선택을 감춘다", async () => {
+    const dom = installDom();
+    try {
+      const { library, store } = createCardLibrary();
+      const lost: ReferenceItem = {
+        id: "lost-1",
+        name: "gone.png",
+        type: "image",
+        url: "file:///C:/References/gone.png",
+        nativePath: "C:\\References\\gone.png",
+        token: "expired-token",
+        notes: "",
+        source: "",
+        tags: [],
+        createdAt: 1,
+      };
+      store.set(REFERENCE_STORAGE_KEY, serializeReferences([lost]));
+      const controller = new ReferenceController({ library });
+      await controller.initialize();
+
+      assert.equal(controller.items[0]?.unavailable, true);
+      const card = dom.list.querySelectorAll(".reference-card")[0];
+      assert.ok(card, "만료된 항목도 카드로 렌더링되어야 합니다.");
+      assert.ok(card.classList.contains("is-unavailable"));
+      assert.equal(
+        card.querySelectorAll(".reference-unavailable")[0]?.textContent,
+        "파일 접근 만료",
+      );
+      assert.equal(card.querySelectorAll(".reference-ai-select").length, 0);
+    } finally {
+      dom.restore();
+    }
+  });
+
+  it("이미지 AI 입력 선택은 최대 4개로 제한하고 체크를 되돌린다", async () => {
+    const dom = installDom();
+    try {
+      const { library } = createCardLibrary();
+      await library.addEntries(
+        Array.from({ length: 5 }, (_value, index) => mockMediaFile(`image-${index}.png`)),
+      );
+      const errors: Array<{ message: string; context: string }> = [];
+      const selections: Array<readonly string[]> = [];
+      const controller = new ReferenceController({
+        library,
+        onError: (error, context) => errors.push({
+          message: error instanceof Error ? error.message : String(error),
+          context,
+        }),
+        onSelectionChange: (ids) => selections.push(ids),
+      });
+      await controller.initialize();
+
+      const checkboxes = aiCheckboxes(dom.list);
+      assert.equal(checkboxes.length, 5);
+      for (const box of checkboxes.slice(0, MAX_IMAGE_INPUTS)) {
+        box.checked = true;
+        box.dispatch("change");
+      }
+      assert.equal(errors.length, 0);
+      assert.equal(controller.selectedIds.length, MAX_IMAGE_INPUTS);
+
+      const fifth = checkboxes[MAX_IMAGE_INPUTS]!;
+      fifth.checked = true;
+      fifth.dispatch("change");
+
+      assert.equal(fifth.checked, false, "거부된 선택은 체크 상태를 되돌려야 합니다.");
+      assert.equal(controller.selectedIds.length, MAX_IMAGE_INPUTS);
+      assert.equal(errors[0]?.context, "AI 레퍼런스 선택 실패");
+      assert.match(errors[0]?.message ?? "", /최대 4개/u);
+      assert.equal(selections.length, MAX_IMAGE_INPUTS, "실패한 선택은 알림을 발생시키지 않습니다.");
+    } finally {
+      dom.restore();
+    }
+  });
+
+  it("프롬프트 참고 선택은 전체 8개 상한을 넘지 못한다", async () => {
+    const dom = installDom();
+    try {
+      const { library } = createCardLibrary();
+      await library.addEntries(
+        Array.from({ length: 9 }, (_value, index) => mockMediaFile(`clip-${index}.mp4`)),
+      );
+      const errors: string[] = [];
+      const controller = new ReferenceController({
+        library,
+        onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+      });
+      await controller.initialize();
+
+      const checkboxes = aiCheckboxes(dom.list);
+      assert.equal(checkboxes.length, 9);
+      for (const box of checkboxes.slice(0, MAX_REFERENCE_PROMPT_ITEMS)) {
+        box.checked = true;
+        box.dispatch("change");
+      }
+      assert.equal(errors.length, 0);
+      assert.equal(controller.selectedIds.length, MAX_REFERENCE_PROMPT_ITEMS);
+
+      const ninth = checkboxes[MAX_REFERENCE_PROMPT_ITEMS]!;
+      ninth.checked = true;
+      ninth.dispatch("change");
+
+      assert.equal(ninth.checked, false);
+      assert.equal(controller.selectedIds.length, MAX_REFERENCE_PROMPT_ITEMS);
+      assert.match(errors[0] ?? "", /최대 8개/u);
     } finally {
       dom.restore();
     }

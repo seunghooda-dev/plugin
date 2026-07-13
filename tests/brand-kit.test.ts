@@ -731,3 +731,116 @@ describe("brand-kit JSON import and export", () => {
     );
   });
 });
+
+describe("BrandKitLibrary limit and stored-document hardening", () => {
+  it("clamps configured limits into the 1..20 range", async () => {
+    const tooMany = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: 1,
+      activeKitId: null,
+      kits: Array.from({ length: 21 }, (_value, index) => ({ name: `Kit ${index}` })),
+    });
+    for (const maxKits of [50, Number.NaN]) {
+      const { library } = deterministicLibrary(new MemoryStorage(), { maxKits });
+      await assert.rejects(
+        library.importJSON(tooMany),
+        (error: unknown) => error instanceof BrandKitError && /최대 20개/u.test(error.message),
+      );
+    }
+    const { library: floor } = deterministicLibrary(new MemoryStorage(), { maxKits: 0 });
+    await floor.create({ name: "A" });
+    await assert.rejects(
+      floor.create({ name: "B" }),
+      (error: unknown) => error instanceof BrandKitError && /최대 1개/u.test(error.message),
+    );
+  });
+
+  it("rejects duplication at the kit limit without partial state", async () => {
+    const { library } = deterministicLibrary(new MemoryStorage(), { maxKits: 1 });
+    const only = await library.create({ name: "Solo" });
+    await assert.rejects(
+      library.duplicate(only.id),
+      (error: unknown) => error instanceof BrandKitError && error.code === "LIMIT_EXCEEDED",
+    );
+    assert.deepEqual(library.kits.map((kit) => kit.id), [only.id]);
+  });
+
+  it("drops stored kits beyond the configured limit and clears their active id on load", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(BRAND_KIT_STORAGE_KEY, JSON.stringify({
+      schemaVersion: 1,
+      activeKitId: "kit-c",
+      kits: [
+        normalizeBrandKit({ id: "kit-a", name: "A" }, { now: 1 }),
+        normalizeBrandKit({ id: "kit-b", name: "B" }, { now: 2 }),
+        normalizeBrandKit({ id: "kit-c", name: "C" }, { now: 3 }),
+      ],
+    }));
+    const { library } = deterministicLibrary(storage, { maxKits: 2 });
+    await library.load();
+    assert.deepEqual(library.kits.map((kit) => kit.id), ["kit-a", "kit-b"]);
+    assert.equal(library.activeKitId, null);
+  });
+
+  it("surfaces corrupt persisted JSON as a typed INVALID_IMPORT error", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(BRAND_KIT_STORAGE_KEY, "{corrupt");
+    const { library } = deterministicLibrary(storage);
+    await assert.rejects(
+      library.load(),
+      (error: unknown) => error instanceof BrandKitError && error.code === "INVALID_IMPORT",
+    );
+    assert.deepEqual(library.kits, []);
+  });
+
+  it("rejects a stored document with an unsupported schema version", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(BRAND_KIT_STORAGE_KEY, JSON.stringify({
+      schemaVersion: 2,
+      activeKitId: null,
+      kits: [],
+    }));
+    const { library } = deterministicLibrary(storage);
+    await assert.rejects(
+      library.load(),
+      (error: unknown) => error instanceof BrandKitError && error.code === "UNSUPPORTED_VERSION",
+    );
+  });
+
+  it("skips non-object stored kit entries on load", async () => {
+    const storage = new MemoryStorage();
+    const valid = normalizeBrandKit({ id: "kit-real", name: "Real" }, { now: 1 });
+    storage.values.set(BRAND_KIT_STORAGE_KEY, JSON.stringify({
+      schemaVersion: 1,
+      activeKitId: valid.id,
+      kits: [null, "kit", 7, valid],
+    }));
+    const { library } = deterministicLibrary(storage);
+    await library.load();
+    assert.deepEqual(library.kits.map((kit) => kit.id), [valid.id]);
+    assert.equal(library.activeKitId, valid.id);
+  });
+
+  it("keeps existing preset groups when update patch groups are malformed", async () => {
+    const { library } = deterministicLibrary();
+    const created = await library.create(fullInput());
+    const updated = await library.update(created.id, {
+      font: "garbage",
+      colors: 7,
+      caption: [1, 2],
+      tts: null,
+    });
+    assert.equal(updated.name, created.name);
+    assert.equal(updated.font.family, "Noto Sans KR");
+    assert.deepEqual(updated.colors, created.colors);
+    assert.equal(updated.caption.maxChars, 28);
+    assert.equal(updated.tts.voice, "marin");
+  });
+
+  it("flags whitespace-only and oversized persistent tokens", () => {
+    const blank = codes({ logo: { token: "   ", name: "logo.png" } });
+    assert.ok(blank.includes("INVALID_TOKEN"));
+    const oversized = codes({ mogrt: { token: "x".repeat(4_097), name: "title.mogrt", track: 2 } });
+    assert.ok(oversized.includes("INVALID_TOKEN"));
+  });
+});
