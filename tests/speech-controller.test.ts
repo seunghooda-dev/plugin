@@ -422,6 +422,41 @@ describe("SpeechController request snapshots and Mock Host", () => {
     assert.equal(dom.getElementById("stt-run-btn")?.disabled, false);
   });
 
+  it("transcribeMediaBytes: 제공된 오디오 바이트로 파일 선택 없이 STT를 실행한다", async () => {
+    const requests: SttRequest[] = [];
+    const published: SpeechControllerTranscript[] = [];
+    const { controller, dom, files } = controllerHarness({
+      runStt: (request) => { requests.push(request); return Promise.resolve(sttResult("SEQ")); },
+      onTranscript: (transcript) => published.push(transcript),
+    });
+    await controller.initialize();
+    dom.getElementById("stt-output-format-select")!.value = "text";
+    dom.getElementById("stt-import-checkbox")!.checked = false;
+    files.sttFolder = folder("stt", "STT-SEQ");
+    await internals(controller).chooseFolder("stt");
+
+    await controller.transcribeMediaBytes({ bytes: Uint8Array.from([5, 6, 7]), name: "sequence-audio.wav" });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.filename, "sequence-audio.wav");
+    assert.deepEqual([...requests[0]!.bytes], [5, 6, 7]);
+    assert.equal(published.length, 1);
+    assert.match(dom.getElementById("stt-source-name")?.textContent ?? "", /sequence-audio\.wav/u);
+  });
+
+  it("transcribeMediaBytes: 인식 못 하는 형식이면 provider를 호출하지 않고 오류를 던진다", async () => {
+    let called = false;
+    const { controller } = controllerHarness({
+      runStt: () => { called = true; return Promise.resolve(sttResult("X")); },
+    });
+    await controller.initialize();
+    await assert.rejects(
+      controller.transcribeMediaBytes({ bytes: Uint8Array.from([1, 2]), name: "no-extension" }),
+      /인식/u,
+    );
+    assert.equal(called, false);
+  });
+
   it("does not import or publish A while a B source picker is still pending", async () => {
     const stt = deferred<SttResult>();
     const picker = deferred<SpeechInputFile>();

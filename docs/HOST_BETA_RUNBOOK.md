@@ -665,6 +665,15 @@ CDP 검증(`cdt-thumb-ai-1b.mjs`, 새 dist reload):
 - 생성 바이트를 파일로 쓰지 않고 raw 바이트만으로 레퍼런스에 넣으려 하면 즉시 차단(레퍼런스는 token+nativePath 필수)
 - 출처가 "AI 생성"으로 기록되지 않으면 즉시 차단(권리 추적 무결성)
 
+### 25-k. 시퀀스 오디오→STT(gap-3) — 오디오 추출 Host 통과(2026-07-13)
+
+참고 플러그인 대비 gap-3: 파일 선택 없이 활성 시퀀스 오디오를 추출해 STT. `exportVideo`(EncoderManager.exportSequence, 이미 존재)에 **번들 오디오 EPR**(`public/presets/shortflow_audio_16k_mono.epr`, 16kHz 모노, `getPluginFolder`로 피커 없이 접근)을 물려 데이터 폴더로 export → 읽어 `speechController.transcribeMediaBytes`로 기존 STT 경로 재사용.
+
+**CDP 검증(`cdt-seq-stt.mjs`)**: TTS·STT 탭 "시퀀스에서 자막 생성" 버튼 렌더(254×34, grid 붕괴 없음) → 클릭 시 SF_CDP_SMOKE(4초)의 오디오가 **`SF_CDP_SMOKE_*.wav · 0.2MB`로 추출·읽혀 STT 입력으로 설정됨**(콘솔 0). 즉 **UXP 시퀀스 오디오 export가 동작**(Web Audio/Canvas와 달리 벽 없음). STT 완료는 출력 폴더(네이티브 피커)+실제 전사 API라 기존 STT 흐름과 동일한 사용자 게이트.
+
+- 16kHz 모노 WAV ≈ 0.05MB/s → Whisper 25MB 상한에서 약 8분. 더 긴 것은 In/Out 범위(`range:"inout"`) 또는 후속 MP3 압축 필요.
+- 즉시 차단 조건: 추출 오디오를 STT에 넘길 때 원본 바이트가 아닌 빈/변조 바이트를 넘기면 차단.
+
 ### 25-j. BGM 비트 분석(Phase 5c) — Host 통과 + Web Audio 부재 발견(2026-07-13)
 
 음악/SFX 자산 카드에 "비트 분석" 액션을 추가했다(선택 WAV → BPM·비트 수 표시).

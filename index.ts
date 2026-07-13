@@ -951,6 +951,57 @@ async function runReferenceVideoGen(prompt: string, seconds: string): Promise<Re
   return writeGeneratedReferenceFile(bytes, "mp4");
 }
 
+// 활성 시퀀스 오디오를 번들 EPR로 데이터 폴더에 내보내고 그 바이트를 돌려준다(시퀀스 STT 전제).
+async function exportActiveSequenceAudio(): Promise<{ bytes: Uint8Array; name: string }> {
+  let uxp: any;
+  try {
+    uxp = require("uxp");
+  } catch {
+    throw new Error("Premiere Pro UXP 환경에서 실행해 주세요.");
+  }
+  const fileSystem = uxp?.storage?.localFileSystem;
+  const formats = uxp?.storage?.formats;
+  if (typeof fileSystem?.getPluginFolder !== "function" || typeof fileSystem?.getDataFolder !== "function") {
+    throw new Error("UXP 파일 시스템 API를 사용할 수 없습니다.");
+  }
+  const pluginFolder = await fileSystem.getPluginFolder();
+  let presetEntry: any;
+  try {
+    presetEntry = await pluginFolder.getEntry("presets/shortflow_audio_16k_mono.epr");
+  } catch {
+    throw new Error("번들된 오디오 내보내기 프리셋을 찾지 못했습니다.");
+  }
+  const dataFolder = await fileSystem.getDataFolder();
+  const outputPath = await exportVideo({
+    presetFile: presetEntry,
+    outputFolder: dataFolder,
+    mode: "immediate",
+    range: "entire",
+  });
+  const name = String(outputPath).split(/[\\/]/u).pop() || "sequence-audio";
+  const fileEntry = await dataFolder.getEntry(name);
+  const data = await fileEntry.read({ format: formats?.binary });
+  const bytes = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : null;
+  if (!bytes || bytes.byteLength === 0) {
+    throw new Error("내보낸 시퀀스 오디오를 읽지 못했습니다.");
+  }
+  return { bytes: bytes.slice(), name };
+}
+
+async function transcribeActiveSequence(): Promise<void> {
+  if (!speechController) throw new Error("TTS·STT 컨트롤러가 준비되지 않았습니다.");
+  const media = await busy.during(
+    "시퀀스 오디오를 추출하고 있습니다…",
+    () => exportActiveSequenceAudio(),
+  );
+  activity.add("info", `시퀀스 오디오(${media.name}) 추출 완료 — 자막 생성을 시작합니다.`);
+  await speechController.transcribeMediaBytes(media);
+}
+
 async function runReferenceImageGen(prompt: string, size: string): Promise<ReferenceFileEntry> {
   ensureAiConsent("AI 이미지 생성");
   const client = imageAIClient ?? createImageAIClient();
@@ -1034,6 +1085,7 @@ function bindCoreEvents(): void {
   bind("insert-mogrt-btn", "click", guarded(handleInsertMogrt, "MOGRT 삽입 실패"));
   bind("export-video-btn", "click", guarded(handleExportVideo, "영상 내보내기 실패"));
   bind("export-cover-btn", "click", guarded(handleExportCover, "커버 저장 실패"));
+  bind("stt-from-sequence-btn", "click", guarded(transcribeActiveSequence, "시퀀스 자막 생성 실패"));
   bind("choose-asset-root-btn", "click", guarded(() => assetBrowserPanel.chooseRoot(), "자산 폴더 선택 실패"));
   bind("open-asset-root-btn", "click", guarded(() => assetBrowserPanel.openRoot(), "자산 폴더 열기 실패"));
   bind("sync-assets-btn", "click", guarded(() => assetBrowserPanel.sync(), "자산 동기화 실패"));

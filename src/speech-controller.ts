@@ -23,7 +23,9 @@ import {
 import {
   SpeechFileError,
   SpeechFileManager,
+  classifySttInput,
   createDefaultSpeechFileAdapter,
+  sttMimeType,
   type SpeechInputFile,
   type SpeechOutputFolder,
   type SpeechWriteResult,
@@ -378,6 +380,40 @@ export class SpeechController {
     setText("stt-result-meta", "입력 파일이 준비되었습니다. 원고·자막 생성을 실행해 주세요.");
     this.options.onSourceChange?.();
     this.options.onActivity?.(`STT 입력 선택: ${this.source.name}`);
+  }
+
+  /**
+   * 파일 선택 없이 제공된 오디오 바이트(예: 시퀀스에서 추출)를 STT 입력으로 삼아 변환을 실행한다.
+   * 파일 피커를 거치지 않는 것 외에는 기존 STT 실행 경로(runStt)를 그대로 재사용한다.
+   */
+  async transcribeMediaBytes(media: { bytes: Uint8Array; name: string }): Promise<void> {
+    if (this.disposed) return;
+    const extension = classifySttInput(media.name);
+    if (!extension) {
+      throw new Error("추출한 오디오 형식을 STT 입력으로 인식하지 못했습니다.");
+    }
+    const bytes = media.bytes.slice();
+    this.source = {
+      entry: { name: media.name, nativePath: media.name, isFile: true, read: async () => bytes.slice() },
+      name: media.name,
+      nativePath: media.name,
+      extension,
+      mimeType: sttMimeType(extension),
+      bytes,
+      size: bytes.byteLength,
+    };
+    this.sourceRevision += 1;
+    this.sourceSelectionRevision += 1;
+    this.transcriptValue = null;
+    element<HTMLTextAreaElement>("stt-result-output").value = "";
+    element<HTMLButtonElement>("stt-copy-btn").disabled = true;
+    setText(
+      "stt-source-name",
+      `${media.name} · ${(bytes.byteLength / 1_048_576).toFixed(1)}MB`,
+      media.name,
+    );
+    this.options.onSourceChange?.();
+    await this.runStt();
   }
 
   private ttsSnapshot(): TtsOperationSnapshot {
