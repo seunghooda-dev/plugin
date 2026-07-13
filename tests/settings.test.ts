@@ -73,6 +73,60 @@ describe("speech settings", () => {
   });
 });
 
+describe("settings normalization", () => {
+  it("returns pristine defaults for non-object payloads", () => {
+    for (const payload of [null, undefined, 42, "settings", true, []]) {
+      assert.deepEqual(normalizeSettings(payload), { ...DEFAULT_SETTINGS });
+    }
+  });
+
+  it("rounds and clamps canvas dimensions to the supported range", () => {
+    const rounded = normalizeSettings({ width: 1080.6, height: 1 });
+    assert.equal(rounded.width, 1081);
+    assert.equal(rounded.height, 16);
+    assert.equal(normalizeSettings({ width: 1e9 }).width, 16384);
+  });
+
+  it("accepts numeric strings for numeric fields", () => {
+    const normalized = normalizeSettings({ width: "2000.4", ttsSpeed: "2.5" });
+    assert.equal(normalized.width, 2000);
+    assert.equal(normalized.ttsSpeed, 2.5);
+  });
+
+  it("rejects unknown workflow enum values", () => {
+    const normalized = normalizeSettings({
+      rangeMode: "diagonal",
+      reframeMode: "stretch",
+      scope: 7,
+      exportMode: "warp",
+      exportRange: false,
+    });
+    assert.equal(normalized.rangeMode, DEFAULT_SETTINGS.rangeMode);
+    assert.equal(normalized.reframeMode, DEFAULT_SETTINGS.reframeMode);
+    assert.equal(normalized.scope, DEFAULT_SETTINGS.scope);
+    assert.equal(normalized.exportMode, DEFAULT_SETTINGS.exportMode);
+    assert.equal(normalized.exportRange, DEFAULT_SETTINGS.exportRange);
+  });
+
+  it("replaces non-string text fields with defaults and enforces length caps", () => {
+    const normalized = normalizeSettings({
+      profileId: 99,
+      sequenceName: "시퀀스".repeat(100),
+      presetToken: "p".repeat(10_000),
+    });
+    assert.equal(normalized.profileId, DEFAULT_SETTINGS.profileId);
+    assert.equal(normalized.sequenceName.length, 120);
+    assert.equal(normalized.presetToken.length, 4_096);
+  });
+
+  it("clamps hook, CTA, and MOGRT track inputs", () => {
+    const normalized = normalizeSettings({ hookSeconds: -2, ctaSeconds: 99, mogrtTrack: 2.6 });
+    assert.equal(normalized.hookSeconds, 0);
+    assert.equal(normalized.ctaSeconds, 30);
+    assert.equal(normalized.mogrtTrack, 3);
+  });
+});
+
 describe("settings persistence", () => {
   it("round-trips normalized settings", () => {
     const storage = new MemoryStorage();
@@ -106,6 +160,35 @@ describe("settings persistence", () => {
     const storage = new MemoryStorage();
     storage.setItem("shortflow.settings.v1", "{broken");
     assert.deepEqual(loadSettings(storage), { ...DEFAULT_SETTINGS });
+  });
+
+  it("recovers from valid JSON that is not a settings object", () => {
+    const storage = new MemoryStorage();
+    storage.setItem("shortflow.settings.v1", "42");
+    assert.deepEqual(loadSettings(storage), { ...DEFAULT_SETTINGS });
+  });
+
+  it("returns defaults when storage access throws", () => {
+    class DeniedStorage extends MemoryStorage {
+      override getItem(): string | null {
+        throw new Error("storage denied");
+      }
+    }
+    assert.deepEqual(loadSettings(new DeniedStorage()), { ...DEFAULT_SETTINGS });
+  });
+
+  it("persists a normalized record rather than the raw input", () => {
+    const storage = new MemoryStorage();
+    saveSettings({
+      ...DEFAULT_SETTINGS,
+      ttsSpeed: 99,
+      rangeMode: "diagonal" as never,
+    }, storage);
+    const raw = storage.getItem("shortflow.settings.v1");
+    assert.ok(raw);
+    const persisted = JSON.parse(raw) as { ttsSpeed?: number; rangeMode?: string };
+    assert.equal(persisted.ttsSpeed, 4);
+    assert.equal(persisted.rangeMode, DEFAULT_SETTINGS.rangeMode);
   });
 
   it("clears only the plugin settings record", () => {
