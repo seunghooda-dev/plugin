@@ -687,10 +687,12 @@ describe("AI endpoint safety contract", () => {
 
 describe("recovery and system diagnostics UI contract", () => {
   const document = documentFromFile(PUBLIC_HTML_PATH);
-  // 복구·진단 패널이 src/recovery-panel.ts, src/diagnostics-panel.ts로 분리됐으므로 함께 검사한다.
+  // 복구·진단·에셋 브라우저 패널이 src/recovery-panel.ts, src/diagnostics-panel.ts,
+  // src/asset-browser-panel.ts로 분리됐으므로 함께 검사한다.
   const indexSource = readFileSync(path.join(ROOT, "index.ts"), "utf8")
     + readFileSync(path.join(ROOT, "src", "recovery-panel.ts"), "utf8")
-    + readFileSync(path.join(ROOT, "src", "diagnostics-panel.ts"), "utf8");
+    + readFileSync(path.join(ROOT, "src", "diagnostics-panel.ts"), "utf8")
+    + readFileSync(path.join(ROOT, "src", "asset-browser-panel.ts"), "utf8");
 
   it("exposes recovery and diagnostics IDs with accessible initial states", () => {
     assertOperationalUiContracts(document);
