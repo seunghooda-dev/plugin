@@ -883,3 +883,441 @@ describe("ThumbnailController DOM/UXP integration harness", () => {
     });
   });
 });
+
+class EmptyTokenFileSystem extends FakeLocalFileSystem {
+  async createPersistentToken(): Promise<string> {
+    return "   ";
+  }
+}
+
+function readOnlyEntry(name: string, onRead: () => void): ThumbnailFileEntry {
+  return {
+    name,
+    isFile: true,
+    read: () => {
+      onRead();
+      return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    },
+  };
+}
+
+function createControllerWithLog(
+  fileSystem: FakeLocalFileSystem,
+  storage: MemoryStorage,
+  errors: string[] = [],
+  activity: string[] = [],
+): ThumbnailController {
+  return new ThumbnailController({
+    adapter: adapter(fileSystem, storage),
+    now: () => Date.UTC(2026, 6, 12, 1, 2, 3),
+    imageFactory: loadedImage,
+    onError: (error, context) =>
+      errors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`),
+    onActivity: (message) => activity.push(message),
+  });
+}
+
+describe("ThumbnailController deeper layer, restore, and capability coverage", () => {
+  it("maps numeric layout control values and reports unsupported ones", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      const select = dom.getElementById("thumbnail-layout-select")!;
+      select.value = "2";
+      select.emit("change");
+      await waitUntil(() => controller.state.layout === "vertical" && select.value === "vertical");
+
+      select.value = "nonsense";
+      select.emit("change");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /지원하지 않는 썸네일 분할 값/u);
+      assert.equal(controller.state.layout, "vertical", "실패한 변경은 레이아웃을 유지해야 합니다.");
+      assert.equal(select.value, "vertical", "실패 후 select는 실제 레이아웃으로 되돌아가야 합니다.");
+      await controller.dispose();
+    });
+  });
+
+  it("rejects a layout smaller than the current layer count and restores the control", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("a.png"), sourceEntry("b.png"), sourceEntry("c.png")];
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 3);
+      assert.equal(controller.state.layout, "hero-left");
+      const select = dom.getElementById("thumbnail-layout-select")!;
+      select.value = "2";
+      select.emit("change");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /레이어 수가 많습니다/u);
+      assert.equal(controller.state.layout, "hero-left");
+      assert.equal(select.value, "hero-left");
+      await controller.dispose();
+    });
+  });
+
+  it("removes a layer through the card remove button and announces it", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("keep.png"), sourceEntry("drop.png")];
+    const storage = new MemoryStorage();
+    const activity: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createControllerWithLog(fileSystem, storage, [], activity);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 2);
+      const firstId = controller.state.layers[0]!.id;
+      const layerList = dom.getElementById("thumbnail-layer-list")!;
+      const removeButton = layerList.children[1]!.children[3]!;
+      const removeEvent = removeButton.emit("click");
+      assert.equal(removeEvent.propagationStopped, true, "삭제 클릭은 카드 선택으로 전파되면 안 됩니다.");
+      await waitUntil(() => activity.some((message) => /레이어를 삭제했습니다/u.test(message)));
+      assert.equal(controller.state.layers.length, 1);
+      assert.equal(controller.state.layers[0]?.id, firstId);
+      assert.equal(controller.state.selectedLayerId, firstId, "삭제 후 선택은 남은 레이어로 이동해야 합니다.");
+      await controller.dispose();
+    });
+  });
+
+  it("selects with Enter and deletes with Delete via card keyboard events", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("one.png"), sourceEntry("two.png")];
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 2);
+      const firstId = controller.state.layers[0]!.id;
+      const secondId = controller.state.layers[1]!.id;
+      assert.equal(controller.state.selectedLayerId, secondId, "가장 최근에 추가한 레이어가 선택됩니다.");
+
+      const layerList = dom.getElementById("thumbnail-layer-list")!;
+      const enterEvent = layerList.children[0]!.emit("keydown", { key: "Enter" });
+      assert.equal(enterEvent.defaultPrevented, true);
+      assert.equal(controller.state.selectedLayerId, firstId);
+
+      const deleteEvent = layerList.children[0]!.emit("keydown", { key: "Delete" });
+      assert.equal(deleteEvent.defaultPrevented, true);
+      await waitUntil(() => controller.state.layers.length === 1);
+      assert.equal(controller.state.layers[0]?.id, secondId);
+      await controller.dispose();
+    });
+  });
+
+  it("reorders layers through drag-and-drop and persists the new order", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("a.png"), sourceEntry("b.png"), sourceEntry("c.png")];
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 3);
+      const ids = controller.state.layers.map((layer) => layer.id);
+      const layerList = dom.getElementById("thumbnail-layer-list")!;
+      const expectedOrder = [ids[1], ids[2], ids[0]];
+      layerList.children[0]!.emit("dragstart");
+      layerList.children[2]!.emit("drop");
+      const readSavedOrder = (): Array<string> => {
+        const saved = JSON.parse(storage.values.get(THUMBNAIL_STORAGE_KEY) ?? "{}") as {
+          layers?: Array<{ id: string }>;
+        };
+        return (saved.layers ?? []).map((entry) => entry.id);
+      };
+      await waitUntil(() => readSavedOrder().join(",") === expectedOrder.join(","));
+      assert.deepEqual(controller.state.layers.map((layer) => layer.id), expectedOrder);
+      assert.deepEqual(readSavedOrder(), expectedOrder);
+      await controller.dispose();
+    });
+  });
+
+  it("rejects a picked entry that is not a readable image file", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = { name: "folder", isFile: false };
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /읽을 수 있는 이미지 파일이 아닙니다/u);
+      assert.equal(controller.state.layers.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("fails source import when a persistent token cannot be created", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new EmptyTokenFileSystem();
+    fileSystem.selection = sourceEntry("locked.png");
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /영구 접근 권한을 만들지 못했습니다/u);
+      assert.equal(controller.state.layers.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("refuses a batch that exceeds the remaining layer capacity", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("a.png"), sourceEntry("b.png"), sourceEntry("c.png")];
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 3);
+      fileSystem.selection = [sourceEntry("d.png"), sourceEntry("e.png")];
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /현재 1개를 더 추가할 수 있습니다/u);
+      assert.equal(controller.state.layers.length, 3, "용량을 넘는 일괄 추가는 부분 반영되면 안 됩니다.");
+      await controller.dispose();
+    });
+  });
+
+  it("builds a preview URL by reading entries that expose no direct URL", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    let reads = 0;
+    fileSystem.selection = readOnlyEntry("blob-only.png", () => {
+      reads += 1;
+    });
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 1);
+      assert.ok(reads >= 1, "직접 URL이 없으면 바이트를 읽어 미리보기 URL을 만들어야 합니다.");
+      assert.deepEqual(errors, []);
+      await controller.dispose();
+    });
+  });
+
+  it("rejects an image entry lacking both a URL and a reader", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = { name: "empty.png", isFile: true };
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /미리보기 URL을 만들 수 없습니다/u);
+      assert.equal(controller.state.layers.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("marks the canvas shell limited and shows a fallback notice only when export APIs are missing", async () => {
+    const incapable = controllerDom(false).document;
+    await withDocument(incapable, async () => {
+      const controller = createController(incapable, new FakeLocalFileSystem(), new MemoryStorage());
+      await controller.initialize();
+      const shell = incapable.getElementById("thumbnail-canvas-shell")!;
+      assert.ok(shell.classList.contains("is-limited"));
+      const notice = shell.querySelector("#thumbnail-canvas-fallback-notice");
+      assert.ok(notice);
+      assert.match(notice!.textContent, /fallback 구현 후 활성화됩니다/u);
+      assert.equal(incapable.getElementById("thumb-export-btn")!.disabled, true);
+      assert.equal(incapable.getElementById("thumb-export-svg-btn")!.disabled, false);
+      await controller.dispose();
+    });
+
+    const capable = controllerDom(true).document;
+    await withDocument(capable, async () => {
+      const controller = createController(capable, new FakeLocalFileSystem(), new MemoryStorage());
+      await controller.initialize();
+      const shell = capable.getElementById("thumbnail-canvas-shell")!;
+      assert.equal(shell.classList.contains("is-limited"), false);
+      assert.equal(shell.querySelector("#thumbnail-canvas-fallback-notice"), null);
+      assert.equal(capable.getElementById("thumb-export-btn")!.disabled, false);
+      await controller.dispose();
+    });
+  });
+
+  it("blocks exporting after the controller is disposed", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      await controller.dispose();
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /종료된 썸네일 편집기/u);
+      assert.equal(fileSystem.output.files.length, 0);
+    });
+  });
+
+  it("toggles badge visibility from title text and applies glow overlay to the selected layer", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = sourceEntry("glow.png");
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 1);
+
+      const badge = dom.getElementById("thumb-badge-input")!;
+      badge.value = "NEW";
+      badge.emit("input");
+      await waitUntil(() => controller.state.badgeOverlay.text === "NEW");
+      assert.equal(controller.state.badgeOverlay.visible, true);
+
+      badge.value = "";
+      badge.emit("input");
+      await waitUntil(() => controller.state.badgeOverlay.visible === false);
+
+      const glow = dom.getElementById("thumb-glow-checkbox")!;
+      const glowColor = dom.getElementById("thumb-glow-color")!;
+      glow.checked = true;
+      glowColor.value = "#00ff88";
+      glow.emit("change");
+      await waitUntil(() => (controller.state.layers[0]?.overlay.glow ?? 0) > 0);
+      assert.equal(controller.state.layers[0]?.overlay.glowColor, "#00ff88");
+      assert.equal(controller.state.layers[0]?.overlay.shadow, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("restores persisted edits and drops layers whose tokens no longer resolve", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(
+      THUMBNAIL_STORAGE_KEY,
+      JSON.stringify({
+        version: 3,
+        layout: "vertical",
+        selectedLayerId: "ghost",
+        backgroundColor: "#222222",
+        textOverlay: { text: "복원 제목" },
+        badgeOverlay: { text: "라벨" },
+        layers: [
+          {
+            id: "keep",
+            name: "keep.png",
+            token: "tok-keep",
+            createdAt: 5,
+            adjustments: { brightness: 150 },
+            transform: { zoom: 2 },
+          },
+          { id: "lost", name: "lost.png", token: "tok-missing", createdAt: 6 },
+        ],
+      }),
+    );
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.entries.set("tok-keep", sourceEntry("keep.png"));
+    const errors: string[] = [];
+    const dom = controllerDom(false).document;
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      assert.equal(controller.state.layers.length, 1);
+      const layer = controller.state.layers[0]!;
+      assert.equal(layer.id, "keep");
+      assert.equal(layer.adjustments.brightness, 150);
+      assert.equal(layer.transform.zoom, 2);
+      assert.equal(controller.state.selectedLayerId, "keep", "복원할 수 없는 선택은 첫 레이어로 대체됩니다.");
+      assert.equal(controller.state.layout, "vertical");
+      assert.equal(controller.state.backgroundColor, "#222222");
+      assert.equal(controller.state.textOverlay.text, "복원 제목");
+      assert.equal(controller.state.badgeOverlay.text, "라벨");
+      assert.ok(errors.some((message) => /접근 권한 복원 실패/u.test(message)));
+      await controller.dispose();
+    });
+  });
+
+  it("ignores malformed or unsupported stored payloads and starts fresh", async () => {
+    const payloads = [
+      "{ broken",
+      "",
+      JSON.stringify({ version: 9, layout: "full", layers: [] }),
+      JSON.stringify({ version: 3, layout: "diagonal", layers: [] }),
+      JSON.stringify({ version: 3, layout: "full", layers: "nope" }),
+    ];
+    for (const payload of payloads) {
+      const storage = new MemoryStorage();
+      storage.values.set(THUMBNAIL_STORAGE_KEY, payload);
+      const fileSystem = new FakeLocalFileSystem();
+      const dom = controllerDom(false).document;
+      await withDocument(dom, async () => {
+        const controller = createController(dom, fileSystem, storage);
+        await controller.initialize();
+        assert.equal(controller.state.layers.length, 0, `무시해야 하는 payload: ${payload}`);
+        assert.equal(controller.state.layout, "full");
+        await controller.dispose();
+      });
+    }
+  });
+
+  it("embeds the session URL in the SVG fallback when the token entry cannot be read", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = sourceEntry("withurl.png");
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 1);
+      // 영구 토큰이 읽기 권한을 잃은 항목으로 해석되는 상황을 재현합니다.
+      fileSystem.entries.set("token:withurl.png", {
+        name: "withurl.png",
+        isFile: true,
+        url: "file:///C:/media/withurl.png",
+      });
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      const svg = new TextDecoder().decode(fileSystem.output.files[0]!.bytes);
+      assert.match(svg, /href="file:\/\/\/C:\/media\/withurl\.png"/u);
+      assert.doesNotMatch(svg, /data:image\//u);
+      await controller.dispose();
+    });
+  });
+
+  it("keeps AI retouch disabled when the run button is disabled", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      const aiButton = dom.getElementById("thumb-ai-run-btn")!;
+      aiButton.disabled = true;
+      aiButton.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /비활성화/u);
+      await controller.dispose();
+    });
+  });
+});
