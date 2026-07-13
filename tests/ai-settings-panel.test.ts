@@ -337,12 +337,14 @@ describe("createAiSettingsPanel save", () => {
     }
   });
 
-  it("ai-api-key-input이 없으면 element()가 던져 save가 거부된다", async () => {
+  it("ai-api-key-input이 없어도 save가 던지지 않고 그대로 진행한다", async () => {
     const dom = installDom({ withInput: false });
     try {
       const client = stubClient({ initialKey: null });
       const { panel } = buildPanel(client);
-      await assert.rejects(panel.save(), /ai-api-key-input/u);
+      // UXP에서 빈 입력창 .value가 null이라 옛 element().value.trim()이 던지던 버그를 방지한다.
+      await panel.save();
+      assert.equal(client.calls.setApiKey.length, 0);
     } finally {
       dom.restore();
     }

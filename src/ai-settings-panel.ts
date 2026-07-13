@@ -1,6 +1,6 @@
 // AI 설정 탭의 연결 상태 배지, API 키 저장(secureStorage), 연결 테스트 UI를 담당하는 패널 모듈
 import type { OpenAIImageClient } from "./ai";
-import { element, optionalElement, toast } from "./ui";
+import { optionalElement, toast } from "./ui";
 
 export interface AiSettingsPanelOptions {
   /** 클라이언트는 index.ts가 소유·재생성(썸네일 AI와 공유)하므로 팩토리로 주입한다. */
@@ -49,13 +49,15 @@ export function createAiSettingsPanel(options: AiSettingsPanelOptions): {
 
   async function save(): Promise<void> {
     const client = options.createClient();
-    const input = element<HTMLInputElement>("ai-api-key-input");
-    if (input.value.trim()) {
-      await client.setApiKey(input.value);
-      input.value = "";
+    const input = optionalElement<HTMLInputElement>("ai-api-key-input");
+    // UXP에서 빈 입력창 .value가 null일 수 있어 null-safe로 읽는다.
+    const typed = (input?.value ?? "").trim();
+    if (typed) {
+      await client.setApiKey(typed);
+      if (input) input.value = "";
     }
     const hasKey = Boolean(await client.getApiKey());
-    input.placeholder = hasKey ? "저장된 API 키 유지" : "API 키 입력";
+    if (input) input.placeholder = hasKey ? "저장된 API 키 유지" : "API 키 입력";
     setConnectionStatus("ai-status", hasKey ? "connected" : "idle", hasKey ? "설정 저장됨" : "API 키 필요");
     setConnectionStatus("speech-status", hasKey ? "connected" : "idle", hasKey ? "AI 연결 준비됨" : "AI 설정 필요");
     options.onActivity("success", "AI 연결 설정을 저장했습니다. API 키는 UXP 보안 저장소에만 보관됩니다.");
@@ -73,14 +75,16 @@ export function createAiSettingsPanel(options: AiSettingsPanelOptions): {
     try {
       options.ensureConsent();
       const client = options.createClient();
-      const input = element<HTMLInputElement>("ai-api-key-input");
-      if (input.value.trim()) {
-        await client.setApiKey(input.value);
-        input.value = "";
+      const input = optionalElement<HTMLInputElement>("ai-api-key-input");
+      // UXP에서 빈 입력창의 .value가 null일 수 있어 null-safe로 읽는다(저장된 키로 테스트하는 일반 경로).
+      const typed = (input?.value ?? "").trim();
+      if (typed) {
+        await client.setApiKey(typed);
+        if (input) input.value = "";
       }
       setConnectionStatus("ai-status", "idle", "연결 확인 중…");
       await client.testConnection();
-      input.placeholder = "저장된 API 키 유지";
+      if (input) input.placeholder = "저장된 API 키 유지";
       setConnectionStatus("ai-status", "connected", "GPT Image 2 연결됨");
       setConnectionStatus("speech-status", "connected", "AI 연결 준비됨");
       options.onActivity("success", "OpenAI GPT Image 2 연결 테스트를 통과했습니다.");
