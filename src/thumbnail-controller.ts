@@ -1198,7 +1198,7 @@ export class ThumbnailController {
         const sourceInput = await this.selectedLayerAiInput();
         if (!sourceInput) {
           throw new Error(
-            `현재 환경은 썸네일 합성 미리보기를 만들 수 없어(${limit}) 선택한 레이어의 원본 이미지를 편집합니다. 먼저 편집할 이미지를 추가·선택해 주세요.`,
+            `편집할 이미지가 없습니다. 먼저 '소스 추가'로 이미지를 불러온 뒤 실행해 주세요. 현재 환경은 합성 미리보기를 만들 수 없어(${limit}) 선택한 레이어의 원본 이미지를 편집합니다.`,
           );
         }
         input = sourceInput;

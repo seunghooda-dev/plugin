@@ -1379,7 +1379,7 @@ describe("ThumbnailController deeper layer, restore, and capability coverage", (
       await controller.initialize();
       dom.getElementById("thumb-ai-run-btn")!.emit("click");
       await waitUntil(() => errors.length === 1);
-      assert.match(errors[0] ?? "", /편집할 이미지를 추가·선택/u);
+      assert.match(errors[0] ?? "", /편집할 이미지가 없습니다/u);
       assert.equal(called, false);
       await controller.dispose();
     });

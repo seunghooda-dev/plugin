@@ -630,3 +630,18 @@ index.ts를 2,234→1,335줄로 축소하며 6개 패널 모듈(text-encoding·r
 - 읽기 전용 분석 3종 중 하나라도 자막 문서를 변경(cue/word/timing 변동)하면 즉시 차단
 - 프롬프트 보강이 `적용` 없이 활용 메모를 덮어쓰면 즉시 차단
 - 결과 패널·미리보기에 API key/Authorization/전체 로컬 경로가 노출되면 즉시 차단
+
+### 25-h. 썸네일 AI Canvas 비의존 입력(Phase 1b) — 코드 경로 Host 확인·해피패스 사용자 게이트(2026-07-13)
+
+Phase 1(§deferred-ai-features)에서 썸네일 이미지 AI UI를 켰으나 실행 시 `detectCanvasLimit`가 발동해 하드 차단됐다(§원인: UXP Canvas가 합성 PNG 래스터화 불가). Phase 1b에서 **Canvas 제한이면 선택 레이어의 원본 이미지 바이트를 gpt-image-2 입력으로** 쓰도록 `runAI`를 분기하고 `onAIRequest` 포트를 `ThumbnailAIInput{bytes,mimeType,filename}`으로 바꿨다(커밋 ccc1c12 외).
+
+CDP 검증(`cdt-thumb-ai-1b.mjs`, 새 dist reload):
+
+- Canvas 제한 상태 유지(`thumb-export-btn` disabled), AI 카드 노출·preset/prompt/run 활성, **콘솔 오류 0**.
+- 레이어 0개(빈 상태)에서 `AI 보정 실행` → **새 분기 메시지** 토스트: "편집할 이미지가 없습니다. 먼저 '소스 추가'로 이미지를 불러온 뒤 실행해 주세요. 현재 환경은 합성 미리보기를 만들 수 없어(…) 선택한 레이어의 원본 이미지를 편집합니다." — 이전의 하드 차단("입력 이미지를 만들 수 없습니다")에서 **원본 편집 경로로 전환됐음을 확인**. (주의: `#thumbnail-layer-list`의 자식 수는 빈 상태 플레이스홀더를 포함하므로 레이어 유무 판정에 쓰지 말 것.)
+- **해피패스(사용자 게이트)**: 이미지 import는 네이티브 파일 피커라 CDP(UXP CDT는 `Input.*` 도메인 없음)로 구동 불가. 실제 200 왕복 검증은 사용자가 ⑴ 썸네일 탭 `소스 추가`로 이미지 선택 ⑵ 프리셋 선택 후 `AI 보정 실행` ⑶ 편집 결과가 새 레이어로 추가되는지 확인해야 한다. quota 해소·키 저장 상태이므로 조작만 하면 200 경로가 돈다.
+
+즉시 차단 조건(썸네일 AI):
+
+- Canvas 제한 시 원본 바이트가 아니라 빈/합성 바이트를 보내면 즉시 차단(합성은 Canvas 없이는 불가하므로 반드시 원본이어야 함)
+- gpt-image-2에 png/jpeg/webp 외 mime나 확장자 불일치 filename을 실으면 즉시 차단(`editImage` 거부 전에 컨트롤러가 걸러야 함)
