@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   MAX_STT_BYTES,
   MAX_TRANSCRIPT_CHARACTERS,
+  MAX_TRANSCRIPT_SEGMENT_CHARACTERS,
   MAX_TRANSCRIPT_SRT_CHARACTERS,
   MAX_TTS_CHARACTERS,
   OPENAI_API_KEY_STORAGE_KEY,
@@ -480,5 +481,289 @@ describe("SpeechApiClient STT", () => {
       model: "gpt-4o-transcribe-diarize",
     });
     assert.equal(result.segments.length, 10_000);
+  });
+});
+
+describe("SpeechApiClient TTS boundary hardening", () => {
+  it("accepts exactly 4,096 script characters and both speed bounds", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const client = clientWith(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return response();
+    });
+    await client.synthesize({
+      text: "가".repeat(MAX_TTS_CHARACTERS),
+      model: "tts-1",
+      voice: "alloy",
+      format: "mp3",
+      speed: 0.25,
+    });
+    await client.synthesize({ text: "끝", model: "tts-1", voice: "alloy", format: "mp3", speed: 4 });
+    assert.equal(String(bodies[0]?.input).length, MAX_TTS_CHARACTERS);
+    assert.equal(bodies[0]?.speed, 0.25);
+    assert.equal(bodies[1]?.speed, 4);
+  });
+
+  it("rejects whitespace-only scripts and out-of-range or non-finite speeds before network access", async () => {
+    let calls = 0;
+    const client = clientWith(async () => { calls += 1; return response(); });
+    await assert.rejects(
+      () => client.synthesize({ text: "   ", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 }),
+      /입력해 주세요/u,
+    );
+    await assert.rejects(
+      () => client.synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 0.24 }),
+      /0\.25배/u,
+    );
+    await assert.rejects(
+      () => client.synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: Number.NaN }),
+      /0\.25배/u,
+    );
+    assert.equal(calls, 0);
+  });
+
+  it("rejects over-limit gpt-4o-mini-tts instructions before network access", async () => {
+    let calls = 0;
+    const client = clientWith(async () => { calls += 1; return response(); });
+    await assert.rejects(() => client.synthesize({
+      text: "test",
+      model: "gpt-4o-mini-tts",
+      voice: "marin",
+      format: "mp3",
+      speed: 1,
+      instructions: "가".repeat(MAX_TTS_CHARACTERS + 1),
+    }), /말투 지시/u);
+    assert.equal(calls, 0);
+  });
+
+  it("rejects an OK response whose bytes are not the requested audio container", async () => {
+    const client = clientWith(async () => response({
+      bytes: new TextEncoder().encode('{"error":"masked upstream failure"}'),
+    }));
+    await assert.rejects(
+      () => client.synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 }),
+      /오디오 데이터/u,
+    );
+  });
+
+  it("rejects short or whitespace-containing stored API keys before network access", async () => {
+    for (const key of ["", "sk-short", "sk-proj-key with-space-0123456789"]) {
+      let calls = 0;
+      const client = new SpeechApiClient({
+        apiKeyProvider: async () => key,
+        fetcher: async () => { calls += 1; return response(); },
+      });
+      await assert.rejects(
+        () => client.synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 }),
+        (error: unknown) => error instanceof SpeechApiError && error.code === "API_KEY_REQUIRED",
+      );
+      assert.equal(calls, 0);
+    }
+  });
+
+  it("clamps configured timeouts into the 5s-180s window and clears the timer after success", async () => {
+    const observed: number[] = [];
+    const cleared: unknown[] = [];
+    const build = (timeoutMs: number): SpeechApiClient => new SpeechApiClient({
+      apiKeyProvider: async () => "sk-proj-this-is-a-valid-test-key-1234567890",
+      fetcher: async () => response(),
+      timeoutMs,
+      setTimer: (_handler, milliseconds) => { observed.push(milliseconds); return `timer-${milliseconds}`; },
+      clearTimer: (handle) => { cleared.push(handle); },
+    });
+    await build(1).synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 });
+    await build(999_999_999).synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 });
+    assert.deepEqual(observed, [5_000, 180_000]);
+    assert.deepEqual(cleared, ["timer-5000", "timer-180000"]);
+  });
+
+  it("cancels a pending request on mid-flight abort and aborts the underlying fetch", async () => {
+    let fetchSignal: AbortSignal | null | undefined;
+    const aborter = new AbortController();
+    const client = clientWith((_url, init) => {
+      fetchSignal = init?.signal;
+      return new Promise<SpeechResponseLike>(() => undefined);
+    });
+    const pending = client.synthesize({
+      text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1, signal: aborter.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    aborter.abort();
+    await assert.rejects(
+      pending,
+      (error: unknown) => error instanceof SpeechApiError && error.code === "CANCELLED",
+    );
+    assert.equal(fetchSignal?.aborted, true);
+  });
+
+  it("redacts foreign API keys, bearer tokens, and control characters from server error details", async () => {
+    const foreign = "sk-other_leaked_key_9876543210";
+    const client = clientWith(async () => response({
+      ok: false,
+      status: 500,
+      payload: { error: { message: `Bearer abc.def.ghi \u0001 ${foreign} ${"z".repeat(600)}` } },
+    }));
+    await assert.rejects(
+      () => client.synthesize({ text: "test", model: "tts-1", voice: "alloy", format: "mp3", speed: 1 }),
+      (error: unknown) => {
+        assert.ok(error instanceof SpeechApiError);
+        assert.equal(error.status, 500);
+        assert.match(error.message, /HTTP 500/u);
+        assert.equal(error.message.includes(foreign), false);
+        assert.equal(error.message.includes("abc.def.ghi"), false);
+        assert.equal(error.message.includes("\u0001"), false);
+        assert.equal(error.message.includes("z".repeat(501)), false);
+        return true;
+      },
+    );
+  });
+});
+
+describe("SpeechApiClient STT format matrix and malformed responses", () => {
+  it("accepts every documented extension and MIME pairing", async () => {
+    let calls = 0;
+    const client = clientWith(async () => { calls += 1; return response({ payload: { text: "ok" } }); });
+    const pairs: Array<[string, string]> = [
+      ["mp3", "audio/mpeg"],
+      ["mpeg", "audio/mpeg"],
+      ["mpga", "audio/mpeg"],
+      ["mp4", "video/mp4"],
+      ["m4a", "audio/mp4"],
+      ["wav", "audio/wav"],
+      ["webm", "audio/webm"],
+    ];
+    for (const [extension, mimeType] of pairs) {
+      const result = await client.transcribe({
+        bytes: new Uint8Array([1]),
+        filename: `voice.${extension}`,
+        mimeType,
+        model: "gpt-4o-transcribe",
+      });
+      assert.equal(result.model, "gpt-4o-transcribe");
+    }
+    assert.equal(calls, pairs.length);
+  });
+
+  it("honors an already-aborted caller signal before any STT network access", async () => {
+    let calls = 0;
+    const aborter = new AbortController();
+    aborter.abort();
+    const client = clientWith(async () => { calls += 1; return response({ payload: { text: "ok" } }); });
+    await assert.rejects(() => client.transcribe({
+      bytes: new Uint8Array([1]),
+      filename: "voice.wav",
+      mimeType: "audio/wav",
+      model: "gpt-4o-transcribe",
+      signal: aborter.signal,
+    }), (error: unknown) => error instanceof SpeechApiError && error.code === "CANCELLED");
+    assert.equal(calls, 0);
+  });
+
+  it("lowercases and forwards a valid language tag", async () => {
+    let form: FormData | null = null;
+    const client = clientWith(async (_url, init) => {
+      form = init?.body as FormData;
+      return response({ payload: { text: "ok" } });
+    });
+    await client.transcribe({
+      bytes: new Uint8Array([1]),
+      filename: "voice.wav",
+      mimeType: "audio/wav",
+      model: "gpt-4o-transcribe",
+      language: " KO-KR ",
+    });
+    assert.equal(form!.get("language"), "ko-kr");
+  });
+
+  it("rejects unparseable and non-object transcription payloads", async () => {
+    const broken = clientWith(async () => ({
+      ok: true,
+      status: 200,
+      async arrayBuffer() { return new ArrayBuffer(0); },
+      async json(): Promise<unknown> { throw new Error("invalid json"); },
+    }));
+    await assert.rejects(() => broken.transcribe({
+      bytes: new Uint8Array([1]), filename: "voice.wav", mimeType: "audio/wav", model: "whisper-1",
+    }), /응답 형식/u);
+
+    for (const payload of ["plain text", 42]) {
+      const client = clientWith(async () => response({ payload }));
+      await assert.rejects(() => client.transcribe({
+        bytes: new Uint8Array([1]), filename: "voice.wav", mimeType: "audio/wav", model: "whisper-1",
+      }), /응답 형식/u);
+    }
+  });
+
+  it("filters malformed diarized segments and truncates hostile segment text and speaker labels", async () => {
+    const client = clientWith(async () => response({
+      payload: {
+        text: "ok",
+        segments: [
+          { start: -1, end: 2, text: "negative start" },
+          { start: 3, end: 3, text: "zero duration" },
+          { start: 1, end: 2 },
+          "not-a-segment",
+          { start: 0, end: 1, text: "유".repeat(5_000), speaker: "spk\u0000[0]" },
+        ],
+      },
+    }));
+    const result = await client.transcribe({
+      bytes: new Uint8Array([1]),
+      filename: "voice.wav",
+      mimeType: "audio/wav",
+      model: "gpt-4o-transcribe-diarize",
+    });
+    assert.equal(result.segments.length, 1);
+    assert.equal(result.segments[0]?.text.length, MAX_TRANSCRIPT_SEGMENT_CHARACTERS);
+    assert.equal(result.segments[0]?.speaker, "spk 0");
+  });
+
+  it("never echoes an API key from an STT error response", async () => {
+    const secret = "sk-proj-this-is-a-valid-test-key-1234567890";
+    const client = clientWith(async () => response({
+      ok: false,
+      status: 401,
+      payload: { error: { message: `key ${secret} rejected` } },
+    }));
+    await assert.rejects(
+      () => client.transcribe({
+        bytes: new Uint8Array([1]), filename: "voice.wav", mimeType: "audio/wav", model: "whisper-1",
+      }),
+      (error: unknown) => error instanceof SpeechApiError
+        && error.status === 401
+        && !error.message.includes(secret)
+        && /API 키가 거부/u.test(error.message),
+    );
+  });
+});
+
+describe("injected provider response validation", () => {
+  it("rejects TTS responses with unknown models, voices, extensions, or non-record shapes", () => {
+    const base = { bytes: audioBytes("mp3"), mimeType: "audio/mpeg", extension: "mp3", model: "tts-1", voice: "alloy" };
+    assert.throws(() => validateTtsResult(null), /응답 형식/u);
+    assert.throws(() => validateTtsResult([base]), /응답 형식/u);
+    assert.throws(() => validateTtsResult({ ...base, model: "tts-hacked" }), /응답 모델/u);
+    assert.throws(() => validateTtsResult({ ...base, voice: "unknown-voice" }), /목소리/u);
+    assert.throws(() => validateTtsResult({ ...base, extension: "exe" }), /파일 형식/u);
+  });
+
+  it("rejects STT responses with mismatched models or non-string SRT fields", () => {
+    const base = { text: "ok", segments: [], srt: "", model: "whisper-1" };
+    assert.throws(() => validateSttResult({ ...base, model: "gpt-4o-transcribe" }, "whisper-1"), /일치하지/u);
+    assert.throws(() => validateSttResult({ ...base, model: "gpt-fake" }), /일치하지/u);
+    assert.throws(() => validateSttResult({ ...base, srt: 42 }, "whisper-1"), /SRT 응답 형식/u);
+    assert.throws(() => validateSttResult("plain", "whisper-1"), /응답 형식/u);
+  });
+
+  it("rejects a rebuilt SRT that exceeds the output cap even when the raw srt field is small", () => {
+    const segments = Array.from({ length: 1_300 }, (_value, index) => ({
+      start: index,
+      end: index + 0.5,
+      text: "다".repeat(4_000),
+    }));
+    assert.throws(
+      () => validateSttResult({ text: "ok", srt: "", segments, model: "whisper-1" }, "whisper-1"),
+      /정규화된/u,
+    );
   });
 });
