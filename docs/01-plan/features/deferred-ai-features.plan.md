@@ -41,8 +41,14 @@
 - `thumbnail-controller.ts`의 `card?.hidden` 런타임 가드는 유지 — 카드가 노출되면 자연히 통과.
 
 ### 검증
-- `npm run check` green.
-- 실제 Premiere Host에서 썸네일 탭 → AI 프리셋 선택 → 실행 → 실제 gpt-image-2 200 응답으로 보정 결과 확인(이 경로는 Host 미검증이라 Host 전용 버그 가능성 주의). AI 소비자 동의 게이트·권리 기록 연계 확인.
+- `npm run check` green (1515/1515). — 완료(커밋 2770114)
+- 실제 Premiere Host CDP 검증 완료: UI 숨김 해제는 성공(카드 노출·preset/prompt/run 활성·제목 "AI 이미지 보정", 콘솔 오류 0).
+
+### ⚠️ Host 검증에서 드러난 블로커 (Phase 1b로 분리)
+
+실제 실행 시 `detectCanvasLimit()`가 발동해 **"현재 환경에서는 썸네일 AI 입력 이미지를 만들 수 없습니다 — Premiere UXP Canvas가 이미지 합성/텍스트 렌더링/PNG·JPG 내보내기 미지원"** 토스트로 차단됨. 이는 PNG/JPG 내보내기가 비활성인 것과 **동일한 근본 원인** — gpt-image-2에 넘길 입력 PNG 바이트를 UXP Canvas가 만들지 못한다. 따라서 UI를 켜도 현재 Host에서 실제 AI 보정은 실행되지 않는다.
+
+**Phase 1b (설계 필요)**: Canvas 비의존 입력 경로. 후보 — (a) 합성 캔버스 대신 선택 레이어의 **원본 이미지 바이트**를 gpt-image-2 입력으로 사용(합성/텍스트 오버레이는 편집 후 재적용), (b) SVG fallback을 서버 없이 래스터화할 방법 탐색(현재 없음). (a)가 유력하나 "무엇을 편집하는가"(합성본 vs 원본)가 바뀌므로 별도 Design 문서로 다룬다. 이 블로커 해소 전까지 썸네일 AI는 UI 노출·코드 완비 상태이나 Host 실행 불가로 기록한다.
 
 ## 5. 리스크
 
