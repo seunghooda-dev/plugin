@@ -529,7 +529,7 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | 항목 | 구현·자동/mock 상태 | 실제 Host pending |
 |---|---|---|
 | 음악/SFX 폴더 열기 | manifest에 폴더용 빈 확장자 `""`과 명시적 미디어 확장자만 선언하고 `*`·`exe`를 거부합니다. adapter는 명시적 `allowFolderLaunch`에서만 `shell.openPath`를 사용하며, 그 외에는 `initialLocation`과 오디오 형식 제한을 둔 `media-picker` 결과를 반환합니다. | Premiere 26.3 동의창, Explorer/Finder 직접 열기, capability 미지원 시 picker 시작 위치·선택·취소를 확인해야 합니다. |
-| 썸네일 출력 폴더 | SVG/PNG 저장이 공통 `resolveOutputFolder()`를 사용하고, 첫 선택 폴더 token 저장과 다음 controller 실행의 token 재사용을 자동 테스트로 확인했습니다. 코드에는 복원 실패 시 token 폐기 후 재선택 경로가 있습니다. | 실제 SVG 파일·내용, panel/Premiere 재시작 후 재사용, 폴더 이동·권한 만료 후 재선택을 확인해야 합니다. PNG/JPG Host 승인은 계속 별도입니다. |
+| 썸네일 출력 폴더 | SVG/PNG 저장이 공통 `resolveOutputFolder()`를 사용하고, 첫 선택 폴더 token 저장과 다음 controller 실행의 token 재사용을 자동 테스트로 확인했습니다. 코드에는 복원 실패 시 token 폐기 후 재선택 경로가 있습니다. | **2026-07-13 Host 통과(§25-b)** — 실제 SVG 파일 3건 생성·내용 확인, 같은 세션 token 재사용, 만료 token 폐기 후 재선택까지 확인. panel/Premiere 완전 재시작 후 재사용은 다음 재시작 시점에 확인. PNG/JPG Host 승인은 계속 별도입니다. |
 | 파괴적 복구 확인 | `confirmDestructiveRecovery()`는 확인 함수 부재·거절·예외·비 boolean 응답에서 false로 닫히고, 명시적 `true`에서만 기존 검증된 clone rollback 경로로 진입합니다. | UXP Host에서 확인 UI 제공 여부, 거절·확인 각각의 mutation 0회/1회, 실제 검증된 복제본 제거와 원본 보존을 확인해야 합니다. |
 
 ## 25. 자막 AI 분석·레퍼런스 보강 신규 기능 smoke — 실제 Host 재검증 전
@@ -570,6 +570,7 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **FR-01(단어 클릭→playhead) Host 통과(재검증 완료)**: 테스트 MP4를 `SF_CDP_SMOKE` V1 0초에 삽입해 길이 4.96s 확보 후(§12 관례, console에서 `lockedAccess`+`executeTransaction`+`createInsertProjectItemAction` 경로 동작 확인), 자막 편집기에서 "두" 단어 chip 클릭 → 실제 playhead가 **정확히 1.3s로 이동**. `seekToWord`→`onSeek`→`setSequencePlayerPosition` 끝-끝 경로 실증. FR-02 하이라이트도 클릭 후 "두"로 이동 확인. 분석 결과 패널 seek 버튼(25-5)이 동일 `seekToWord` 경로를 사용하므로 배관은 선검증됨 — 남은 것은 live AI 결과 위 실제 버튼 클릭뿐.
 - **자막 autosave 복원 Host 통과(R-011 근거)**: 플러그인 리로드 후 재import 없이 활성 시퀀스 projectKey 기준 autosave에서 2큐/8단어가 자동 복원됨.
 - **flex 전환 광역 확인**: `asset-search-input` 41×34 렌더(수정 전 0×0) — `.browser-toolbar` 전환 유효.
+- **썸네일 SVG fallback 실파일·token 3종 Host 통과(§23/§24 pending 해소)**: 폴더 선택기를 실제 UXP temp 폴더로 스텁해 정식 버튼 경로로 검증 — ① `ShortFlow_Thumbnail_*.svg` 실파일 생성, 내용 `width="1280" height="720"` XML 확인 ② 2차 저장에서 `getFolder` 미호출로 persistent token 재사용 확인(53자 token localStorage 저장) ③ 쓰레기 token 주입 후 3차 저장에서 기존 token 폐기→폴더 재선택 1회→새 token 저장→3번째 SVG 생성으로 만료 복구 경로 확인. Canvas 제한 안내(PNG/JPG 비활성)는 §23대로 유지 표시됨.
 - **API 키 입력 필드 키보드 불가(사용자 제보) → 원인 확정·수정 완료(2026-07-13)**: 마스킹 이벤트 로거로 사용자 실클릭을 관찰한 결과, 클릭이 input에 한 번도 도달하지 않았고(주변 SPAN/P만 타깃) input들의 실측 rect가 전부 **0×0**이었다. 이중 근본 원인:
   1. **UXP가 `input[type="text"]` 등 속성 선택자 규칙을 적용하지 못함** — 공유 사이징 규칙(width/height/border)이 input에만 미적용. bare `input` 선택자로 전환해 해결(checkbox는 후행 `.checkbox-row input` 1×1 규칙이, range는 명시 리셋이 덮어씀). 전환 후 `subtitle-translate` input이 117×34로 복구된 것으로 1차 확인.
   2. **UXP가 `display: grid` 컨테이너를 0×0으로 붕괴시킴**(§14 `.two-column-layout`에서 이미 확인된 것과 동일) — `.form-grid`·`.browser-toolbar`·`.safe-zone-box-controls`·`.final-qc-waiver`·`.thumbnail-inspector`(media)·`.subtitle-reflow-controls`(media) 6곳을 flex-wrap 등가 레이아웃으로 전환.
