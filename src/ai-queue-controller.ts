@@ -7,7 +7,7 @@ import {
   type JobQueueStorage,
   type JobSnapshot,
 } from "./job-queue";
-import { bind, element, numberOf, optionalElement, setText } from "./ui";
+import { bind, clearChildren, element, numberOf, optionalElement, setText } from "./ui";
 
 export interface QueueRunOptions {
   estimateUnits?: number;
@@ -171,7 +171,7 @@ export class AIQueueController {
     const pauseButton = optionalElement<HTMLButtonElement>("ai-queue-pause-btn");
     if (pauseButton) pauseButton.textContent = this.queue.isPaused ? "큐 재개" : "큐 일시정지";
     const target = element<HTMLElement>("ai-job-list");
-    target.replaceChildren();
+    clearChildren(target);
     const jobs = this.queue.list().sort((left, right) => right.createdAt - left.createdAt).slice(0, 30);
     if (jobs.length === 0) {
       const empty = document.createElement("p");

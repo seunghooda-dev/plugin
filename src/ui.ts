@@ -170,7 +170,7 @@ export class ActivityLog {
 
   clear(): void {
     if (!this.target) return;
-    this.target.replaceChildren();
+    clearChildren(this.target);
     const empty = document.createElement("li");
     empty.className = "log-empty";
     empty.textContent = "기록된 작업이 없습니다.";
@@ -213,6 +213,16 @@ export function toast(message: string, level: LogLevel = "info", timeoutMs = 320
   item.textContent = message;
   region.append(item);
   setTimeout(() => item.remove(), timeoutMs);
+}
+
+// Premiere 26.3 UXP can leave stale children behind after replaceChildren();
+// remove explicitly when the host DOM supports it, and fall back for mock DOMs.
+export function clearChildren(target: HTMLElement): void {
+  if (typeof target.removeChild === "function") {
+    while (target.firstChild) target.removeChild(target.firstChild);
+    return;
+  }
+  target.replaceChildren();
 }
 
 export function renderEmptyState(target: HTMLElement, title: string, detail = ""): void {
