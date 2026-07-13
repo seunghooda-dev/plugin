@@ -29,7 +29,7 @@ import {
   type ThumbnailTextOverlay,
   type ThumbnailTransform,
 } from "./thumbnail";
-import { bind, element, valueOf } from "./ui";
+import { bind, clearChildren, element, valueOf } from "./ui";
 
 export const THUMBNAIL_STORAGE_KEY = "shortflow.thumbnail.layers.v1";
 export const THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY = "shortflow.thumbnail.outputFolderToken.v1";
@@ -1388,7 +1388,7 @@ export class ThumbnailController {
 
   private renderLayerList(): void {
     const target = element<HTMLElement>("thumbnail-layer-list");
-    target.replaceChildren();
+    clearChildren(target);
     if (this.stateValue.layers.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-state layer-empty-state";
@@ -1478,7 +1478,7 @@ export class ThumbnailController {
 
   private renderHistory(): void {
     const target = element<HTMLElement>("thumb-ai-history");
-    target.replaceChildren();
+    clearChildren(target);
     if (this.historyItems.length === 0) {
       const empty = document.createElement("div");
       empty.className = "history-empty";

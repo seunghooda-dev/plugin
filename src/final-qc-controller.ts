@@ -6,7 +6,7 @@ import {
   type FinalQCSnapshot,
   type QCWaiver,
 } from "./final-qc";
-import { bind, element, setText } from "./ui";
+import { bind, clearChildren, element, setText } from "./ui";
 
 interface ReportFile {
   name?: string;
@@ -62,7 +62,7 @@ export class FinalQCController {
 
   private render(report: FinalQCReport): void {
     const target = element<HTMLElement>("final-qc-results");
-    target.replaceChildren();
+    clearChildren(target);
     for (const check of report.checks) {
       const row = document.createElement("div");
       row.className = `final-qc-row is-${check.level}${check.waived ? " is-waived" : ""}`;
@@ -86,7 +86,7 @@ export class FinalQCController {
     element<HTMLButtonElement>("final-qc-json-btn").disabled = false;
     element<HTMLButtonElement>("final-qc-md-btn").disabled = false;
     const select = element<HTMLSelectElement>("final-qc-waiver-code");
-    select.replaceChildren();
+    clearChildren(select);
     const waiverable = report.checks.filter((check) => check.level === "error" && !check.hardBlock && !check.waived);
     for (const check of waiverable) {
       const option = document.createElement("option");

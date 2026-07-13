@@ -20,7 +20,7 @@ import {
   type SafeZoneAlignment,
   type SocialPlatform,
 } from "./safe-zone";
-import { bind, checkedOf, element, numberOf, optionalElement, valueOf } from "./ui";
+import { bind, checkedOf, clearChildren, element, numberOf, optionalElement, valueOf } from "./ui";
 
 export interface AutomationTranscript {
   name: string;
@@ -338,7 +338,7 @@ export class AutomationController {
     if (values[2]) values[2].textContent = `${this.cuesValue.length}개`;
 
     const target = element<HTMLElement>("auto-cut-list");
-    target.replaceChildren();
+    clearChildren(target);
     const rows: Array<{ type: "CUT" | "ZOOM"; start: number; end: number; label: string }> = [
       ...this.planValue.cuts.map((cut) => ({ type: "CUT" as const, start: cut.start, end: cut.end, label: `무음 ${cut.duration.toFixed(2)}초 제거` })),
       ...this.cuesValue.map((cue) => ({ type: "ZOOM" as const, start: cue.start, end: cue.end, label: `${cue.scale}% · ${cue.reason}` })),
@@ -379,7 +379,7 @@ export class AutomationController {
     if (values[2]) values[2].textContent = "0개";
     const target = optionalElement<HTMLElement>("auto-cut-list");
     if (target) {
-      target.replaceChildren();
+      clearChildren(target);
       const note = document.createElement("p");
       note.className = "action-note";
       note.textContent = message;

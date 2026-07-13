@@ -6,7 +6,7 @@ import {
   type BrandKitInput,
   type BrandMogrtPreset,
 } from "./brand-kit";
-import { bind, checkedOf, element, numberOf, setChecked, setText, setValue, valueOf } from "./ui";
+import { bind, checkedOf, clearChildren, element, numberOf, setChecked, setText, setValue, valueOf } from "./ui";
 
 interface UxpFile {
   name?: string;
@@ -93,7 +93,7 @@ export class BrandKitController {
 
   private render(): void {
     const select = element<HTMLSelectElement>("brand-kit-select");
-    select.replaceChildren();
+    clearChildren(select);
     for (const kit of this.library.kits) {
       const option = document.createElement("option");
       option.value = kit.id;
