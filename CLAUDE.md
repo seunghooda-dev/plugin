@@ -40,6 +40,15 @@ Both reuse the same OpenAI safety plumbing (HTTPS `api.openai.com` pinned, secur
 
 Checkpoint commits require a passing `npm run check` first — never commit a red tree. As of 2026-07-13 (user directive), commit and push to the `newplugin` remote (https://github.com/seunghooda-dev/newplugin) whenever a meaningful validated unit of work completes; the older "one commit per milestone" rule from "실행 원칙" in [docs/ROADMAP.md](docs/ROADMAP.md) is superseded. The `origin` remote (seunghooda-dev/plugin) is the legacy Codex repo — leave it untouched unless asked.
 
+## 모델 선택 (Model selection)
+
+이 프로젝트의 기본 모델은 Opus다. 프리미어 UXP 플러그인 개발은 고치고 검증(`npm run check`)하고 다시 고치는 인터랙티브 반복 작업이라, 능력·속도·비용의 균형이 좋은 Opus를 기본으로 쓴다. 다음 두 경우에만 Fable로 전환한다.
+
+- Opus로 여러 번 시도해도 풀리지 않는, 정말 어려운 설계·디버깅 난제를 만났을 때
+- 사람이 지켜보지 않는 장시간 자율 작업(예: 대규모 리팩터를 에이전트가 통째로 수행)을 맡길 때
+
+Fable는 가장 똑똑하지만 Opus보다 느리고 비용이 약 2배이므로, 위 두 경우가 아니면 쓰지 않는다. 문제를 해결하면 다시 Opus로 돌아온다.
+
 ## Things not to carry over from other CEP/UXP reference projects
 
 If porting ideas from older Adobe CEP-based plugins: don't reintroduce QE DOM dependency, filename-only project-item lookup, or single-point track search with `overwriteClip`. This project identifies media by file path, checks the full insertion range for conflicts, checks locked tracks, and rolls back on failure (see `src/recovery.ts`, `src/premiere.ts`).
