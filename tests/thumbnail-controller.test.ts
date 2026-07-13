@@ -353,6 +353,15 @@ class FailingRemoveStorage extends MemoryStorage {
   }
 }
 
+class ThrowingGetItemStorage extends MemoryStorage {
+  throwOnKey: string | null = null;
+
+  getItem(key: string): unknown {
+    if (key === this.throwOnKey) throw new Error("token read denied");
+    return super.getItem(key);
+  }
+}
+
 interface WrittenFile {
   name: string;
   bytes: Uint8Array;
@@ -704,6 +713,173 @@ describe("ThumbnailController DOM/UXP integration harness", () => {
       writeGate.resolve();
       await disposing;
       assert.equal(disposed, true);
+    });
+  });
+
+  it("rejects a non-folder picker result for the SVG output location", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const gate = deferred<ThumbnailFolderEntry | null>();
+    fileSystem.folderGate = gate;
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.getFolderCalls === 1);
+      gate.resolve({ name: "picked-file", isFile: true } as unknown as ThumbnailFolderEntry);
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /파일이 아닌 폴더/u);
+      assert.equal(fileSystem.output.files.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("refuses to import more images than the four-layer ceiling allows", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [
+      sourceEntry("1.png"),
+      sourceEntry("2.png"),
+      sourceEntry("3.png"),
+      sourceEntry("4.png"),
+      sourceEntry("5.png"),
+    ];
+    const storage = new MemoryStorage();
+    const errors: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage, errors);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => errors.length === 1);
+      assert.match(errors[0] ?? "", /이미지는 최대 4개/u);
+      assert.equal(controller.state.layers.length, 0);
+      await controller.dispose();
+    });
+  });
+
+  it("applies brand defaults to the layout and every image layer", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("a.png"), sourceEntry("b.png")];
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 2);
+      await controller.applyBrandDefaults({
+        layout: "horizontal",
+        backgroundColor: "#123456",
+        textColor: "#abcdef",
+        brightness: 130,
+        contrast: 80,
+        saturation: 60,
+        shadow: 40,
+        glow: 15,
+        shadowColor: "#010203",
+        glowColor: "#040506",
+      });
+      assert.equal(controller.state.layout, "horizontal");
+      assert.equal(controller.state.backgroundColor, "#123456");
+      assert.equal(controller.state.textOverlay.color, "#abcdef");
+      for (const layer of controller.state.layers) {
+        assert.deepEqual(layer.adjustments, { brightness: 130, contrast: 80, saturation: 60 });
+        assert.equal(layer.overlay.shadow, 40);
+        assert.equal(layer.overlay.glow, 15);
+        assert.equal(layer.overlay.shadowColor, "#010203");
+        assert.equal(layer.overlay.glowColor, "#040506");
+      }
+      const saved = JSON.parse(storage.values.get(THUMBNAIL_STORAGE_KEY) ?? "{}") as {
+        backgroundColor?: string;
+        layout?: string;
+      };
+      assert.equal(saved.backgroundColor, "#123456");
+      assert.equal(saved.layout, "horizontal");
+      await controller.dispose();
+    });
+  });
+
+  it("persists and restores per-layer adjustments, transform, and overlay", async () => {
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = sourceEntry("edit.png");
+    const storage = new MemoryStorage();
+    const firstDom = controllerDom(false).document;
+    await withDocument(firstDom, async () => {
+      const controller = createController(firstDom, fileSystem, storage);
+      await controller.initialize();
+      firstDom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 1);
+      const brightness = firstDom.getElementById("thumb-brightness-input")!;
+      brightness.value = "140";
+      brightness.emit("input");
+      const zoom = firstDom.getElementById("thumb-zoom-input")!;
+      zoom.value = "220";
+      zoom.emit("input");
+      const shadow = firstDom.getElementById("thumb-shadow-checkbox")!;
+      shadow.checked = true;
+      shadow.emit("change");
+      await waitUntil(() =>
+        controller.state.layers[0]?.adjustments.brightness === 140 &&
+        controller.state.layers[0]?.transform.zoom === 2.2 &&
+        (controller.state.layers[0]?.overlay.shadow ?? 0) > 0);
+      await controller.dispose();
+    });
+
+    const restoredDom = controllerDom(false).document;
+    await withDocument(restoredDom, async () => {
+      const restored = createController(restoredDom, fileSystem, storage);
+      await restored.initialize();
+      assert.equal(restored.state.layers.length, 1);
+      const layer = restored.state.layers[0]!;
+      assert.equal(layer.adjustments.brightness, 140);
+      assert.equal(layer.transform.zoom, 2.2);
+      assert.ok(layer.overlay.shadow > 0);
+      await restored.dispose();
+    });
+  });
+
+  it("selects the image under a canvas click using layout hit-testing", async () => {
+    const built = controllerDom(false);
+    const dom = built.document;
+    const canvas = built.canvas;
+    const fileSystem = new FakeLocalFileSystem();
+    fileSystem.selection = [sourceEntry("left.png"), sourceEntry("right.png")];
+    const storage = new MemoryStorage();
+    await withDocument(dom, async () => {
+      const controller = createController(dom, fileSystem, storage);
+      await controller.initialize();
+      dom.getElementById("thumbnail-source-btn")!.emit("click");
+      await waitUntil(() => controller.state.layers.length === 2);
+      canvas.emit("click", { clientX: 480, clientY: 100 });
+      assert.equal(controller.state.selectedLayerId, controller.state.layers[1]?.id);
+      canvas.emit("click", { clientX: 100, clientY: 100 });
+      assert.equal(controller.state.selectedLayerId, controller.state.layers[0]?.id);
+      await controller.dispose();
+    });
+  });
+
+  it("re-opens the folder picker when the stored output token cannot be read", async () => {
+    const dom = controllerDom(false).document;
+    const fileSystem = new FakeLocalFileSystem();
+    const storage = new ThrowingGetItemStorage();
+    storage.throwOnKey = THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY;
+    const activity: string[] = [];
+    await withDocument(dom, async () => {
+      const controller = new ThumbnailController({
+        adapter: adapter(fileSystem, storage),
+        now: () => Date.UTC(2026, 6, 12, 1, 2, 3),
+        imageFactory: loadedImage,
+        onActivity: (message) => activity.push(message),
+      });
+      await controller.initialize();
+      dom.getElementById("thumb-export-svg-btn")!.emit("click");
+      await waitUntil(() => fileSystem.output.files.length === 1);
+      assert.equal(fileSystem.getFolderCalls, 1);
+      assert.ok(activity.some((message) => /권한을 읽지 못해/u.test(message)));
+      assert.equal(storage.values.get(THUMBNAIL_OUTPUT_FOLDER_TOKEN_KEY), "token:exports");
+      await controller.dispose();
     });
   });
 });

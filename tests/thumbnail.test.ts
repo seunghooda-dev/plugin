@@ -1118,3 +1118,159 @@ describe("renderThumbnailSvg", () => {
     );
   });
 });
+
+describe("inferThumbnailImageMime edge cases", () => {
+  it("maps SVG and full JPEG extensions to their MIME types", () => {
+    assert.equal(inferThumbnailImageMime("logo.svg"), "image/svg+xml");
+    assert.equal(inferThumbnailImageMime("frame.jpeg"), "image/jpeg");
+    assert.equal(inferThumbnailImageMime("  COVER.WEBP  "), "image/webp");
+  });
+
+  it("prefers the file extension over conflicting magic bytes", () => {
+    assert.equal(
+      inferThumbnailImageMime("actually-jpeg.png", Uint8Array.from([0xff, 0xd8, 0xff])),
+      "image/png",
+    );
+  });
+
+  it("falls back to PNG for empty or too-short byte signatures", () => {
+    assert.equal(inferThumbnailImageMime("noext", new Uint8Array()), "image/png");
+    assert.equal(inferThumbnailImageMime("noext", Uint8Array.from([0x89, 0x50])), "image/png");
+    assert.equal(inferThumbnailImageMime("noext"), "image/png");
+  });
+});
+
+describe("thumbnailBytesToDataUrl edge cases", () => {
+  it("rejects empty or non-Uint8Array image data", () => {
+    assert.throws(() => thumbnailBytesToDataUrl(new Uint8Array()), /비어 있습니다/u);
+    assert.throws(() => thumbnailBytesToDataUrl([1, 2, 3] as never), /비어 있습니다/u);
+  });
+
+  it("emits base64 padding for 1, 2, and 3 byte payloads", () => {
+    assert.equal(thumbnailBytesToDataUrl(Uint8Array.from([1])), "data:image/png;base64,AQ==");
+    assert.equal(thumbnailBytesToDataUrl(Uint8Array.from([1, 2])), "data:image/png;base64,AQI=");
+    assert.equal(thumbnailBytesToDataUrl(Uint8Array.from([1, 2, 3])), "data:image/png;base64,AQID");
+  });
+
+  it("honors an explicit non-PNG MIME prefix", () => {
+    assert.equal(
+      thumbnailBytesToDataUrl(Uint8Array.from([1, 2, 3]), "image/jpeg"),
+      "data:image/jpeg;base64,AQID",
+    );
+  });
+});
+
+describe("renderThumbnailSvg effects and href safety", () => {
+  it("uses the glow color with no vertical offset for glow-only layers", () => {
+    let state = createThumbnailState({ width: 400, height: 200, layers: layerSources("a") });
+    state = updateOverlay(state, { glow: 30, glowColor: "#00ff88" });
+    const svg = renderThumbnailSvg(state, { resolveImageHref: () => "cover.png" });
+    assert.match(svg, /dy="0" stdDeviation="12"/u);
+    assert.match(svg, /flood-color="#00ff88"/u);
+    assert.match(svg, /stroke="#00ff88"/u);
+  });
+
+  it("lets glow win the effect color when a layer sets both shadow and glow", () => {
+    let state = createThumbnailState({ width: 400, height: 200, layers: layerSources("a") });
+    state = updateOverlay(state, {
+      shadow: 12,
+      glow: 18,
+      shadowColor: "#123456",
+      glowColor: "#00ff88",
+    });
+    const svg = renderThumbnailSvg(state, { resolveImageHref: () => "cover.png" });
+    assert.match(svg, /dy="3" stdDeviation="7.2"/u);
+    assert.match(svg, /flood-color="#00ff88"/u);
+    assert.match(svg, /stroke="#00ff88"/u);
+    assert.doesNotMatch(svg, /#123456/u);
+  });
+
+  it("emits both shadow and glow filters for a title that uses each", () => {
+    let state = createThumbnailState({ width: 1000, height: 500 });
+    state = updateTextOverlay(state, {
+      text: "제목",
+      shadow: 20,
+      glow: 30,
+      shadowColor: "#010101",
+      glowColor: "#020202",
+    });
+    const svg = renderThumbnailSvg(state);
+    assert.match(svg, /<filter id="shortflow-title-shadow"/u);
+    assert.match(svg, /<filter id="shortflow-title-glow"/u);
+    assert.match(svg, /filter="url\(#shortflow-title-shadow\) url\(#shortflow-title-glow\)"/u);
+    assert.match(svg, /flood-color="#010101"/u);
+    assert.match(svg, /flood-color="#020202"/u);
+  });
+
+  it("omits hidden badges, empty badges, and empty titles", () => {
+    const hidden = renderThumbnailSvg(
+      updateBadgeOverlay(createThumbnailState(), { text: "HIDDEN", visible: false }),
+    );
+    assert.doesNotMatch(hidden, /HIDDEN/u);
+    assert.doesNotMatch(hidden, /<text /u);
+    const emptyBadge = renderThumbnailSvg(
+      updateBadgeOverlay(createThumbnailState(), { text: "   ", visible: true }),
+    );
+    assert.doesNotMatch(emptyBadge, /<text /u);
+  });
+
+  it("accepts an inline image data URL href", () => {
+    const state = createThumbnailState({ layers: ["only"] });
+    const svg = renderThumbnailSvg(state, {
+      resolveImageHref: () => "data:image/png;base64,AQID",
+    });
+    assert.match(svg, /<image href="data:image\/png;base64,AQID"/u);
+  });
+
+  it("rejects empty, control-character, executable, and oversized hrefs", () => {
+    const state = createThumbnailState({ layers: ["only"] });
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => "" }),
+      /유효하지 않습니다/u,
+    );
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => `cover${String.fromCharCode(0)}.png` }),
+      /유효하지 않습니다/u,
+    );
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => "vbscript:msgbox 1" }),
+      /실행 가능한 scheme/u,
+    );
+    assert.throws(
+      () => renderThumbnailSvg(state, { resolveImageHref: () => `file:///${"a".repeat(40_000)}.png` }),
+      /유효하지 않습니다/u,
+    );
+  });
+});
+
+describe("drawCoverImage crop math edge cases", () => {
+  it("draws a matching aspect-ratio image without cropping", async () => {
+    const ctx = new MockContext();
+    const state = createThumbnailState({ width: 100, height: 100, layers: layerSources("a") });
+    await renderThumbnail(ctx, state, () => ({ width: 300, height: 300 }));
+    assert.deepEqual(ctx.drawCalls[0]?.args, [0, 0, 300, 300, 0, 0, 100, 100]);
+  });
+
+  it("ignores pan offsets while zoom sits at its 1x minimum", async () => {
+    const ctx = new MockContext();
+    let state = createThumbnailState({ width: 100, height: 100, layers: layerSources("a") });
+    state = updateTransform(state, { offsetX: 1, offsetY: -1 });
+    await renderThumbnail(ctx, state, () => ({ width: 200, height: 100 }));
+    assert.deepEqual(ctx.drawCalls[0]?.args, [50, 0, 100, 100, 0, 0, 100, 100]);
+  });
+});
+
+describe("calculateLayoutRects fallback edge cases", () => {
+  it("falls back to hero-left when a two-cell layout is asked to hold three", () => {
+    assert.deepEqual(
+      calculateLayoutRects(120, 90, 3, "vertical"),
+      calculateLayoutRects(120, 90, 3, "hero-left"),
+    );
+  });
+
+  it("returns just the first cell when a grid layout holds a single image", () => {
+    assert.deepEqual(calculateLayoutRects(80, 80, 1, "grid"), [
+      { x: 0, y: 0, width: 40, height: 40 },
+    ]);
+  });
+});
