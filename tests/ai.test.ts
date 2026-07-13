@@ -249,6 +249,17 @@ describe("decodeBase64", () => {
     assert.throws(() => decodeBase64("A=ID"), expectCode("INVALID_RESPONSE")));
   it("rejects impossible base64 length", () =>
     assert.throws(() => decodeBase64("A"), expectCode("INVALID_RESPONSE")));
+  it("rejects a payload that would decode past the 50MB response cap before allocating it", () => {
+    const overCapLength = (Math.floor(MAX_EDIT_RESPONSE_BYTES / 3) + 1) * 4;
+    assert.throws(
+      () => decodeBase64("A".repeat(overCapLength)),
+      (error: unknown) => {
+        expectCode("INVALID_RESPONSE")(error);
+        assert.match((error as Error).message, /50MB/u);
+        return true;
+      },
+    );
+  });
 });
 
 describe("secure API key storage", () => {
@@ -537,5 +548,171 @@ describe("connection test", () => {
   it("reports an authorization failure without exposing the key", async () => {
     const { client } = await readyClient(async () => mockResponse(401, { error: { message: API_KEY } }));
     await assert.rejects(client.testConnection(), expectCode("API_ERROR"));
+  });
+});
+
+describe("client construction and secure storage failure paths", () => {
+  it("rejects an adapter without secureStorage or fetch", () => {
+    assert.throws(() => new OpenAIImageClient(null as never), expectCode("UNSUPPORTED_RUNTIME"));
+    assert.throws(
+      () => new OpenAIImageClient({ secureStorage: new MockSecureStorage() } as never),
+      expectCode("UNSUPPORTED_RUNTIME"),
+    );
+  });
+
+  it("clamps invalid constructor timeouts to the 60-second default", () => {
+    const { adapter } = createAdapter();
+    assert.equal(new OpenAIImageClient(adapter).timeoutMs, 60_000);
+    assert.equal(new OpenAIImageClient(adapter, { timeoutMs: -5 }).timeoutMs, 60_000);
+    assert.equal(new OpenAIImageClient(adapter, { timeoutMs: Number.NaN }).timeoutMs, 60_000);
+    assert.equal(new OpenAIImageClient(adapter, { timeoutMs: 1234.7 }).timeoutMs, 1234);
+  });
+
+  it("wraps secure storage write, read, and delete failures as UNSUPPORTED_RUNTIME", async () => {
+    const failure = new Error(`storage denied for ${API_KEY}`);
+    const { adapter } = createAdapter();
+    const failing: OpenAIImageAdapter = {
+      ...adapter,
+      secureStorage: {
+        setItem: () => { throw failure; },
+        getItem: () => { throw failure; },
+        removeItem: () => { throw failure; },
+      },
+    };
+    const client = new OpenAIImageClient(failing);
+    await assert.rejects(client.setApiKey(API_KEY), expectCode("UNSUPPORTED_RUNTIME"));
+    await assert.rejects(client.getApiKey(), expectCode("UNSUPPORTED_RUNTIME"));
+    await assert.rejects(client.removeApiKey(), expectCode("UNSUPPORTED_RUNTIME"));
+  });
+
+  it("rejects a corrupted stored key on read and treats blank storage as missing", async () => {
+    const { adapter, storage } = createAdapter();
+    const client = new OpenAIImageClient(adapter);
+    storage.values.set(OPENAI_API_KEY_STORAGE_KEY, new TextEncoder().encode("bad"));
+    await assert.rejects(client.getApiKey(), expectCode("INVALID_API_KEY"));
+    storage.values.set(OPENAI_API_KEY_STORAGE_KEY, new TextEncoder().encode("   "));
+    assert.equal(await client.getApiKey(), null);
+  });
+});
+
+describe("editImage input edge shapes", () => {
+  it("rejects a non-array images payload", async () => {
+    const { client } = await readyClient();
+    await assert.rejects(
+      client.editImage({ images: {} as never }),
+      expectCode("INVALID_INPUT"),
+    );
+  });
+
+  it("accepts uppercase extensions and the image/jpg MIME alias", async () => {
+    const { client } = await readyClient();
+    const bytes = await client.editImage({
+      images: [inputImage({ filename: "PHOTO.JPG", mimeType: "image/jpg" })],
+    });
+    assert.deepEqual([...bytes], PNG_SIGNATURE);
+  });
+
+  it("accepts a 260-character filename and rejects 261 characters", async () => {
+    const { client } = await readyClient();
+    const bytes = await client.editImage({
+      images: [inputImage({ filename: `${"a".repeat(256)}.png` })],
+    });
+    assert.deepEqual([...bytes], PNG_SIGNATURE);
+    await assert.rejects(
+      client.editImage({ images: [inputImage({ filename: `${"a".repeat(257)}.png` })] }),
+      expectCode("INVALID_INPUT"),
+    );
+  });
+});
+
+describe("API error metadata, quota handling, and response guards", () => {
+  it("surfaces an insufficient_quota 429 with status and retryable metadata after one retry", async () => {
+    const { client, calls, sleeps } = await readyClient(async () =>
+      mockResponse(429, { error: { code: "insufficient_quota", message: `quota exhausted ${API_KEY}` } }),
+    );
+    await assert.rejects(
+      client.editImage({ images: [inputImage()] }),
+      (error: unknown) => {
+        expectCode("API_ERROR")(error);
+        assert.ok(error instanceof AIClientError);
+        assert.equal(error.status, 429);
+        assert.equal(error.retryable, true);
+        assert.match(error.message, /insufficient_quota/u);
+        assert.match(error.message, /\[REDACTED\]/u);
+        return true;
+      },
+    );
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [500]);
+  });
+
+  it("marks a 400 failure non-retryable with its status", async () => {
+    const { client, calls } = await readyClient(async () => mockResponse(400, "bad request"));
+    await assert.rejects(
+      client.editImage({ images: [inputImage()] }),
+      (error: unknown) => {
+        expectCode("API_ERROR")(error);
+        assert.ok(error instanceof AIClientError);
+        assert.equal(error.status, 400);
+        assert.equal(error.retryable, false);
+        return true;
+      },
+    );
+    assert.equal(calls.length, 1);
+  });
+
+  it("testConnection succeeds after a transient 5xx clears on retry", async () => {
+    let count = 0;
+    const { client, calls } = await readyClient(async () => {
+      count += 1;
+      return count === 1 ? mockResponse(503, "warming up") : mockResponse(200, {});
+    });
+    assert.deepEqual(await client.testConnection(), { ok: true, model: OPENAI_IMAGE_MODEL });
+    assert.equal(calls.length, 2);
+  });
+
+  it("testConnection surfaces a non-OK status without retrying it", async () => {
+    const { client, calls } = await readyClient(async () => mockResponse(404, "model missing"));
+    await assert.rejects(
+      client.testConnection(),
+      (error: unknown) => {
+        expectCode("API_ERROR")(error);
+        assert.ok(error instanceof AIClientError);
+        assert.equal(error.status, 404);
+        assert.equal(error.retryable, false);
+        return true;
+      },
+    );
+    assert.equal(calls.length, 1);
+  });
+
+  it("marks timeout failures retryable", async () => {
+    const context = createAdapter(async () => new Promise(() => undefined));
+    context.adapter.setTimeout = (handler: () => void) => { handler(); return 1; };
+    context.adapter.clearTimeout = () => undefined;
+    const client = new OpenAIImageClient(context.adapter);
+    await client.setApiKey(API_KEY);
+    await assert.rejects(
+      client.testConnection(1),
+      (error: unknown) => {
+        expectCode("TIMEOUT")(error);
+        assert.ok(error instanceof AIClientError);
+        assert.equal(error.retryable, true);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a success response whose JSON body cannot be parsed", async () => {
+    const { client } = await readyClient(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new Error("unexpected end of JSON"); },
+      text: async () => "",
+    }));
+    await assert.rejects(
+      client.editImage({ images: [inputImage()] }),
+      expectCode("INVALID_RESPONSE"),
+    );
   });
 });
