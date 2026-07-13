@@ -1,21 +1,7 @@
-import { PROFILES, formatDuration, type MarkerSegment, type QCItem } from "./src/core";
-import {
-  ASSET_DRAG_PAYLOAD_MIME,
-  AssetLibrary,
-  AssetLibraryError,
-  applyAssetOrder,
-  createAssetDragPayload,
-  createDefaultAssetLibraryAdapter,
-  filterAssets,
-  listAudioAssetCategories,
-  normalizeAssetOrder,
-  normalizeNativePath,
-  readAssetPreviewBytes,
-  reorderAssetIds,
-  resolveAudioAssetDragTarget,
-  type AssetFolderOpenResult,
-  type AssetItem,
-} from "./src/asset-library";
+import { PROFILES, formatDuration } from "./src/core";
+import { normalizeNativePath, type AssetItem } from "./src/asset-library";
+import { createAssetBrowserPanel } from "./src/asset-browser-panel";
+import { createMarkersQcPanel } from "./src/markers-qc-panel";
 import {
   addStoryMarkers,
   addAutomationMarkers,
@@ -98,10 +84,8 @@ import {
   BusyState,
   bind,
   checkedOf,
-  element,
   numberOf,
   optionalElement,
-  renderEmptyState,
   setChecked,
   setText,
   setValue,
@@ -111,8 +95,6 @@ import {
 } from "./src/ui";
 
 const { entrypoints } = require("uxp") as any;
-const ASSET_ORDER_STORAGE_KEY = "shortflow.assetOrder.v1";
-const ASSET_REORDER_MIME = "application/x-shortflow-asset-order";
 const ASSET_RIGHTS_EMPTY_STATUS = "선택한 음악·효과음·이미지·영상·AI 에셋의 권리 정보를 기록하면 최종 QC에 반영됩니다.";
 const SESSION_FALLBACK_PROJECT_KEY = "session";
 
@@ -122,13 +104,7 @@ const activity = new ActivityLog();
 const busy = new BusyState();
 let settings: PluginSettings = loadSettings();
 let initialized = false;
-let markerSegments: MarkerSegment[] = [];
-let assets: AssetItem[] = [];
-let assetOrder: string[] = [];
-let assetPreviewUrl = "";
-let selectedAssetId = "";
 const sessionGeneratedAssetRightsIdsByProject = new Map<string, Set<string>>();
-let assetLibrary: AssetLibrary | null = null;
 let assetRightsRegistry: AssetRightsRegistry | null = null;
 let referenceController: ReferenceController | null = null;
 let imageAIClient: OpenAIImageClient | null = null;
@@ -172,38 +148,6 @@ function commaList(id: string): string[] {
   return valueOf(id).split(",").map((item) => item.trim()).filter(Boolean).slice(0, 500);
 }
 
-function loadAssetOrder(): string[] {
-  try {
-    return normalizeAssetOrder(JSON.parse(localStorage.getItem(ASSET_ORDER_STORAGE_KEY) ?? "[]"));
-  } catch {
-    return [];
-  }
-}
-
-function saveAssetOrder(): void {
-  assetOrder = normalizeAssetOrder(assetOrder, assets.map((asset) => asset.normalizedPath));
-  try {
-    localStorage.setItem(ASSET_ORDER_STORAGE_KEY, JSON.stringify(assetOrder));
-  } catch (error) {
-    activity.add("warning", `자산 순서 저장 실패: ${errorMessage(error)}`);
-  }
-}
-
-function audioMimeType(asset: AssetItem): string {
-  switch (asset.extension) {
-    case ".aac": return "audio/aac";
-    case ".aif":
-    case ".aiff": return "audio/aiff";
-    case ".flac": return "audio/flac";
-    case ".m4a": return "audio/mp4";
-    case ".mp3": return "audio/mpeg";
-    case ".ogg": return "audio/ogg";
-    case ".wav": return "audio/wav";
-    case ".wma": return "audio/x-ms-wma";
-    default: return "audio/*";
-  }
-}
-
 function ensureAssetRightsRegistry(): AssetRightsRegistry {
   if (!assetRightsRegistry) {
     assetRightsRegistry = new AssetRightsRegistry(localStorage);
@@ -230,7 +174,7 @@ function sessionGeneratedAssetRightsIds(projectKey = SESSION_FALLBACK_PROJECT_KE
 function currentAssetRightsRecords(projectKey = SESSION_FALLBACK_PROJECT_KEY): AssetRightsRecord[] {
   const registry = ensureAssetRightsRegistry();
   const byId = new Map(registry.items.map((record) => [record.assetId, record]));
-  const libraryRecords = assets
+  const libraryRecords = assetBrowserPanel.getAssets()
     .filter((asset) => asset.kind === "audio" || asset.kind === "image" || asset.kind === "video")
     .map((asset) => byId.get(asset.normalizedPath) ?? createMissingAssetRightsRecord(asset));
   const referenceRecords = (referenceController?.items ?? [])
@@ -316,27 +260,22 @@ function renderAssetRights(asset: AssetItem | null): void {
     : `권리 정보 확인 필요 · 경고/오류 ${issueCount}개`);
 }
 
-function clearAssetPreview(): void {
-  const audio = optionalElement<HTMLAudioElement>("asset-audio-preview");
-  if (audio) {
-    if (typeof audio.pause === "function") audio.pause();
-    audio.removeAttribute("src");
-    audio.hidden = true;
-    if (typeof audio.load === "function") audio.load();
-  }
-  if (assetPreviewUrl) {
-    URL.revokeObjectURL(assetPreviewUrl);
-    assetPreviewUrl = "";
-  }
-}
-
-async function assetBytes(asset: AssetItem): Promise<Uint8Array> {
-  const uxpRoot = require("uxp") as any;
-  return readAssetPreviewBytes(asset, uxpRoot?.storage?.formats?.binary);
-}
+const assetBrowserPanel = createAssetBrowserPanel({
+  runBusy: (message, task) => busy.during(message, task),
+  onActivity: (level, message) => activity.add(level, message),
+  onError: reportError,
+  formatError: errorMessage,
+  getAssetRootName: () => settings.assetRootName,
+  setAssetRootName: (name) => { settings.assetRootName = name; },
+  persistSettings: saveCurrentSettings,
+  ensureRightsRegistry: ensureAssetRightsRegistry,
+  renderRights: renderAssetRights,
+  insertToTimeline: importAndInsertAsset,
+  previewInSourceMonitor: (asset) => previewAssetInPremiereSourceMonitor(asset),
+});
 
 async function previewAssetInPremiereSourceMonitor(asset: AssetItem): Promise<boolean> {
-  const current = assets.find((candidate) =>
+  const current = assetBrowserPanel.getAssets().find((candidate) =>
     candidate.id === asset.id &&
     candidate.normalizedPath === asset.normalizedPath &&
     candidate.nativePath === asset.nativePath);
@@ -345,7 +284,7 @@ async function previewAssetInPremiereSourceMonitor(asset: AssetItem): Promise<bo
   const premiere = require("premierepro") as any;
   const sourceMonitor = premiere?.SourceMonitor;
   if (typeof sourceMonitor?.openFilePath !== "function") {
-    await ensureAssetLibrary().openAssetFile(current);
+    await assetBrowserPanel.openAssetFile(current);
     return false;
   }
   const opened = await sourceMonitor.openFilePath(current.nativePath);
@@ -582,9 +521,9 @@ function localDiagnosticsContext(): Record<string, unknown> {
       aiConsentAccepted: settings.aiConsentAccepted,
     },
     workspace: {
-      assetCount: assets.length,
-      audioAssetCount: assets.filter((asset) => asset.kind === "audio").length,
-      selectedAsset: Boolean(selectedAssetId),
+      assetCount: assetBrowserPanel.getAssets().length,
+      audioAssetCount: assetBrowserPanel.getAssets().filter((asset) => asset.kind === "audio").length,
+      selectedAsset: Boolean(assetBrowserPanel.getSelectedAssetId()),
       referenceCount: referenceController?.items.length ?? 0,
       thumbnailReady: Boolean(thumbnailController),
       subtitlesReady: Boolean(subtitleController),
@@ -765,137 +704,19 @@ async function refreshStatus(silent = false): Promise<SequenceStatus | null> {
   }
 }
 
-function qcIcon(level: QCItem["level"]): string {
-  return level === "pass" ? "✓" : level === "warning" ? "!" : "×";
-}
-
-function renderQC(items: QCItem[]): void {
-  const target = element<HTMLElement>("qc-results");
-  target.className = "qc-result-list";
-  target.replaceChildren();
-  for (const result of items) {
-    const item = document.createElement("div");
-    item.className = `qc-result qc-${result.level}`;
-    const icon = document.createElement("span");
-    icon.className = "qc-result-icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = qcIcon(result.level);
-    const message = document.createElement("span");
-    message.textContent = result.message;
-    item.append(icon, message);
-    target.append(item);
-  }
-  const badge = target.closest(".result-card")?.querySelector<HTMLElement>(".neutral-badge");
-  if (badge) {
-    const errors = items.filter((item) => item.level === "error").length;
-    const warnings = items.filter((item) => item.level === "warning").length;
-    badge.textContent = errors ? `오류 ${errors}` : warnings ? `경고 ${warnings}` : "통과";
-    badge.className = `neutral-badge ${errors ? "badge-error" : warnings ? "badge-warning" : "badge-success"}`;
-  }
-}
-
-async function handleQC(): Promise<void> {
-  const current = syncSettingsFromUI();
-  const startedAt = Date.now();
-  await busy.during("시퀀스 QC를 검사하고 있습니다…", async () => {
-    const result = await runSequenceQC(current.width, current.height, current.maxDuration);
-    renderQC(result.items);
-    renderStatus(result.status);
-    const errors = result.items.filter((item) => item.level === "error").length;
-    const warnings = result.items.filter((item) => item.level === "warning").length;
-    const elapsedMs = Math.max(0, Date.now() - startedAt);
-    activity.add(
-      errors ? "error" : warnings ? "warning" : "success",
-      `QC 완료 · 오류 ${errors} · 경고 ${warnings} · ${elapsedMs.toLocaleString("ko-KR")}ms`,
-    );
-    toast(errors ? "QC 오류를 확인해 주세요." : warnings ? "QC 경고가 있습니다." : "QC를 통과했습니다.", errors ? "error" : warnings ? "warning" : "success");
-  });
-}
-
-async function handleCreateShort(): Promise<void> {
-  const options = createOptions();
-  await busy.during("원본을 복제하고 숏폼 시퀀스를 생성하고 있습니다…", async () => {
-    const result = await createShort(options);
-    activity.add("success", `${result.sequenceName} 생성 · ${result.width}×${result.height} · ${formatDuration(result.range.duration)}`);
-    if (result.warnings.length) {
-      activity.add("warning", result.warnings.join(" "));
-    }
-    toast("숏폼 시퀀스를 생성했습니다.", "success");
-    await refreshStatus(true);
-  });
-}
-
-function selectedMarkerSegments(): MarkerSegment[] {
-  const checkboxes = document.querySelectorAll<HTMLInputElement>("#marker-list input[data-segment-index]");
-  if (checkboxes.length === 0) return markerSegments;
-  const indexes = new Set(
-    [...checkboxes]
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => Number(checkbox.dataset.segmentIndex)),
-  );
-  return markerSegments.filter((_segment, index) => indexes.has(index));
-}
-
-function renderMarkers(segments: MarkerSegment[]): void {
-  const target = element<HTMLElement>("marker-list");
-  const button = element<HTMLButtonElement>("batch-create-btn");
-  if (!segments.length) {
-    renderEmptyState(target, "ShortFlow 마커가 없습니다", "마커 이름에 SHORT, 숏폼 또는 #SF를 포함해 주세요.");
-    button.disabled = true;
-    return;
-  }
-  target.replaceChildren();
-  segments.forEach((segment, index) => {
-    const label = document.createElement("label");
-    label.className = "marker-item";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = true;
-    checkbox.dataset.segmentIndex = String(index);
-    const copy = document.createElement("span");
-    copy.className = "marker-copy";
-    const title = document.createElement("strong");
-    title.textContent = segment.name;
-    const detail = document.createElement("small");
-    detail.textContent = `${formatDuration(segment.start)} → ${formatDuration(segment.end)} · ${formatDuration(segment.duration)}`;
-    copy.append(title, detail);
-    label.append(checkbox, copy);
-    target.append(label);
-  });
-  button.disabled = false;
-}
-
-async function handleScanMarkers(): Promise<void> {
-  const current = syncSettingsFromUI();
-  markerSegments = await busy.during("숏폼 마커를 검색하고 있습니다…", () => scanShortMarkers(current.maxDuration));
-  renderMarkers(markerSegments);
-  activity.add("info", `숏폼 마커 구간 ${markerSegments.length}개 검색`);
-}
-
-async function handleBatchCreate(): Promise<void> {
-  const selected = selectedMarkerSegments();
-  if (!selected.length) {
-    toast("일괄 생성할 마커 구간을 선택해 주세요.", "warning");
-    return;
-  }
-  const options = createOptions();
-  const result = await busy.during(`${selected.length}개 마커 구간을 생성하고 있습니다…`, () =>
-    createShortsFromMarkers(selected, options, (completed, total, name) => {
-      setText("busy-message", `${completed}/${total} · ${name}`);
-    }));
-  activity.add("success", `마커 구간 일괄 생성 완료 · 성공 ${result.created.length} · 실패 ${result.failures.length}`);
-  result.failures.forEach((failure) => activity.add("error", `${failure.name}: ${failure.error}`));
-  toast(`${result.created.length}개 숏폼 시퀀스를 생성했습니다.`, result.failures.length ? "warning" : "success");
-  await refreshStatus(true);
-}
-
-async function handleStoryMarkers(): Promise<void> {
-  const current = syncSettingsFromUI();
-  const count = await busy.during("HOOK/CTA 마커를 추가하고 있습니다…", () =>
-    addStoryMarkers(current.hookSeconds, current.ctaSeconds));
-  activity.add("success", `스토리 마커 ${count}개 추가`);
-  toast("HOOK/CTA 마커를 추가했습니다.", "success");
-}
+const markersQcPanel = createMarkersQcPanel({
+  runBusy: (message, task) => busy.during(message, task),
+  onActivity: (level, message) => activity.add(level, message),
+  syncSettings: syncSettingsFromUI,
+  getCreateOptions: createOptions,
+  renderStatus,
+  refreshStatus,
+  runSequenceQC,
+  createShort,
+  scanShortMarkers,
+  createShortsFromMarkers,
+  addStoryMarkers,
+});
 
 function applyPersistentResult(
   kind: "preset" | "output" | "mogrt",
@@ -978,337 +799,13 @@ async function handleExportCover(): Promise<void> {
   toast("현재 프레임 커버를 저장했습니다.", "success");
 }
 
-function ensureAssetLibrary(): AssetLibrary {
-  if (!assetLibrary) {
-    assetLibrary = new AssetLibrary(createDefaultAssetLibraryAdapter({ allowFolderLaunch: true }));
-  }
-  return assetLibrary;
-}
-
-function setAssetRootUI(name: string, enabled: boolean): void {
-  setText("asset-root-name", name || "선택되지 않음", name);
-  const open = optionalElement<HTMLButtonElement>("open-asset-root-btn");
-  if (open) open.disabled = !enabled;
-  const categoryOpen = optionalElement<HTMLButtonElement>("open-asset-category-btn");
-  if (categoryOpen) categoryOpen.disabled = !enabled;
-}
-
-async function initializeAssetLibrary(): Promise<void> {
-  try {
-    await ensureAssetRightsRegistry().load();
-    const library = ensureAssetLibrary();
-    const root = await library.restoreRoot();
-    if (root) {
-      settings.assetRootName = String(root.name ?? settings.assetRootName);
-      setAssetRootUI(settings.assetRootName, true);
-    }
-  } catch (error) {
-    if (error instanceof AssetLibraryError && error.code === "TOKEN_EXPIRED") {
-      settings.assetRootName = "";
-      setAssetRootUI("", false);
-      saveCurrentSettings();
-      activity.add("warning", error.message);
-      return;
-    }
-    activity.add("warning", `자산 라이브러리 복원 실패: ${errorMessage(error)}`);
-  }
-}
-
-async function handleChooseAssetRoot(): Promise<void> {
-  const root = await busy.during("자산 라이브러리 폴더를 준비하고 있습니다…", () => ensureAssetLibrary().selectRoot());
-  settings.assetRootName = String(root.name ?? "자산 라이브러리");
-  setAssetRootUI(settings.assetRootName, true);
-  saveCurrentSettings();
-  activity.add("success", `자산 루트 선택: ${settings.assetRootName}`);
-  await handleSyncAssets();
-}
-
-async function reportAssetFolderOpen(result: AssetFolderOpenResult, label: string): Promise<void> {
-  if (result.mode === "system-folder") {
-    activity.add("info", `시스템 파일 탐색기에서 ${label} 폴더를 열었습니다.`);
-    return;
-  }
-  if (result.selection) {
-    const normalizedPath = normalizeNativePath(result.selection.nativePath);
-    let selected = assets.find((asset) => asset.kind === "audio" && asset.normalizedPath === normalizedPath);
-    if (!selected) {
-      await handleSyncAssets();
-      selected = assets.find((asset) => asset.kind === "audio" && asset.normalizedPath === normalizedPath);
-    }
-    if (!selected) {
-      activity.add("warning", `${label} 폴더에서 선택한 오디오가 동기화 목록에 없습니다: ${result.selection.name}`);
-      toast("라이브러리 폴더 안의 오디오를 선택한 뒤 다시 동기화해 주세요.", "warning");
-      return;
-    }
-    selectedAssetId = selected.id;
-    renderAssets();
-    renderAssetRights(selected);
-    const list = optionalElement<HTMLElement>("asset-list");
-    const selectedCard = Array.from(list?.children ?? []).find((child) =>
-      (child as HTMLElement).dataset.assetId === selected?.id,
-    ) as HTMLElement | undefined;
-    selectedCard?.focus();
-    activity.add("info", `${label} 폴더 파일 선택기에서 오디오를 선택했습니다: ${selected.name}`);
-    toast("선택한 오디오를 목록에서 선택했습니다. 미리듣거나 타임라인에 삽입할 수 있습니다.", "success");
-    return;
-  }
-  activity.add("info", `${label} 폴더 찾아보기를 취소했습니다.`);
-}
-
-async function handleOpenAssetRoot(): Promise<void> {
-  await reportAssetFolderOpen(await ensureAssetLibrary().openRootFolder(), "자산 루트");
-}
-
-async function handleOpenAssetCategory(): Promise<void> {
-  const category = optionalElement<HTMLSelectElement>("asset-category-select")?.value ?? "all";
-  if (category === "all") {
-    await handleOpenAssetRoot();
-    return;
-  }
-  await reportAssetFolderOpen(await ensureAssetLibrary().openRelativeFolder(category), category);
-}
-
-function filteredAudioAssets(): AssetItem[] {
-  const query = valueOf("asset-search-input");
-  const filter = valueOf("asset-type-select");
-  const category = optionalElement<HTMLSelectElement>("asset-category-select")?.value ?? "all";
-  const visible = filterAssets(assets, { query, kind: "audio" }).filter((asset) => {
-    const folder = asset.folderPath.toLocaleLowerCase();
-    if (filter === "music") return folder === "music" || folder.startsWith("music/");
-    if (filter === "sfx") return folder === "sfx" || folder.startsWith("sfx/");
-    return true;
-  }).filter((asset) => {
-    if (category === "all") return true;
-    const folder = normalizeNativePath(asset.folderPath);
-    return folder === category || folder.startsWith(`${category}/`);
-  });
-  return applyAssetOrder(visible, assetOrder);
-}
-
-function renderAssetCategories(): void {
-  const select = optionalElement<HTMLSelectElement>("asset-category-select");
-  if (!select) return;
-  const current = select.value || "all";
-  const filter = valueOf("asset-type-select");
-  const categories = listAudioAssetCategories(assets).filter((category) => {
-    if (filter === "music") return category.root === "music";
-    if (filter === "sfx") return category.root === "sfx";
-    return true;
-  });
-  select.replaceChildren();
-  const all = document.createElement("option");
-  all.value = "all";
-  all.textContent = "전체 폴더";
-  select.append(all);
-  for (const category of categories) {
-    const option = document.createElement("option");
-    option.value = category.id;
-    option.textContent = `${category.label} (${category.count})`;
-    select.append(option);
-  }
-  select.disabled = categories.length === 0;
-  select.value = categories.some((category) => category.id === current) ? current : "all";
-  const openButton = optionalElement<HTMLButtonElement>("open-asset-category-btn");
-  if (openButton) openButton.disabled = !settings.assetRootName;
-}
-
-function assetFromDragPayload(dataTransfer: DataTransfer | null): AssetItem | null {
-  return resolveAudioAssetDragTarget(
-    assets,
-    dataTransfer?.getData(ASSET_DRAG_PAYLOAD_MIME),
-  );
-}
-
-function renderAssets(): void {
-  renderAssetCategories();
-  const target = element<HTMLElement>("asset-list");
-  const visible = filteredAudioAssets();
-  if (!visible.length) {
-    renderEmptyState(target, "조건에 맞는 음악·효과음이 없습니다", "폴더에 WAV, MP3, AIFF 또는 M4A 파일을 넣고 동기화해 주세요.");
-    return;
-  }
-  target.replaceChildren();
-  for (const asset of visible) {
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = `asset-card draggable-card${asset.id === selectedAssetId ? " is-selected" : ""}`;
-    card.draggable = true;
-    card.dataset.assetId = asset.id;
-    card.setAttribute("role", "listitem");
-    card.setAttribute("aria-label", `${asset.name}, 현재 재생 위치에 삽입하려면 두 번 누르세요.`);
-    const icon = document.createElement("span");
-    icon.className = "asset-kind-icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = asset.folderPath.toLocaleLowerCase().startsWith("music") ? "♪" : "SFX";
-    const copy = document.createElement("span");
-    copy.className = "asset-card-copy";
-    const title = document.createElement("strong");
-    title.textContent = asset.name;
-    const path = document.createElement("small");
-    path.textContent = asset.relativePath;
-    copy.append(title, path);
-    const actions = document.createElement("span");
-    actions.className = "asset-card-actions";
-    const preview = document.createElement("span");
-    preview.className = "asset-preview-action";
-    preview.textContent = "미리듣기";
-    preview.setAttribute("role", "button");
-    preview.setAttribute("tabindex", "0");
-    preview.setAttribute("aria-label", `${asset.name} 미리듣기`);
-    preview.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void handlePreviewAsset(asset).catch((error) => reportError(error, "자산 미리듣기 실패"));
-    });
-    preview.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      event.stopPropagation();
-      void handlePreviewAsset(asset).catch((error) => reportError(error, "자산 미리듣기 실패"));
-    });
-    const hint = document.createElement("span");
-    hint.className = "drag-hint";
-    hint.textContent = "↕";
-    hint.title = "드래그해서 목록 순서 이동";
-    actions.append(preview, hint);
-    card.append(icon, copy, actions);
-    card.addEventListener("click", () => {
-      selectedAssetId = asset.id;
-      renderAssets();
-      renderAssetRights(asset);
-    });
-    card.addEventListener("dblclick", () => void handleInsertAsset(asset));
-    card.addEventListener("dragover", (event) => {
-      if (!event.dataTransfer?.types.includes(ASSET_REORDER_MIME)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-    });
-    card.addEventListener("drop", (event) => {
-      const draggedId = event.dataTransfer?.getData(ASSET_REORDER_MIME);
-      if (!draggedId) return;
-      event.preventDefault();
-      assetOrder = reorderAssetIds(
-        assetOrder,
-        visible.map((item) => item.normalizedPath),
-        draggedId,
-        asset.normalizedPath,
-      );
-      saveAssetOrder();
-      renderAssets();
-      activity.add("success", "음악·효과음 목록 순서를 저장했습니다.");
-    });
-    card.addEventListener("dragstart", (event) => {
-      selectedAssetId = asset.id;
-      card.classList.add("is-dragging");
-      try {
-        event.dataTransfer?.setData(ASSET_DRAG_PAYLOAD_MIME, createAssetDragPayload(asset));
-        event.dataTransfer?.setData(ASSET_REORDER_MIME, asset.normalizedPath);
-        if (event.dataTransfer) event.dataTransfer.effectAllowed = "copyMove";
-      } catch (error) {
-        event.preventDefault();
-        reportError(error, "자산 드래그 준비 실패");
-      }
-    });
-    card.addEventListener("dragend", () => card.classList.remove("is-dragging"));
-    target.append(card);
-  }
-}
-
-async function handleSyncAssets(): Promise<void> {
-  assets = await busy.during("음악·효과음 폴더를 동기화하고 있습니다…", () => ensureAssetLibrary().sync());
-  assetOrder = normalizeAssetOrder(assetOrder, assets.map((asset) => asset.normalizedPath));
-  saveAssetOrder();
-  if (selectedAssetId && !assets.some((asset) => asset.id === selectedAssetId)) {
-    selectedAssetId = "";
-  }
-  renderAssets();
-  renderAssetRights(assets.find((asset) => asset.id === selectedAssetId) ?? null);
-  const audioCount = assets.filter((asset) => asset.kind === "audio").length;
-  const stats = ensureAssetLibrary().lastSyncStats;
-  activity.add(stats.truncated ? "warning" : "success", `자산 동기화 완료 · 오디오 ${audioCount}개 · 전체 ${assets.length}개${stats.truncated ? " · 안전 제한 도달" : ""}`);
-  toast(`음악·효과음 ${audioCount}개를 동기화했습니다.`, stats.truncated ? "warning" : "success");
-}
-
-async function handlePreviewAsset(asset: AssetItem): Promise<void> {
-  const audio = element<HTMLAudioElement>("asset-audio-preview");
-  const supportsInlineAudio = typeof audio.pause === "function" &&
-    typeof audio.load === "function" &&
-    typeof audio.play === "function" &&
-    typeof URL.createObjectURL === "function";
-  if (!supportsInlineAudio) {
-    const autoPlayed = await busy.during(
-      `${asset.name}을 Premiere 소스 모니터에서 열고 있습니다…`,
-      () => previewAssetInPremiereSourceMonitor(asset),
-    );
-    selectedAssetId = asset.id;
-    renderAssets();
-    renderAssetRights(asset);
-    activity.add("success", `Premiere 소스 모니터 미리듣기: ${asset.name}${autoPlayed ? " · 재생 시작" : " · 재생 버튼을 눌러 주세요"}`);
-    toast(autoPlayed
-      ? "Premiere 소스 모니터에서 미리듣기를 시작했습니다."
-      : "Premiere 소스 모니터에 열었습니다. 소스 모니터 재생 버튼을 눌러 주세요.", "success");
-    return;
-  }
-  const bytes = await busy.during(`${asset.name} 미리듣기를 준비하고 있습니다…`, () => assetBytes(asset));
-  clearAssetPreview();
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  assetPreviewUrl = URL.createObjectURL(new Blob([buffer], { type: audioMimeType(asset) }));
-  audio.src = assetPreviewUrl;
-  audio.hidden = false;
-  audio.load();
-  await audio.play();
-  selectedAssetId = asset.id;
-  renderAssets();
-  renderAssetRights(asset);
-  activity.add("success", `미리듣기: ${asset.name}`);
-}
-
 async function handleSaveAssetRights(): Promise<void> {
-  const asset = assets.find((candidate) => candidate.id === selectedAssetId);
+  const asset = assetBrowserPanel.getSelectedAsset();
   if (!asset) throw new Error("권리 정보를 저장할 에셋을 먼저 선택해 주세요.");
   const record = await ensureAssetRightsRegistry().upsert(rightsInputFor(asset));
   renderAssetRights(asset);
   activity.add("success", `권리 정보 저장: ${record.assetName}`);
   toast("에셋 권리 정보를 저장했습니다.", "success");
-}
-
-async function handleInsertAsset(asset: AssetItem): Promise<void> {
-  await busy.during(`${asset.name}을(를) 타임라인에 삽입하고 있습니다…`, () => importAndInsertAsset(asset.nativePath, {
-    videoTrackIndex: Math.max(0, numberOf("asset-video-track-input", 1) - 1),
-    audioTrackIndex: Math.max(0, numberOf("asset-audio-track-input", 2) - 1),
-    displayName: asset.name,
-  }));
-  activity.add("success", `자산 삽입: ${asset.name}`);
-  toast("현재 재생 위치에 자산을 삽입했습니다.", "success");
-}
-
-function setupAssetDropZone(): void {
-  const zone = optionalElement<HTMLElement>("asset-drop-zone");
-  if (!zone) return;
-  zone.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-    zone.classList.add("is-drag-over");
-  });
-  zone.addEventListener("dragleave", () => zone.classList.remove("is-drag-over"));
-  zone.addEventListener("drop", (event) => {
-    event.preventDefault();
-    zone.classList.remove("is-drag-over");
-    const asset = assetFromDragPayload(event.dataTransfer);
-    if (!asset) {
-      toast("드래그한 자산을 현재 라이브러리에서 검증하지 못했습니다.", "warning");
-      return;
-    }
-    void handleInsertAsset(asset).catch((error) => reportError(error, "자산 삽입 실패"));
-  });
-  zone.addEventListener("click", () => {
-    const asset = assets.find((candidate) => candidate.id === selectedAssetId);
-    if (asset) void handleInsertAsset(asset).catch((error) => reportError(error, "자산 삽입 실패"));
-    else toast("먼저 라이브러리에서 자산을 선택해 주세요.", "warning");
-  });
-  zone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") zone.click();
-  });
 }
 
 function createImageAIClient(): OpenAIImageClient {
@@ -1435,24 +932,24 @@ function guarded(handler: () => Promise<void>, context: string): () => Promise<v
 
 function bindCoreEvents(): void {
   bind("refresh-btn", "click", guarded(() => refreshStatus().then(() => undefined), "상태 새로고침 실패"));
-  bind("qc-btn", "click", guarded(handleQC, "QC 실패"));
-  bind("create-short-btn", "click", guarded(handleCreateShort, "숏폼 생성 실패"));
-  bind("scan-markers-btn", "click", guarded(handleScanMarkers, "마커 검색 실패"));
-  bind("batch-create-btn", "click", guarded(handleBatchCreate, "일괄 생성 실패"));
-  bind("add-story-markers-btn", "click", guarded(handleStoryMarkers, "스토리 마커 추가 실패"));
+  bind("qc-btn", "click", guarded(() => markersQcPanel.runQC(), "QC 실패"));
+  bind("create-short-btn", "click", guarded(() => markersQcPanel.createShort(), "숏폼 생성 실패"));
+  bind("scan-markers-btn", "click", guarded(() => markersQcPanel.scanMarkers(), "마커 검색 실패"));
+  bind("batch-create-btn", "click", guarded(() => markersQcPanel.batchCreate(), "일괄 생성 실패"));
+  bind("add-story-markers-btn", "click", guarded(() => markersQcPanel.addStoryMarkers(), "스토리 마커 추가 실패"));
   bind("choose-preset-btn", "click", guarded(handleChoosePreset, "프리셋 선택 실패"));
   bind("choose-output-btn", "click", guarded(handleChooseOutput, "출력 폴더 선택 실패"));
   bind("choose-mogrt-btn", "click", guarded(handleChooseMogrt, "MOGRT 선택 실패"));
   bind("insert-mogrt-btn", "click", guarded(handleInsertMogrt, "MOGRT 삽입 실패"));
   bind("export-video-btn", "click", guarded(handleExportVideo, "영상 내보내기 실패"));
   bind("export-cover-btn", "click", guarded(handleExportCover, "커버 저장 실패"));
-  bind("choose-asset-root-btn", "click", guarded(handleChooseAssetRoot, "자산 폴더 선택 실패"));
-  bind("open-asset-root-btn", "click", guarded(handleOpenAssetRoot, "자산 폴더 열기 실패"));
-  bind("sync-assets-btn", "click", guarded(handleSyncAssets, "자산 동기화 실패"));
-  bind("asset-search-input", "input", () => renderAssets());
-  bind("asset-type-select", "change", () => renderAssets());
-  bind("asset-category-select", "change", () => renderAssets());
-  bind("open-asset-category-btn", "click", guarded(handleOpenAssetCategory, "선택 폴더 열기 실패"));
+  bind("choose-asset-root-btn", "click", guarded(() => assetBrowserPanel.chooseRoot(), "자산 폴더 선택 실패"));
+  bind("open-asset-root-btn", "click", guarded(() => assetBrowserPanel.openRoot(), "자산 폴더 열기 실패"));
+  bind("sync-assets-btn", "click", guarded(() => assetBrowserPanel.sync(), "자산 동기화 실패"));
+  bind("asset-search-input", "input", () => assetBrowserPanel.render());
+  bind("asset-type-select", "change", () => assetBrowserPanel.render());
+  bind("asset-category-select", "change", () => assetBrowserPanel.render());
+  bind("open-asset-category-btn", "click", guarded(() => assetBrowserPanel.openCategory(), "선택 폴더 열기 실패"));
   bind("asset-rights-save-btn", "click", guarded(handleSaveAssetRights, "에셋 권리 정보 저장 실패"));
   bind("ai-save-btn", "click", guarded(() => aiSettingsPanel.save(), "AI 설정 저장 실패"));
   bind("ai-test-btn", "click", guarded(() => aiSettingsPanel.test(), "AI 연결 테스트 실패"));
@@ -1484,17 +981,16 @@ function bindCoreEvents(): void {
       syncSettingsFromUI();
     });
   }
-  setupAssetDropZone();
+  assetBrowserPanel.setupDropZone();
 }
 
 async function bootstrap(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  assetOrder = loadAssetOrder();
   applySettingsToUI();
   bindCoreEvents();
   diagnosticsPanel.render(null);
-  await initializeAssetLibrary();
+  await assetBrowserPanel.initialize();
   renderAssetRights(null);
   try {
     referenceController = new ReferenceController({
@@ -1811,7 +1307,7 @@ function startPanel(): void {
 
 function destroyPanel(): void {
   stopSubtitlePlayheadTracking();
-  clearAssetPreview();
+  assetBrowserPanel.clearPreview();
   const controller = thumbnailController;
   thumbnailController = null;
   if (controller) {
@@ -1827,7 +1323,7 @@ entrypoints.setup({
       },
       hide() {
         stopSubtitlePlayheadTracking();
-        clearAssetPreview();
+        assetBrowserPanel.clearPreview();
       },
       destroy() {
         destroyPanel();
