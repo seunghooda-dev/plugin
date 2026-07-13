@@ -63,20 +63,43 @@ export function createAiSettingsPanel(options: AiSettingsPanelOptions): {
   }
 
   async function test(): Promise<void> {
-    options.ensureConsent();
-    const client = options.createClient();
-    const input = element<HTMLInputElement>("ai-api-key-input");
-    if (input.value.trim()) {
-      await client.setApiKey(input.value);
-      input.value = "";
+    const button = optionalElement<HTMLButtonElement>("ai-test-btn");
+    const originalText = button?.textContent?.trim() || "연결 테스트";
+    if (button) {
+      button.classList.remove("is-success");
+      button.disabled = true;
+      button.textContent = "확인 중…";
     }
-    setConnectionStatus("ai-status", "idle", "연결 확인 중…");
-    await client.testConnection();
-    input.placeholder = "저장된 API 키 유지";
-    setConnectionStatus("ai-status", "connected", "GPT Image 2 연결됨");
-    setConnectionStatus("speech-status", "connected", "AI 연결 준비됨");
-    options.onActivity("success", "OpenAI GPT Image 2 연결 테스트를 통과했습니다.");
-    toast("AI 연결이 정상입니다.", "success");
+    try {
+      options.ensureConsent();
+      const client = options.createClient();
+      const input = element<HTMLInputElement>("ai-api-key-input");
+      if (input.value.trim()) {
+        await client.setApiKey(input.value);
+        input.value = "";
+      }
+      setConnectionStatus("ai-status", "idle", "연결 확인 중…");
+      await client.testConnection();
+      input.placeholder = "저장된 API 키 유지";
+      setConnectionStatus("ai-status", "connected", "GPT Image 2 연결됨");
+      setConnectionStatus("speech-status", "connected", "AI 연결 준비됨");
+      options.onActivity("success", "OpenAI GPT Image 2 연결 테스트를 통과했습니다.");
+      toast("AI 연결이 정상입니다.", "success");
+      // 버튼에 명확한 완료 표시 후 잠시 뒤 원래대로 복귀.
+      if (button) {
+        button.classList.add("is-success");
+        button.textContent = "✓ 연결 완료";
+        setTimeout(() => {
+          button.classList.remove("is-success");
+          button.textContent = originalText;
+        }, 3000);
+      }
+    } catch (error) {
+      if (button) button.textContent = originalText;
+      throw error;
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   return { initialize, save, test };
