@@ -1493,19 +1493,19 @@
                 </div>
               </div>
 
-              <div class="settings-card thumb-ai-card" hidden>
+              <div class="settings-card thumb-ai-card">
                 <div class="section-heading">
                   <span class="section-number" aria-hidden="true">02</span>
                   <div>
-                    <h3>AI 이미지 보정 · 후순위</h3>
-                    <p>내부 베타에서는 수동 썸네일 편집만 검증하고, AI 보정은 후속 로드맵에서 다시 활성화합니다.</p>
+                    <h3>AI 이미지 보정</h3>
+                    <p>GPT Image 2로 썸네일을 기본·강렬 보정, 화질 개선, 배경 제거하거나 대화형으로 수정합니다. AI 전송 동의가 필요합니다.</p>
                   </div>
                 </div>
                 <div class="form-grid thumb-ai-grid">
                   <div class="field">
                     <label for="thumb-ai-preset-select">AI 프리셋</label>
                     <div class="select-wrap">
-                      <select id="thumb-ai-preset-select" name="thumbAiPreset" disabled>
+                      <select id="thumb-ai-preset-select" name="thumbAiPreset">
                         <option value="none">사용 안 함</option>
                         <option value="basic">기본 보정</option>
                         <option value="vivid">강렬 보정</option>
@@ -1522,14 +1522,13 @@
                       name="thumbAiPrompt"
                       rows="3"
                       maxlength="1500"
-                      disabled
                       placeholder="예: 인물은 유지하고 배경 대비를 높여 주세요."
                     ></textarea>
                   </div>
                 </div>
                 <div class="form-actions thumb-ai-actions">
-                  <p class="action-note">내부 베타 범위 밖 기능입니다. 기존 코드는 유지하되 베타 UI에서는 비활성화합니다.</p>
-                  <button id="thumb-ai-run-btn" class="primary-button" type="button" disabled>AI 보정 실행</button>
+                  <p class="action-note">선택한 썸네일 이미지가 OpenAI GPT Image 2로 전송됩니다. 전송 권한이 있는 이미지만 사용하세요.</p>
+                  <button id="thumb-ai-run-btn" class="primary-button" type="button">AI 보정 실행</button>
                 </div>
                 <div class="history-block">
                   <div class="history-heading">

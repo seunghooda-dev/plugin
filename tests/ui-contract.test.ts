@@ -524,11 +524,12 @@ function assertUiDefaults(document: StaticDocument): void {
   ]);
   assert.equal(defaultOptionValue(document, "asset-rights-commercial-select"), "unknown");
   const thumbnailAiCard = document.elements.find((element) => classNames(element).has("thumb-ai-card"));
-  assert.ok(thumbnailAiCard, "thumbnail AI card must remain in DOM for deferred roadmap wiring");
-  assert.ok(hasAttribute(thumbnailAiCard, "hidden"), "thumbnail AI card must stay hidden in the internal beta UI");
-  assert.ok(hasAttribute(elementById(document, "thumb-ai-preset-select"), "disabled"));
-  assert.ok(hasAttribute(elementById(document, "thumb-ai-prompt-input"), "disabled"));
-  assert.ok(hasAttribute(elementById(document, "thumb-ai-run-btn"), "disabled"));
+  assert.ok(thumbnailAiCard, "thumbnail AI card must be present");
+  // deferred-ai-features Phase 1: the thumbnail image AI (gpt-image-2) is now enabled in the beta UI.
+  assert.ok(!hasAttribute(thumbnailAiCard, "hidden"), "thumbnail AI card must be visible");
+  assert.ok(!hasAttribute(elementById(document, "thumb-ai-preset-select"), "disabled"));
+  assert.ok(!hasAttribute(elementById(document, "thumb-ai-prompt-input"), "disabled"));
+  assert.ok(!hasAttribute(elementById(document, "thumb-ai-run-btn"), "disabled"));
   assert.equal(elementById(document, "ai-queue-concurrency-input").attributes.value, "2");
   assert.equal(elementById(document, "ai-request-limit-input").attributes.value, "100");
   assert.equal(elementById(document, "ai-cost-limit-input").attributes.value, "100");
