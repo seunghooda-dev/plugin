@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import { validateSubtitleDocument } from "../src/subtitles";
 import {
+  DEFAULT_WHISPER_CUE_LIMIT,
   WhisperSubtitleImportError,
   parseWhisperJson,
   type WhisperSubtitleImportErrorCode,
@@ -137,5 +138,96 @@ describe("official Whisper JSON subtitle conversion", () => {
     expectImportError(() => parseWhisperJson(source, { maxTotalWords: 3 }), "LIMIT_EXCEEDED");
     expectImportError(() => parseWhisperJson(source, { maxTotalTextChars: 10 }), "LIMIT_EXCEEDED");
     expectImportError(() => parseWhisperJson(source, { maxCueCount: 0 }), "INVALID_SCHEMA");
+  });
+});
+
+describe("Whisper JSON edge cases and schema hardening", () => {
+  it("rejects non-string input before parsing", () => {
+    expectImportError(() => parseWhisperJson(123 as unknown as string), "INVALID_SCHEMA");
+    expectImportError(() => parseWhisperJson(null as unknown as string), "INVALID_SCHEMA");
+  });
+
+  it("strips a leading UTF-8 BOM from the whole document before JSON.parse", () => {
+    const bom = String.fromCharCode(0xfeff);
+    const document = parseWhisperJson(`${bom}${fixtureJson()}`, { projectKey: "bom" });
+    assert.equal(document.cues.length, 2);
+    assert.equal(validateSubtitleDocument(document).valid, true);
+  });
+
+  it("rejects a segments value that is present but not an array", () => {
+    expectImportError(() => parseWhisperJson('{"segments":{}}'), "INVALID_SCHEMA");
+    expectImportError(() => parseWhisperJson('{"segments":"nope"}'), "INVALID_SCHEMA");
+  });
+
+  it("rejects a segment that is not an object", () => {
+    const notObject = fixtureRecord();
+    (notObject.segments as unknown[])[0] = 42;
+    expectImportError(() => parseWhisperJson(JSON.stringify(notObject)), "INVALID_SCHEMA");
+  });
+
+  it("rejects non-string and blank segment text", () => {
+    const numberText = fixtureRecord();
+    numberText.segments[0]!.text = 5;
+    expectImportError(() => parseWhisperJson(JSON.stringify(numberText)), "INVALID_SCHEMA");
+
+    const blankText = fixtureRecord();
+    blankText.segments[0]!.text = "   ";
+    expectImportError(() => parseWhisperJson(JSON.stringify(blankText)), "INVALID_SCHEMA");
+  });
+
+  it("rejects a non-numeric segment start or end", () => {
+    const stringStart = fixtureRecord();
+    stringStart.segments[0]!.start = "0.1";
+    expectImportError(() => parseWhisperJson(JSON.stringify(stringStart)), "INVALID_TIME");
+  });
+
+  it("rejects an empty words array with the missing-timestamp schema error", () => {
+    const emptyWords = fixtureRecord();
+    emptyWords.segments[0]!.words = [];
+    expectImportError(() => parseWhisperJson(JSON.stringify(emptyWords)), "INVALID_SCHEMA");
+  });
+
+  it("rejects a word entry that is not an object", () => {
+    const badWord = fixtureRecord();
+    (wordsOf(badWord.segments[0]!) as unknown[])[0] = 42;
+    expectImportError(() => parseWhisperJson(JSON.stringify(badWord)), "INVALID_SCHEMA");
+  });
+
+  it("rejects non-numeric, non-finite, and zero-duration word times", () => {
+    const stringStart = fixtureRecord();
+    wordsOf(stringStart.segments[0]!)[0]!.start = "0.12";
+    expectImportError(() => parseWhisperJson(JSON.stringify(stringStart)), "INVALID_TIME");
+
+    const infiniteStart = fixtureJson().replace('"start":0.12', '"start":1e309');
+    expectImportError(() => parseWhisperJson(infiniteStart), "INVALID_TIME");
+
+    const zeroDuration = fixtureRecord();
+    const firstWord = wordsOf(zeroDuration.segments[0]!)[0]!;
+    firstWord.end = firstWord.start;
+    expectImportError(() => parseWhisperJson(JSON.stringify(zeroDuration)), "INVALID_TIME");
+  });
+
+  it("rejects a word that starts before its parent segment", () => {
+    const earlyWord = fixtureRecord();
+    wordsOf(earlyWord.segments[0]!)[0]!.start = 0.05;
+    expectImportError(() => parseWhisperJson(JSON.stringify(earlyWord)), "INVALID_TIME");
+  });
+
+  it("accepts adjacent words that share a start time when the end time does not regress", () => {
+    const equalStart = fixtureRecord();
+    const words = wordsOf(equalStart.segments[0]!);
+    words[1]!.start = words[0]!.start;
+    const document = parseWhisperJson(JSON.stringify(equalStart));
+    assert.equal(document.cues[0]?.words.length, 2);
+    assert.equal(validateSubtitleDocument(document).valid, true);
+  });
+
+  it("rejects limit options that are above range or non-integer", () => {
+    const source = fixtureJson();
+    expectImportError(
+      () => parseWhisperJson(source, { maxCueCount: DEFAULT_WHISPER_CUE_LIMIT + 1 }),
+      "INVALID_SCHEMA",
+    );
+    expectImportError(() => parseWhisperJson(source, { maxWordsPerCue: 1.5 }), "INVALID_SCHEMA");
   });
 });
