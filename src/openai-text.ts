@@ -498,6 +498,7 @@ export class OpenAITextClient {
       const highlights: SubtitleHighlight[] = [];
       for (let index = 0; index < chunks.length; index += 1) {
         const documentJson = JSON.stringify({ version: 1, projectKey: request.document.projectKey, cues: chunks[index] });
+        if (utf8Bytes(documentJson) > MAX_TEXT_REQUEST_BYTES) throw new OpenAITextError("자막 AI 분석 요청 한 묶음이 2MB 안전 제한을 초과했습니다.");
         const result = await this.requestJson<{ highlights: SubtitleHighlight[] }>(
           instruction,
           "shortflow_interview_highlight",
@@ -514,6 +515,7 @@ export class OpenAITextClient {
     const segments: EditOutlineSegment[] = [];
     for (let index = 0; index < chunks.length; index += 1) {
       const documentJson = JSON.stringify({ version: 1, projectKey: request.document.projectKey, cues: chunks[index] });
+      if (utf8Bytes(documentJson) > MAX_TEXT_REQUEST_BYTES) throw new OpenAITextError("자막 AI 분석 요청 한 묶음이 2MB 안전 제한을 초과했습니다.");
       const result = await this.requestJson<{ segments: EditOutlineSegment[] }>(
         instruction,
         "shortflow_edit_outline",
