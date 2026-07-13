@@ -26,7 +26,9 @@ export function optionalElement<T extends HTMLElement>(id: string): T | null {
 
 export function valueOf(id: string): string {
   const control = element<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(id);
-  return control.value;
+  // UXP는 값이 비거나 사용자가 건드리기 전 <input>/<select>.value로 null을 돌려줄 수 있어,
+  // 이후 .trim()/.normalize() 호출이 크래시하지 않도록 항상 문자열을 반환한다.
+  return control.value ?? "";
 }
 
 export function numberOf(id: string, fallback: number): number {

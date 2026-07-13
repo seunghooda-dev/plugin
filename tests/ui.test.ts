@@ -393,8 +393,11 @@ describe("DOM helpers", () => {
     const dom = new FakeDocument();
     dom.add("field", "input").value = "안녕";
     dom.add("flag", "input").checked = true;
+    const nullable = dom.add("nullable", "input");
+    (nullable as unknown as { value: unknown }).value = null; // UXP는 빈 입력에 null을 줄 수 있다
     await withDom(dom, () => {
       assert.equal(valueOf("field"), "안녕");
+      assert.equal(valueOf("nullable"), ""); // null이어도 크래시 없이 ""
       assert.equal(checkedOf("flag"), true);
       assert.throws(() => valueOf("missing"), /#missing/u);
       assert.throws(() => checkedOf("missing"), /#missing/u);

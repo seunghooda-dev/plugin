@@ -338,7 +338,7 @@ export class ReferenceController {
     enrichBtn.addEventListener("click", () => void this.guard(async () => {
       const provider = this.options.enrichPromptProvider;
       if (!provider) return;
-      if (!notes.value.trim()) throw new Error("보강할 활용 메모를 먼저 입력해 주세요.");
+      if (!(notes.value ?? "").trim()) throw new Error("보강할 활용 메모를 먼저 입력해 주세요.");
       enrichBtn.disabled = true;
       let enriched: string;
       try {

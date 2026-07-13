@@ -101,7 +101,7 @@ export class FinalQCController {
     if (!this.reportValue) throw new Error("먼저 최종 QC를 실행해 주세요.");
     const code = element<HTMLSelectElement>("final-qc-waiver-code").value;
     const reasonInput = element<HTMLInputElement>("final-qc-waiver-reason");
-    const reason = reasonInput.value.trim();
+    const reason = (reasonInput.value ?? "").trim();
     if (!code) throw new Error("예외 승인 가능한 오류가 없습니다.");
     if (reason.length < 5) throw new Error("예외 승인 사유를 5자 이상 입력해 주세요.");
     this.waivers = [...this.waivers.filter((waiver) => waiver.code !== code), { code, reason, createdAt: Date.now() }].slice(-200);
