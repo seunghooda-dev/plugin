@@ -587,6 +587,7 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **수정 후 재검증(라이브)**: 동일 CDP 구동에서 이제 실제 `POST https://api.openai.com/v1/responses`가 발생함을 fetch 스파이로 확인(수정 전 0건 → 수정 후 전송). 즉 동의 게이트 → 큐 드레인 → HTTPS 전송 경로가 끝까지 동작한다.
 - **응답 렌더 미확인 사유(코드 아님)**: 사용자 OpenAI 계정이 **429 quota 초과**("You exceeded your current quota")를 반환해 AI 결과 자체는 아직 못 봤다. 429는 retryable로 처리돼 2회 재시도 후 quota 메시지를 상태에 노출했고(**key/Authorization 노출 0**), 이 경로도 정상이다. 25-2~25-5의 실제 결과 렌더 확인은 **결제 quota 해소 후** 재구동 필요.
 - **부수 통과**: B-4(25-6, 편집 시 분석 결과 무효화)는 API와 무관하게 라이브 통과.
+- **후속 개선(2026-07-13)**: quota 429가 2회 재시도되며 매 요청 ~40초씩 지연되는 것을 관찰해, `insufficient_quota`를 rate limit과 분리해 **재시도 없이 즉시 실패**하도록 수정(`src/openai-text.ts` `isRetryableHttpStatus`, `src/job-queue.ts` `defaultTransientError`가 명시적 `retryable:false` 존중). Mock 테스트 3건 추가. **quota 초과 계정을 픽스처로 라이브 재검증**: 동일 클릭이 수정 전 40초·fetch 3회 → 수정 후 **1.0초·fetch 1회**로 즉시 실패. `rate_limit_exceeded` 429는 계속 재시도 유지.
 
 즉시 차단 조건(신규 기능):
 

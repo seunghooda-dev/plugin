@@ -153,6 +153,30 @@ describe("OpenAITextClient security boundaries", () => {
     );
   });
 
+  it("marks a 429 insufficient_quota analysis error as non-retryable", async () => {
+    const fetcher = (async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: { message: "You exceeded your current quota", type: "insufficient_quota" } }),
+    } as Response)) as typeof fetch;
+    await assert.rejects(
+      () => client(fetcher).analyzeSubtitles(analysisRequest()),
+      (error: unknown) => error instanceof OpenAITextError && error.status === 429 && error.retryable === false,
+    );
+  });
+
+  it("keeps a 429 rate-limit analysis error retryable", async () => {
+    const fetcher = (async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: { message: "Rate limit reached", type: "rate_limit_exceeded" } }),
+    } as Response)) as typeof fetch;
+    await assert.rejects(
+      () => client(fetcher).analyzeSubtitles(analysisRequest()),
+      (error: unknown) => error instanceof OpenAITextError && error.status === 429 && error.retryable === true,
+    );
+  });
+
   it("times out an analysis request even when fetch ignores AbortSignal", async () => {
     const fetcher = (() => new Promise<Response>(() => undefined)) as typeof fetch;
     const timed = client(fetcher, {

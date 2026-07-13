@@ -372,7 +372,11 @@ function dayKey(timestamp: number): string {
 function defaultTransientError(error: unknown): boolean {
   const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const status = Number(record.status ?? 0);
-  if (status === 429 || (status >= 500 && status <= 599) || record.retryable === true) return true;
+  // A 429 is normally retryable (rate limit), but an error that explicitly marks
+  // itself non-retryable (e.g. OpenAI insufficient_quota) must fail fast instead of
+  // burning retry/backoff cycles on something a few seconds won't fix.
+  if (status === 429) return record.retryable !== false;
+  if ((status >= 500 && status <= 599) || record.retryable === true) return true;
   const code = String(record.code ?? "");
   return /timeout|network|temporar|rate.?limit|econnreset|etimedout/iu.test(`${code} ${redactJobError(error)}`);
 }

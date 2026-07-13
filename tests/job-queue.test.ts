@@ -366,6 +366,17 @@ describe("transient retry", () => {
     assert.equal(calls, 1);
   });
 
+  it("does not retry a 429 explicitly marked non-retryable (insufficient_quota)", async () => {
+    let calls = 0;
+    const queue = new JobQueue(async () => {
+      calls += 1;
+      throw Object.assign(new Error("You exceeded your current quota"), { status: 429, retryable: false });
+    }, { sleep: async () => undefined });
+    const done = await queue.waitFor(queue.enqueue(request(1)).id);
+    assert.equal(done.state, "failed");
+    assert.equal(calls, 1);
+  });
+
   it("honors a per-job retry override", async () => {
     let calls = 0;
     const queue = new JobQueue(async () => {

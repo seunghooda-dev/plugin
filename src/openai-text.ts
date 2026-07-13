@@ -334,6 +334,20 @@ function safeErrorMessage(payload: unknown, secret: string): string {
     : "OpenAI 텍스트 요청이 실패했습니다.";
 }
 
+// 결제 소진(insufficient_quota)은 재시도해도 몇 초 안에 풀리지 않으므로 rate limit과
+// 달리 재시도 대상에서 제외한다. 실제 Host smoke에서 quota 429가 2회 재시도되며 40초씩
+// 지연되는 것을 확인해 분리했다(HOST_BETA_RUNBOOK §25-c).
+function isRetryableHttpStatus(status: number, payload: unknown): boolean {
+  if (status < 500 && status !== 429) return false;
+  if (status === 429) {
+    const error = payload && typeof payload === "object"
+      ? (payload as { error?: { type?: unknown; code?: unknown } }).error
+      : undefined;
+    if (error?.type === "insufficient_quota" || error?.code === "insufficient_quota") return false;
+  }
+  return true;
+}
+
 export class OpenAITextClient {
   private readonly endpoint: string;
   private readonly model: string;
@@ -439,7 +453,7 @@ export class OpenAITextClient {
       const response = await Promise.race(cancellation ? [pendingResponse, timeout, cancellation] : [pendingResponse, timeout]);
       let payload: unknown = null;
       try { payload = await response.json(); } catch { payload = null; }
-      if (!response.ok) throw new OpenAITextError(safeErrorMessage(payload, apiKey), response.status, response.status === 429 || response.status >= 500);
+      if (!response.ok) throw new OpenAITextError(safeErrorMessage(payload, apiKey), response.status, isRetryableHttpStatus(response.status, payload));
       const text = responseText(payload);
       if (!text || utf8Bytes(text) > MAX_TEXT_REQUEST_BYTES) throw new OpenAITextError("OpenAI 자막 응답이 비어 있거나 2MB 제한을 초과했습니다.");
       try { return JSON.parse(text) as SubtitleDocument; } catch { throw new OpenAITextError("OpenAI 자막 응답이 유효한 JSON이 아닙니다."); }
@@ -606,7 +620,7 @@ export class OpenAITextClient {
       const response = await Promise.race(cancellation ? [pendingResponse, timeout, cancellation] : [pendingResponse, timeout]);
       let payload: unknown = null;
       try { payload = await response.json(); } catch { payload = null; }
-      if (!response.ok) throw new OpenAITextError(safeErrorMessage(payload, apiKey), response.status, response.status === 429 || response.status >= 500);
+      if (!response.ok) throw new OpenAITextError(safeErrorMessage(payload, apiKey), response.status, isRetryableHttpStatus(response.status, payload));
       const text = responseText(payload);
       if (!text || utf8Bytes(text) > MAX_TEXT_REQUEST_BYTES) throw new OpenAITextError("OpenAI 응답이 비어 있거나 2MB 제한을 초과했습니다.");
       try { return JSON.parse(text) as T; } catch { throw new OpenAITextError("OpenAI 응답이 유효한 JSON이 아닙니다."); }
