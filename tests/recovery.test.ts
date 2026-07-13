@@ -12,6 +12,8 @@ import {
   RecoveryManager,
   RECOVERY_CONFIRM_RESULT,
   type BeginOperationInput,
+  type CloneBeforeMutationPolicy,
+  type MutationExecutor,
   type OperationJournalEntry,
   confirmDestructiveRecovery,
   type RecoveryStorage,
@@ -571,5 +573,194 @@ describe("recovery events", () => {
     await manager.flushPersistence();
     assert.equal(messages.length, 1);
     assert.equal(messages[0]?.includes("sk-proj"), false);
+  });
+});
+
+describe("journal cap edge cases", () => {
+  it("evicts terminal entries in insertion order while running operations survive", async () => {
+    const manager = new RecoveryManager();
+    const failed = manager.begin(operation("operation-cap-000"));
+    manager.fail(failed.operationId, "boom");
+    const rolled = manager.begin(operation("operation-cap-001"));
+    manager.fail(rolled.operationId, "boom");
+    await manager.rollback(rolled.operationId);
+    for (let index = 2; index < MAX_OPERATION_JOURNAL; index += 1) {
+      manager.begin(operation(`operation-cap-${String(index).padStart(3, "0")}`));
+    }
+    assert.equal(manager.list().length, MAX_OPERATION_JOURNAL);
+
+    manager.begin(operation("operation-cap-050"));
+    assert.equal(manager.get("operation-cap-000"), null, "가장 오래된 실패 항목이 먼저 제거되어야 합니다.");
+    assert.ok(manager.get("operation-cap-001"));
+
+    manager.begin(operation("operation-cap-051"));
+    assert.equal(manager.get("operation-cap-001"), null, "롤백 완료 항목도 제거 대상이어야 합니다.");
+    assert.equal(manager.list().length, MAX_OPERATION_JOURNAL);
+    assert.equal(manager.list().every((entry) => entry.status === "running"), true);
+  });
+});
+
+describe("restore edge cases", () => {
+  function committedTemplate(): OperationJournalEntry {
+    const templateManager = new RecoveryManager();
+    const template = templateManager.begin(operation("operation-template"));
+    templateManager.commit(template.operationId);
+    const committed = templateManager.get(template.operationId);
+    assert.ok(committed);
+    return committed;
+  }
+
+  it("returns zero interruptions without storage or with an empty journal", async () => {
+    assert.equal(await new RecoveryManager().restore(), 0);
+    const empty = new RecoveryManager({ storage: new MemoryStorage() });
+    assert.equal(await empty.restore(), 0);
+    assert.equal(empty.list().length, 0);
+  });
+
+  it("skips malformed journal candidates while keeping valid entries", async () => {
+    const storage = new MemoryStorage();
+    const committed = committedTemplate();
+    storage.setItem(RECOVERY_STORAGE_KEY, JSON.stringify({
+      schemaVersion: RECOVERY_SCHEMA_VERSION,
+      entries: [
+        null,
+        { ...committed, schemaVersion: 99, operationId: "operation-bad-schema" },
+        { ...committed, operationId: "bad id" },
+        { ...committed, operationId: "operation-valid-001" },
+      ],
+    }));
+    const restored = new RecoveryManager({ storage });
+    assert.equal(await restored.restore(), 0);
+    assert.equal(restored.list().length, 1);
+    assert.ok(restored.get("operation-valid-001"));
+  });
+
+  it("replaces in-memory entries with the restored journal", async () => {
+    const storage = new MemoryStorage();
+    const committed = committedTemplate();
+    const manager = new RecoveryManager({ storage });
+    manager.begin(operation("operation-live-001"));
+    await manager.flushPersistence();
+    storage.setItem(RECOVERY_STORAGE_KEY, JSON.stringify({
+      schemaVersion: RECOVERY_SCHEMA_VERSION,
+      entries: [{ ...committed, operationId: "operation-external-01" }],
+    }));
+    assert.equal(await manager.restore(), 0);
+    assert.equal(manager.get("operation-live-001"), null);
+    assert.ok(manager.get("operation-external-01"));
+    assert.equal(manager.list().length, 1);
+  });
+
+  it("rolls back an interrupted operation with a fallback while lost effects stay pending", async () => {
+    const storage = new MemoryStorage();
+    const source = new RecoveryManager({ storage });
+    const begun = source.begin(operation("operation-405"));
+    source.registerExternalEffect(begun.operationId, "임시 출력", () => undefined);
+    await source.flushPersistence();
+
+    const restored = new RecoveryManager({ storage });
+    assert.equal(await restored.restore(), 1);
+    const interrupted = restored.get("operation-405");
+    assert.equal(interrupted?.status, "interrupted");
+    assert.equal(interrupted?.recoveryGuidance, INTERRUPTED_GUIDANCE);
+    assert.equal(interrupted?.externalEffects[0]?.rollbackAvailable, false);
+
+    let fallbackCalls = 0;
+    const rolledBack = await restored.rollback("operation-405", () => { fallbackCalls += 1; });
+    assert.equal(fallbackCalls, 1);
+    assert.equal(rolledBack.status, "rolled-back");
+    assert.equal(rolledBack.externalEffects[0]?.status, "pending", "세션 간 복구할 수 없는 효과는 pending으로 남습니다.");
+  });
+});
+
+describe("rollback failure edge cases", () => {
+  it("retries a failed rollback without re-running already rolled-back effects", async () => {
+    const manager = new RecoveryManager();
+    const begun = manager.begin(operation("operation-501"));
+    let stableCalls = 0;
+    let unstableAttempts = 0;
+    manager.registerExternalEffect(begun.operationId, "안정 효과", () => { stableCalls += 1; });
+    manager.registerExternalEffect(begun.operationId, "불안정 효과", () => {
+      unstableAttempts += 1;
+      if (unstableAttempts === 1) throw new Error("first attempt failed");
+    });
+    manager.commit(begun.operationId);
+
+    await assert.rejects(manager.rollback(begun.operationId), expectCode("ROLLBACK_FAILED"));
+    assert.equal(stableCalls, 1);
+    const failed = manager.get(begun.operationId);
+    assert.equal(failed?.status, "rollback-failed");
+    assert.deepEqual(
+      failed?.externalEffects.map((effect) => effect.status),
+      ["rolled-back", "rollback-failed"],
+    );
+
+    const retried = await manager.rollback(begun.operationId);
+    assert.equal(retried.status, "rolled-back");
+    assert.equal(unstableAttempts, 2);
+    assert.equal(stableCalls, 1, "이미 롤백된 효과는 다시 실행되지 않아야 합니다.");
+    assert.deepEqual(
+      retried.externalEffects.map((effect) => effect.status),
+      ["rolled-back", "rolled-back"],
+    );
+  });
+
+  it("marks rollback-failed when only the fallback rollback throws", async () => {
+    const manager = new RecoveryManager();
+    const begun = manager.begin(operation("operation-502"));
+    manager.commit(begun.operationId);
+    await assert.rejects(
+      manager.rollback(begun.operationId, () => { throw new Error("fallback denied sk-proj-abcdefghijk"); }),
+      (error: unknown) => {
+        expectCode("ROLLBACK_FAILED")(error);
+        assert.ok(error instanceof Error);
+        assert.equal(error.message.includes("sk-proj"), false);
+        return true;
+      },
+    );
+    const entry = manager.get(begun.operationId);
+    assert.equal(entry?.status, "rollback-failed");
+    assert.equal(entry?.recoveryGuidance, MANUAL_RESTORE_GUIDANCE);
+  });
+
+  it("rejects a second rollback after success", async () => {
+    const manager = new RecoveryManager();
+    const begun = manager.begin(operation("operation-503"));
+    manager.commit(begun.operationId);
+    await manager.rollback(begun.operationId);
+    await assert.rejects(manager.rollback(begun.operationId), expectCode("INVALID_TRANSITION"));
+  });
+});
+
+describe("clone verification rejection edge cases", () => {
+  it("rejects whitespace identifiers and non-boolean clone flags", () => {
+    const policy = {
+      sourceId: "   ",
+      cloneId: " \t",
+      createdBeforeMutation: 1,
+      verified: "yes",
+    } as unknown as CloneBeforeMutationPolicy;
+    const result = validateCloneBeforeMutation(policy);
+    assert.equal(result.valid, false);
+    assert.equal(result.reasons.length, 4);
+  });
+
+  it("rejects execute without a mutation function before journaling", async () => {
+    const manager = new RecoveryManager();
+    await assert.rejects(
+      manager.execute(operation("operation-504"), null as unknown as MutationExecutor),
+      expectCode("INVALID_OPERATION"),
+    );
+    assert.equal(manager.list().length, 0);
+  });
+});
+
+describe("destructive recovery confirmation edge cases", () => {
+  it("fails closed for non-function modals, rejected promises, and wrapped results", async () => {
+    assert.equal(await confirmDestructiveRecovery("confirm", {}), false);
+    assert.equal(await confirmDestructiveRecovery({ show: () => RECOVERY_CONFIRM_RESULT }, {}), false);
+    assert.equal(await confirmDestructiveRecovery(async () => { throw new Error("modal crashed"); }, {}), false);
+    assert.equal(await confirmDestructiveRecovery(() => Promise.resolve({ result: RECOVERY_CONFIRM_RESULT }), {}), false);
+    assert.equal(await confirmDestructiveRecovery(async () => RECOVERY_CONFIRM_RESULT, {}), true);
   });
 });

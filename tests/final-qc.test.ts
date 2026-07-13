@@ -576,3 +576,153 @@ describe("JSON, Markdown, and redaction", () => {
     assert.match(markdown, /거부된 Waiver/u);
   });
 });
+
+describe("waiver validation edge cases", () => {
+  it("accepts a reason of exactly five characters after trimming and rejects four", () => {
+    const accepted = report(
+      (snapshot) => { snapshot.sequence.frameRate = 12; },
+      [{ code: "frame-rate", reason: "  다섯글자다  ", createdAt: 123 }],
+    );
+    assert.equal(accepted.blocking, false);
+    assert.equal(accepted.acceptedWaivers.length, 1);
+
+    const rejected = report(
+      (snapshot) => { snapshot.sequence.frameRate = 12; },
+      [{ code: "frame-rate", reason: "네글자다", createdAt: 123 }],
+    );
+    assert.equal(rejected.blocking, true);
+    assert.equal(rejected.acceptedWaivers.length, 0);
+    assert.equal(rejected.rejectedWaivers.length, 1);
+  });
+
+  it("rejects non-string codes and non-finite or negative timestamps", () => {
+    const waivers = [
+      { code: 123, reason: "충분히 긴 사유입니다", createdAt: 123 },
+      { code: "frame-rate", reason: "충분히 긴 사유입니다", createdAt: Number.NaN },
+      { code: "frame-rate", reason: "충분히 긴 사유입니다", createdAt: -5 },
+    ] as unknown as QCWaiver[];
+    const value = report((snapshot) => { snapshot.sequence.frameRate = 12; }, waivers);
+    assert.equal(value.acceptedWaivers.length, 0);
+    assert.equal(value.rejectedWaivers.length, 3);
+    assert.equal(value.blocking, true);
+  });
+
+  it("keeps only the last waiver when the same code repeats", () => {
+    const value = report(
+      (snapshot) => { snapshot.sequence.frameRate = 12; },
+      [
+        { code: "frame-rate", reason: "먼저 등록한 사유", createdAt: 123 },
+        { code: "frame-rate", reason: "나중에 등록한 사유", createdAt: 456 },
+      ],
+    );
+    assert.equal(value.blocking, false);
+    assert.equal(value.acceptedWaivers.length, 1);
+    assert.equal(value.acceptedWaivers[0]?.reason, "나중에 등록한 사유");
+  });
+});
+
+describe("blocking gate edge cases", () => {
+  it("keeps blocking on hard-block codes even when every other error is waived", () => {
+    const value = report(
+      (snapshot) => {
+        snapshot.sequence.frameRate = 12;
+        snapshot.media.offlineMedia = ["clip.mov"];
+      },
+      [
+        { code: "frame-rate", reason: "스톱모션 원본 유지", createdAt: 123 },
+        { code: "offline-media", reason: "오프라인 미디어 무시 시도", createdAt: 123 },
+      ],
+    );
+    assert.equal(value.blocking, true);
+    assert.deepEqual(value.blockingCodes, ["offline-media"]);
+    assert.equal(value.counts.error, 2, "waived 오류도 수준 집계에는 남아야 합니다.");
+    assert.equal(value.acceptedWaivers.length, 1);
+    assert.match(value.rejectedWaivers[0]?.reasonRejected ?? "", /hard-block/u);
+  });
+
+  it("treats commercial-use-unknown rights as a warning that never blocks", () => {
+    const value = report((snapshot) => {
+      snapshot.media.rightsReport = createAssetRightsReport([
+        normalizeAssetRightsRecord({
+          assetId: "stock-1",
+          assetName: "broll.mp4",
+          kind: "video",
+          source: "Stock",
+          license: "Standard",
+          commercialUse: "unknown",
+          expiresAt: "2027-07-11",
+          attribution: "Video: broll.mp4, Stock",
+          updatedAt: 1_750_000_000_000,
+        }),
+      ], 1_750_000_000_000);
+    });
+    assert.equal(has(value, "asset-rights-error", "pass"), true);
+    assert.equal(has(value, "asset-rights-warning", "warning"), true);
+    assert.equal(value.blocking, false);
+    assert.equal(value.status, "warning");
+  });
+
+  it("warns when tracked assets provide no attribution lines", () => {
+    const value = report((snapshot) => {
+      snapshot.media.rightsReport = createAssetRightsReport([
+        normalizeAssetRightsRecord({
+          assetId: "stock-2",
+          assetName: "broll.mp4",
+          kind: "video",
+          source: "Stock",
+          license: "Standard",
+          commercialUse: "allowed",
+          expiresAt: "2027-07-11",
+          attribution: "",
+          updatedAt: 1_750_000_000_000,
+        }),
+      ], 1_750_000_000_000);
+    });
+    assert.equal(has(value, "asset-rights-attribution", "warning"), true);
+    assert.equal(value.blocking, false);
+  });
+
+  it("treats a non-finite true peak as a missing measurement warning", () => {
+    const value = report((snapshot) => { snapshot.audio.truePeakDbtp = Number.POSITIVE_INFINITY; });
+    assert.equal(has(value, "audio-true-peak", "warning"), true);
+    assert.equal(value.blocking, false);
+    assert.doesNotThrow(() => JSON.parse(finalQCReportToJSON(value)));
+  });
+});
+
+describe("report shape boundaries", () => {
+  it("falls back to a finite timestamp when generatedAt is invalid", () => {
+    const value = evaluateFinalQC(healthySnapshot(), [], Number.NaN);
+    assert.equal(Number.isFinite(value.generatedAt), true);
+  });
+
+  it("escapes pipes and flattens newlines in markdown cells", () => {
+    const value = report(
+      (snapshot) => {
+        snapshot.sequence.name = "이름|주입\n줄바꿈";
+        snapshot.sequence.frameRate = 12;
+      },
+      [{ code: "frame-rate", reason: "정당한|사유\n포함", createdAt: 123 }],
+    );
+    const markdown = finalQCReportToMarkdown(value);
+    assert.match(markdown, /이름\\\|주입 줄바꿈/u);
+    assert.match(markdown, /정당한\\\|사유 포함/u);
+    assert.equal(markdown.includes("이름|주입"), false);
+  });
+
+  it("renders a rights-ok row when the rights report has no issues", () => {
+    const markdown = finalQCReportToMarkdown(report());
+    assert.match(markdown, /\| pass \| rights-ok \| 전체 \|/u);
+  });
+
+  it("completes evaluation at exactly the waiver cap", () => {
+    const waivers = Array.from({ length: MAX_QC_WAIVERS }, (_, index) => ({
+      code: `unmatched-${index}`,
+      reason: "승인된 충분한 예외 사유",
+      createdAt: 123,
+    }));
+    const value = report(undefined, waivers);
+    assert.equal(value.rejectedWaivers.length, MAX_QC_WAIVERS);
+    assert.equal(value.blocking, false);
+  });
+});
