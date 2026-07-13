@@ -45,6 +45,85 @@ function buildWav(channels: number[][], sampleRate: number, format: 1 | 3): Uint
   return new Uint8Array(buffer);
 }
 
+// 정수 PCM(8/16/24/32비트) WAV 빌더. sampleReader의 미검증 분기를 확인하기 위한 것.
+function buildWavInt(channel: number[], sampleRate: number, bits: 8 | 16 | 24 | 32): Uint8Array {
+  const bytesPerSample = bits / 8;
+  const dataSize = channel.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  writeStr(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(view, 8, "WAVE");
+  writeStr(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, bits, true);
+  writeStr(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+  let offset = 44;
+  for (const raw of channel) {
+    const v = Math.max(-1, Math.min(1, raw));
+    if (bits === 8) view.setUint8(offset, Math.round(v * 127) + 128);
+    else if (bits === 16) view.setInt16(offset, Math.round(v * 32767), true);
+    else if (bits === 24) {
+      const iv = Math.round(v * 8388607) & 0xffffff;
+      view.setUint8(offset, iv & 0xff);
+      view.setUint8(offset + 1, (iv >> 8) & 0xff);
+      view.setUint8(offset + 2, (iv >> 16) & 0xff);
+    } else view.setInt32(offset, Math.round(v * 2147483647), true);
+    offset += bytesPerSample;
+  }
+  return new Uint8Array(buffer);
+}
+
+describe("parseWavPcm bit depths", () => {
+  const input = [0, 0.5, -0.5, 0.75, -0.75];
+  for (const bits of [8, 16, 24, 32] as const) {
+    it(`round-trips ${bits}-bit integer PCM (incl. sign extension)`, () => {
+      const result = parseWavPcm(buildWavInt(input, 44100, bits));
+      assert.equal(result.samples.length, input.length);
+      // 8비트는 매우 거칠어 허용오차를 크게.
+      const tolerance = bits === 8 ? 0.02 : bits === 16 ? 1e-3 : 1e-4;
+      for (let i = 0; i < input.length; i += 1) {
+        assert.ok(
+          Math.abs(result.samples[i]! - input[i]!) < tolerance,
+          `${bits}-bit i=${i}: got ${result.samples[i]} expected ~${input[i]}`,
+        );
+      }
+    });
+  }
+
+  it("parses 64-bit float PCM", () => {
+    const channel = [0, 0.321, -0.654];
+    const dataSize = channel.length * 8;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+    writeStr(view, 0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(view, 8, "WAVE");
+    writeStr(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 3, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, 44100, true);
+    view.setUint32(28, 44100 * 8, true);
+    view.setUint16(32, 8, true);
+    view.setUint16(34, 64, true);
+    writeStr(view, 36, "data");
+    view.setUint32(40, dataSize, true);
+    channel.forEach((v, i) => view.setFloat64(44 + i * 8, v, true));
+    const result = parseWavPcm(new Uint8Array(buffer));
+    // samples는 Float32Array라 float64 입력은 float32 정밀도로 저장된다.
+    for (let i = 0; i < channel.length; i += 1) {
+      assert.ok(Math.abs(result.samples[i]! - channel[i]!) < 1e-6);
+    }
+  });
+});
+
 describe("parseWavPcm", () => {
   it("round-trips a 16-bit mono WAV", () => {
     const input = [0, 0.5, -0.5, 0.25, -0.25];
