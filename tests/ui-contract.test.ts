@@ -427,20 +427,20 @@ function assertOperationalUiContracts(document: StaticDocument): void {
 }
 
 function assertOperationalSourceContracts(source: string): void {
-  assert.match(source, /bind\("run-diagnostics-btn",\s*"click",\s*guarded\(handleRunDiagnostics/);
-  assert.match(source, /bind\("export-diagnostics-btn",\s*"click",\s*guarded\(handleExportDiagnostics/);
+  assert.match(source, /bind\("run-diagnostics-btn",\s*"click",\s*guarded\(\(\) => diagnosticsPanel\.run\(\)/);
+  assert.match(source, /bind\("export-diagnostics-btn",\s*"click",\s*guarded\(\(\) => diagnosticsPanel\.exportJson\(\)/);
   assert.match(source, /button\.type\s*=\s*"button";[\s\S]*?button\.textContent\s*=\s*"복제본 제거";/);
   assert.match(source, /removeVerifiedClonedSequence\(/);
   assert.match(source, /dialog\.uxpShowModal\.bind\(dialog\)/);
   assert.match(source, /if \(!await requestRecoveryRollbackConfirmation\(entry\)\)/);
   assert.doesNotMatch(source, /globalThis as unknown as \{ confirm\?/);
 
-  assert.equal(tokenCount(source, "collectDiagnosticsReport"), 2, "diagnostics collection must occur only in its click handler");
-  assert.equal(tokenCount(source, "handleRunDiagnostics"), 2, "diagnostics execution must have only its declaration and click binding");
-  assert.equal(tokenCount(source, "handleExportDiagnostics"), 2, "diagnostics export must have only its declaration and click binding");
+  assert.equal(tokenCount(source, "collectDiagnosticsReport"), 2, "diagnostics collection must occur only in the panel run flow");
+  assert.equal(tokenCount(source, "diagnosticsPanel.run"), 1, "diagnostics execution must be bound to a single click handler");
+  assert.equal(tokenCount(source, "diagnosticsPanel.exportJson"), 1, "diagnostics export must be bound to a single click handler");
   assert.equal(tokenCount(source, "TelemetryManager"), 0, "the panel must not start an automatic telemetry sender");
 
-  const exportHandler = /async function handleExportDiagnostics\(\): Promise<void> \{[\s\S]*?\n\}/u.exec(source)?.[0] ?? "";
+  const exportHandler = /async function exportJson\(\): Promise<void> \{[\s\S]*?\n {2}\}/u.exec(source)?.[0] ?? "";
   const selfCheckIndex = exportHandler.indexOf("assertDiagnosticRedactionSelfCheck();");
   const pickerIndex = exportHandler.indexOf("getFileForSaving?.(");
   assert.ok(selfCheckIndex >= 0, "diagnostics export must run the active redaction self-check");
@@ -687,9 +687,10 @@ describe("AI endpoint safety contract", () => {
 
 describe("recovery and system diagnostics UI contract", () => {
   const document = documentFromFile(PUBLIC_HTML_PATH);
-  // 복구 파괴적 동작 UI는 src/recovery-panel.ts로 분리됐으므로 두 소스를 함께 검사한다.
+  // 복구·진단 패널이 src/recovery-panel.ts, src/diagnostics-panel.ts로 분리됐으므로 함께 검사한다.
   const indexSource = readFileSync(path.join(ROOT, "index.ts"), "utf8")
-    + readFileSync(path.join(ROOT, "src", "recovery-panel.ts"), "utf8");
+    + readFileSync(path.join(ROOT, "src", "recovery-panel.ts"), "utf8")
+    + readFileSync(path.join(ROOT, "src", "diagnostics-panel.ts"), "utf8");
 
   it("exposes recovery and diagnostics IDs with accessible initial states", () => {
     assertOperationalUiContracts(document);
