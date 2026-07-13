@@ -567,7 +567,9 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 
 - **테스트 시퀀스 생성**: 전용 스모크 프로젝트 `ShortFlow_HostSmoke_20260712`에 시퀀스가 0개라, §12 관례에 따라 공개 API(`project.createSequence("SF_CDP_SMOKE")` + `setActiveSequence`)로 테스트 시퀀스를 생성·활성화했다. 테스트 MP4 import 포함, 기존 콘텐츠 변경 없음.
 - **FR-02(재생 위치→단어 하이라이트) Host 통과**: 활성 시퀀스 playhead 0초 상태에서 자막 편집기 첫 단어 chip("첫")에 `is-active`/`aria-current` 부여를 확인 — 패널 폴링→`findActiveSubtitle`→DOM 반영 경로가 실제 Host에서 동작.
-- **FR-01(단어 클릭→playhead) 미확정**: 두 번째 큐 단어(1.3s) 클릭 후 playhead가 0에 머묾. 생성 직후의 **빈 시퀀스(길이 0)** 라 Premiere가 시퀀스 끝(0s)으로 클램프했을 가능성이 유력. 클립 삽입으로 길이 확보 후 재검증 필요(스크립트 준비 중 사용자 인터럽트로 보류).
+- **FR-01(단어 클릭→playhead) Host 통과(재검증 완료)**: 테스트 MP4를 `SF_CDP_SMOKE` V1 0초에 삽입해 길이 4.96s 확보 후(§12 관례, console에서 `lockedAccess`+`executeTransaction`+`createInsertProjectItemAction` 경로 동작 확인), 자막 편집기에서 "두" 단어 chip 클릭 → 실제 playhead가 **정확히 1.3s로 이동**. `seekToWord`→`onSeek`→`setSequencePlayerPosition` 끝-끝 경로 실증. FR-02 하이라이트도 클릭 후 "두"로 이동 확인. 분석 결과 패널 seek 버튼(25-5)이 동일 `seekToWord` 경로를 사용하므로 배관은 선검증됨 — 남은 것은 live AI 결과 위 실제 버튼 클릭뿐.
+- **자막 autosave 복원 Host 통과(R-011 근거)**: 플러그인 리로드 후 재import 없이 활성 시퀀스 projectKey 기준 autosave에서 2큐/8단어가 자동 복원됨.
+- **flex 전환 광역 확인**: `asset-search-input` 41×34 렌더(수정 전 0×0) — `.browser-toolbar` 전환 유효.
 - **API 키 입력 필드 키보드 불가(사용자 제보) → 원인 확정·수정 완료(2026-07-13)**: 마스킹 이벤트 로거로 사용자 실클릭을 관찰한 결과, 클릭이 input에 한 번도 도달하지 않았고(주변 SPAN/P만 타깃) input들의 실측 rect가 전부 **0×0**이었다. 이중 근본 원인:
   1. **UXP가 `input[type="text"]` 등 속성 선택자 규칙을 적용하지 못함** — 공유 사이징 규칙(width/height/border)이 input에만 미적용. bare `input` 선택자로 전환해 해결(checkbox는 후행 `.checkbox-row input` 1×1 규칙이, range는 명시 리셋이 덮어씀). 전환 후 `subtitle-translate` input이 117×34로 복구된 것으로 1차 확인.
   2. **UXP가 `display: grid` 컨테이너를 0×0으로 붕괴시킴**(§14 `.two-column-layout`에서 이미 확인된 것과 동일) — `.form-grid`·`.browser-toolbar`·`.safe-zone-box-controls`·`.final-qc-waiver`·`.thumbnail-inspector`(media)·`.subtitle-reflow-controls`(media) 6곳을 flex-wrap 등가 레이아웃으로 전환.
