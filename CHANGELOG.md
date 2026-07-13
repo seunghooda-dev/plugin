@@ -48,6 +48,9 @@
 
 - 범위 재정의 전 `npm test`: 864/864 통과
 - 2026-07-12 Mock 기준선 `npm run check`: typecheck·전체 lint·build·dist 검증·1008/1008 test 통과
+- 2026-07-13 Mock 기준선 `npm run check`: 1437/1437 통과. 도메인별 병렬 hardening(자막 AI·썸네일·에셋 권리·최종 QC/복구·브랜드/레퍼런스·자동화/Safe Zone·음성·공유 UI 유틸·진단/AI 큐)으로 +374개 확충, 테스트가 없던 final-qc·brand-kit·ai-queue controller 신규 커버
+- hardening 중 실버그 2건 수정: 자막 분석(interview-highlight/edit-outline) 청크 요청에 2MB 상한 가드 누락, 자동 펀치인 강조 어휘 부스트의 `\b` 정규식이 한글에 매칭되지 않던 문제
+- 2026-07-13 실제 Premiere 26.3 Host CDP 검증으로 Host 전용 버그 수정: UXP `replaceChildren()` stale 자식(자막 큐 리스트·AI 큐 목록·활동 로그), `input[type]` 속성 선택자·grid 붕괴로 인한 입력 0×0(전 탭), `queueMicrotask` 미정의로 인한 AI 작업 큐 전면 실패, OpenAI `insufficient_quota` 429 불필요 재시도
 - 이전 로컬 CCX 후보와 SHA-256은 `npm run beta:evidence:verified`로 생성·검증 완료. SHA-256: `dadc2dd405a8facceca761175d63360b140b0e8d30fe783d167d3c8cedc50df8`. 이후 소스 변경분은 최종 Host gate 후 재패키징 필요.
 - Premiere Pro/UXP Developer Tool 실제 개발 로드: 패널 표시, UDT watch/reload, 빈 프로젝트 안전 처리, 테스트 MP4 import, 활성 시퀀스 기본 QC, 최신 dist 탭 전환, 마커 탭 표시, Safe Zone overlay, SRT 파일 import, 음악/SFX WAV A1 삽입, TrackItem 선택 감지, 자동 컷·펀치인 복제 적용까지 제한 통과
 - Premiere Pro 26.3 Host에서 `sequence.getSelection()`이 빈 배열을 반환해도 개별 `TrackItem.getIsSelected()` fallback으로 선택 상태를 감지하도록 보강하고 실제 패널 UI에서 `타임라인 4개 선택 · 00:06` 표시를 확인

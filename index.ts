@@ -88,7 +88,9 @@ import { resolveAutomationTranscript, subtitleDocumentToAutomationTranscript } f
 import { createSubtitleDocument } from "./src/subtitles";
 import { OpenAITextClient, chunkSubtitleCues } from "./src/openai-text";
 import { buildReferencePrompt, type ReferenceItem } from "./src/references";
-import { RecoveryManager, confirmDestructiveRecovery, type OperationJournalEntry } from "./src/recovery";
+import { RecoveryManager } from "./src/recovery";
+import { createRecoveryPanel } from "./src/recovery-panel";
+import { installTextEncodingPolyfill } from "./src/text-encoding";
 import {
   assertDiagnosticRedactionSelfCheck,
   buildDiagnosticsReport,
@@ -119,100 +121,6 @@ const ASSET_ORDER_STORAGE_KEY = "shortflow.assetOrder.v1";
 const ASSET_REORDER_MIME = "application/x-shortflow-asset-order";
 const ASSET_RIGHTS_EMPTY_STATUS = "선택한 음악·효과음·이미지·영상·AI 에셋의 권리 정보를 기록하면 최종 QC에 반영됩니다.";
 const SESSION_FALLBACK_PROJECT_KEY = "session";
-
-function encodeUtf8(value: string): Uint8Array {
-  const bytes: number[] = [];
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0xfffd;
-    if (codePoint <= 0x7f) {
-      bytes.push(codePoint);
-    } else if (codePoint <= 0x7ff) {
-      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
-    } else if (codePoint <= 0xffff) {
-      bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
-    } else {
-      bytes.push(
-        0xf0 | (codePoint >> 18),
-        0x80 | ((codePoint >> 12) & 0x3f),
-        0x80 | ((codePoint >> 6) & 0x3f),
-        0x80 | (codePoint & 0x3f),
-      );
-    }
-  }
-  return new Uint8Array(bytes);
-}
-
-function decodeUtf8(input: ArrayBuffer | ArrayBufferView): string {
-  const view = input instanceof ArrayBuffer
-    ? new Uint8Array(input)
-    : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-  let output = "";
-  for (let index = 0; index < view.length;) {
-    const first = view[index++] ?? 0;
-    if (first < 0x80) {
-      output += String.fromCodePoint(first);
-    } else if (first >= 0xc2 && first <= 0xdf && index < view.length) {
-      const second = view[index++] ?? 0x80;
-      output += String.fromCodePoint(((first & 0x1f) << 6) | (second & 0x3f));
-    } else if (first >= 0xe0 && first <= 0xef && index + 1 < view.length) {
-      const second = view[index++] ?? 0x80;
-      const third = view[index++] ?? 0x80;
-      output += String.fromCodePoint(((first & 0x0f) << 12) | ((second & 0x3f) << 6) | (third & 0x3f));
-    } else if (first >= 0xf0 && first <= 0xf4 && index + 2 < view.length) {
-      const second = view[index++] ?? 0x80;
-      const third = view[index++] ?? 0x80;
-      const fourth = view[index++] ?? 0x80;
-      output += String.fromCodePoint(
-        ((first & 0x07) << 18) |
-        ((second & 0x3f) << 12) |
-        ((third & 0x3f) << 6) |
-        (fourth & 0x3f),
-      );
-    } else {
-      output += "\uFFFD";
-    }
-  }
-  return output;
-}
-
-class ShortFlowTextEncoder {
-  readonly encoding = "utf-8";
-
-  encode(input = ""): Uint8Array {
-    return encodeUtf8(String(input));
-  }
-
-  encodeInto(source: string, destination: Uint8Array): TextEncoderEncodeIntoResult {
-    const encoded = this.encode(source);
-    const written = Math.min(encoded.length, destination.length);
-    destination.set(encoded.subarray(0, written));
-    return { read: source.length, written };
-  }
-}
-
-class ShortFlowTextDecoder {
-  readonly encoding = "utf-8";
-  readonly fatal = false;
-  readonly ignoreBOM = false;
-
-  decode(input?: ArrayBuffer | ArrayBufferView | null): string {
-    if (!input) return "";
-    return decodeUtf8(input);
-  }
-}
-
-function installTextEncodingPolyfill(): void {
-  const root = globalThis as typeof globalThis & {
-    TextEncoder?: typeof TextEncoder;
-    TextDecoder?: typeof TextDecoder;
-  };
-  if (typeof root.TextEncoder === "undefined") {
-    root.TextEncoder = ShortFlowTextEncoder as unknown as typeof TextEncoder;
-  }
-  if (typeof root.TextDecoder === "undefined") {
-    root.TextDecoder = ShortFlowTextDecoder as unknown as typeof TextDecoder;
-  }
-}
 
 installTextEncodingPolyfill();
 
@@ -646,118 +554,12 @@ function stopSubtitlePlayheadTracking(): void {
   subtitlePlayheadTimer = null;
 }
 
-function recoveryStatusLabel(status: OperationJournalEntry["status"]): string {
-  return {
-    running: "실행 중",
-    committed: "완료",
-    failed: "실패",
-    "rolling-back": "복구 중",
-    "rolled-back": "복구 완료",
-    "rollback-failed": "복구 실패",
-    interrupted: "중단됨",
-  }[status];
-}
-
-interface UxpRecoveryDialogElement extends HTMLDialogElement {
-  uxpShowModal?: (options: {
-    title: string;
-    resize: "none";
-    size: { width: number; height: number };
-  }) => Promise<unknown>;
-}
-
-let recoveryRollbackPending = false;
-
-async function requestRecoveryRollbackConfirmation(entry: OperationJournalEntry): Promise<boolean> {
-  const dialog = optionalElement<UxpRecoveryDialogElement>("recovery-confirm-dialog");
-  const label = optionalElement<HTMLElement>("recovery-confirm-label");
-  const approve = optionalElement<HTMLButtonElement>("recovery-confirm-approve-btn");
-  const cancel = optionalElement<HTMLButtonElement>("recovery-confirm-cancel-btn");
-  if (!dialog || !label || !approve || !cancel || typeof dialog.uxpShowModal !== "function") {
-    return false;
-  }
-
-  label.textContent = entry.label;
-  const approveHandler = (): void => dialog.close("confirm");
-  const cancelHandler = (): void => dialog.close("cancel");
-  approve.addEventListener("click", approveHandler);
-  cancel.addEventListener("click", cancelHandler);
-  try {
-    return await confirmDestructiveRecovery(
-      dialog.uxpShowModal.bind(dialog),
-      {
-        title: "ShortFlow Studio · 복제 시퀀스 제거",
-        resize: "none",
-        size: { width: 420, height: 300 },
-      },
-    );
-  } finally {
-    approve.removeEventListener("click", approveHandler);
-    cancel.removeEventListener("click", cancelHandler);
-  }
-}
-
-function renderRecoveryJournal(): void {
-  const target = optionalElement<HTMLElement>("recovery-list");
-  if (!target) return;
-  // Premiere 26.3 UXP can leave stale children behind after replaceChildren().
-  // Remove explicitly so preview/selection rerenders never duplicate asset cards.
-  while (target.firstChild) target.removeChild(target.firstChild);
-  const entries = recoveryManager?.list().sort((left, right) => right.createdAt - left.createdAt) ?? [];
-  setText("recovery-count", `${entries.length} / 50`);
-  if (entries.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "action-note";
-    empty.textContent = "기록된 비파괴 작업이 없습니다.";
-    target.append(empty);
-    return;
-  }
-  for (const entry of entries) {
-    const row = document.createElement("div");
-    row.className = `recovery-row is-${entry.status}`;
-    const copy = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = `${entry.label} · ${recoveryStatusLabel(entry.status)}`;
-    const details = document.createElement("span");
-    details.textContent = `${entry.preview.changes.length}개 변경 · 원본 ${entry.originalPreserved ? "보존" : "확인 필요"}${entry.error ? ` · ${entry.error}` : ""}`;
-    const guidance = document.createElement("small");
-    guidance.textContent = entry.recoveryGuidance;
-    copy.append(title, details, guidance);
-    row.append(copy);
-    if (["committed", "failed", "interrupted", "rollback-failed"].includes(entry.status)) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "danger-button small-button";
-      button.textContent = "복제본 제거";
-      button.addEventListener("click", () => void rollbackRecoveryEntry(entry));
-      row.append(button);
-    }
-    target.append(row);
-  }
-}
-
-async function rollbackRecoveryEntry(entry: OperationJournalEntry): Promise<void> {
-  if (!recoveryManager) return;
-  if (recoveryRollbackPending) return;
-  recoveryRollbackPending = true;
-  try {
-    if (!await requestRecoveryRollbackConfirmation(entry)) {
-      activity.add("warning", "명시적 확인을 받지 못해 복제 시퀀스 제거를 취소했습니다.");
-      return;
-    }
-    await recoveryManager.rollback(entry.operationId, () => removeVerifiedClonedSequence(
-      entry.clonePolicy.sourceId,
-      entry.clonePolicy.cloneId,
-    ));
-    activity.add("success", `복제 시퀀스 복구 완료: ${entry.label}`);
-    toast("원본을 유지하고 복제 시퀀스를 제거했습니다.", "success");
-  } catch (error) {
-    reportError(error, "복제 시퀀스 복구 실패");
-  } finally {
-    recoveryRollbackPending = false;
-    renderRecoveryJournal();
-  }
-}
+const recoveryPanel = createRecoveryPanel({
+  getManager: () => recoveryManager,
+  removeClone: removeVerifiedClonedSequence,
+  onActivity: (level, message) => activity.add(level, message),
+  onError: reportError,
+});
 
 function hostModule(moduleName: string): Record<string, unknown> | null {
   try {
@@ -1959,7 +1761,7 @@ async function bootstrap(): Promise<void> {
     const browserStorage = (globalThis as unknown as { localStorage?: Storage }).localStorage;
     recoveryManager = new RecoveryManager(browserStorage ? { storage: browserStorage } : {});
     recoveryManager.subscribe((event) => {
-      renderRecoveryJournal();
+      recoveryPanel.render();
       if (event.type === "persistence-error") {
         activity.add("warning", event.message ?? "복구 기록을 저장하지 못했습니다.");
       }
@@ -1969,7 +1771,7 @@ async function bootstrap(): Promise<void> {
       activity.add("warning", `이전 세션에서 중단된 비파괴 작업 ${interrupted}개를 복구 목록에 표시했습니다.`);
       toast(`중단된 작업 ${interrupted}개를 확인해 주세요.`, "warning", 6200);
     }
-    renderRecoveryJournal();
+    recoveryPanel.render();
   } catch (error) {
     recoveryManager = null;
     reportError(error, "복구 기록 초기화 실패");
@@ -2046,7 +1848,7 @@ async function bootstrap(): Promise<void> {
           }
           throw error;
         } finally {
-          renderRecoveryJournal();
+          recoveryPanel.render();
         }
       },
       onCreateSafeOverlay: createPremiereSafeZoneOverlay,
