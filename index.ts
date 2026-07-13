@@ -1,6 +1,7 @@
-import { PROFILES, formatDuration, type MarkerSegment, type QCItem } from "./src/core";
+import { PROFILES, formatDuration } from "./src/core";
 import { normalizeNativePath, type AssetItem } from "./src/asset-library";
 import { createAssetBrowserPanel } from "./src/asset-browser-panel";
+import { createMarkersQcPanel } from "./src/markers-qc-panel";
 import {
   addStoryMarkers,
   addAutomationMarkers,
@@ -83,10 +84,8 @@ import {
   BusyState,
   bind,
   checkedOf,
-  element,
   numberOf,
   optionalElement,
-  renderEmptyState,
   setChecked,
   setText,
   setValue,
@@ -105,7 +104,6 @@ const activity = new ActivityLog();
 const busy = new BusyState();
 let settings: PluginSettings = loadSettings();
 let initialized = false;
-let markerSegments: MarkerSegment[] = [];
 const sessionGeneratedAssetRightsIdsByProject = new Map<string, Set<string>>();
 let assetRightsRegistry: AssetRightsRegistry | null = null;
 let referenceController: ReferenceController | null = null;
@@ -706,137 +704,19 @@ async function refreshStatus(silent = false): Promise<SequenceStatus | null> {
   }
 }
 
-function qcIcon(level: QCItem["level"]): string {
-  return level === "pass" ? "✓" : level === "warning" ? "!" : "×";
-}
-
-function renderQC(items: QCItem[]): void {
-  const target = element<HTMLElement>("qc-results");
-  target.className = "qc-result-list";
-  target.replaceChildren();
-  for (const result of items) {
-    const item = document.createElement("div");
-    item.className = `qc-result qc-${result.level}`;
-    const icon = document.createElement("span");
-    icon.className = "qc-result-icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = qcIcon(result.level);
-    const message = document.createElement("span");
-    message.textContent = result.message;
-    item.append(icon, message);
-    target.append(item);
-  }
-  const badge = target.closest(".result-card")?.querySelector<HTMLElement>(".neutral-badge");
-  if (badge) {
-    const errors = items.filter((item) => item.level === "error").length;
-    const warnings = items.filter((item) => item.level === "warning").length;
-    badge.textContent = errors ? `오류 ${errors}` : warnings ? `경고 ${warnings}` : "통과";
-    badge.className = `neutral-badge ${errors ? "badge-error" : warnings ? "badge-warning" : "badge-success"}`;
-  }
-}
-
-async function handleQC(): Promise<void> {
-  const current = syncSettingsFromUI();
-  const startedAt = Date.now();
-  await busy.during("시퀀스 QC를 검사하고 있습니다…", async () => {
-    const result = await runSequenceQC(current.width, current.height, current.maxDuration);
-    renderQC(result.items);
-    renderStatus(result.status);
-    const errors = result.items.filter((item) => item.level === "error").length;
-    const warnings = result.items.filter((item) => item.level === "warning").length;
-    const elapsedMs = Math.max(0, Date.now() - startedAt);
-    activity.add(
-      errors ? "error" : warnings ? "warning" : "success",
-      `QC 완료 · 오류 ${errors} · 경고 ${warnings} · ${elapsedMs.toLocaleString("ko-KR")}ms`,
-    );
-    toast(errors ? "QC 오류를 확인해 주세요." : warnings ? "QC 경고가 있습니다." : "QC를 통과했습니다.", errors ? "error" : warnings ? "warning" : "success");
-  });
-}
-
-async function handleCreateShort(): Promise<void> {
-  const options = createOptions();
-  await busy.during("원본을 복제하고 숏폼 시퀀스를 생성하고 있습니다…", async () => {
-    const result = await createShort(options);
-    activity.add("success", `${result.sequenceName} 생성 · ${result.width}×${result.height} · ${formatDuration(result.range.duration)}`);
-    if (result.warnings.length) {
-      activity.add("warning", result.warnings.join(" "));
-    }
-    toast("숏폼 시퀀스를 생성했습니다.", "success");
-    await refreshStatus(true);
-  });
-}
-
-function selectedMarkerSegments(): MarkerSegment[] {
-  const checkboxes = document.querySelectorAll<HTMLInputElement>("#marker-list input[data-segment-index]");
-  if (checkboxes.length === 0) return markerSegments;
-  const indexes = new Set(
-    [...checkboxes]
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => Number(checkbox.dataset.segmentIndex)),
-  );
-  return markerSegments.filter((_segment, index) => indexes.has(index));
-}
-
-function renderMarkers(segments: MarkerSegment[]): void {
-  const target = element<HTMLElement>("marker-list");
-  const button = element<HTMLButtonElement>("batch-create-btn");
-  if (!segments.length) {
-    renderEmptyState(target, "ShortFlow 마커가 없습니다", "마커 이름에 SHORT, 숏폼 또는 #SF를 포함해 주세요.");
-    button.disabled = true;
-    return;
-  }
-  target.replaceChildren();
-  segments.forEach((segment, index) => {
-    const label = document.createElement("label");
-    label.className = "marker-item";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = true;
-    checkbox.dataset.segmentIndex = String(index);
-    const copy = document.createElement("span");
-    copy.className = "marker-copy";
-    const title = document.createElement("strong");
-    title.textContent = segment.name;
-    const detail = document.createElement("small");
-    detail.textContent = `${formatDuration(segment.start)} → ${formatDuration(segment.end)} · ${formatDuration(segment.duration)}`;
-    copy.append(title, detail);
-    label.append(checkbox, copy);
-    target.append(label);
-  });
-  button.disabled = false;
-}
-
-async function handleScanMarkers(): Promise<void> {
-  const current = syncSettingsFromUI();
-  markerSegments = await busy.during("숏폼 마커를 검색하고 있습니다…", () => scanShortMarkers(current.maxDuration));
-  renderMarkers(markerSegments);
-  activity.add("info", `숏폼 마커 구간 ${markerSegments.length}개 검색`);
-}
-
-async function handleBatchCreate(): Promise<void> {
-  const selected = selectedMarkerSegments();
-  if (!selected.length) {
-    toast("일괄 생성할 마커 구간을 선택해 주세요.", "warning");
-    return;
-  }
-  const options = createOptions();
-  const result = await busy.during(`${selected.length}개 마커 구간을 생성하고 있습니다…`, () =>
-    createShortsFromMarkers(selected, options, (completed, total, name) => {
-      setText("busy-message", `${completed}/${total} · ${name}`);
-    }));
-  activity.add("success", `마커 구간 일괄 생성 완료 · 성공 ${result.created.length} · 실패 ${result.failures.length}`);
-  result.failures.forEach((failure) => activity.add("error", `${failure.name}: ${failure.error}`));
-  toast(`${result.created.length}개 숏폼 시퀀스를 생성했습니다.`, result.failures.length ? "warning" : "success");
-  await refreshStatus(true);
-}
-
-async function handleStoryMarkers(): Promise<void> {
-  const current = syncSettingsFromUI();
-  const count = await busy.during("HOOK/CTA 마커를 추가하고 있습니다…", () =>
-    addStoryMarkers(current.hookSeconds, current.ctaSeconds));
-  activity.add("success", `스토리 마커 ${count}개 추가`);
-  toast("HOOK/CTA 마커를 추가했습니다.", "success");
-}
+const markersQcPanel = createMarkersQcPanel({
+  runBusy: (message, task) => busy.during(message, task),
+  onActivity: (level, message) => activity.add(level, message),
+  syncSettings: syncSettingsFromUI,
+  getCreateOptions: createOptions,
+  renderStatus,
+  refreshStatus,
+  runSequenceQC,
+  createShort,
+  scanShortMarkers,
+  createShortsFromMarkers,
+  addStoryMarkers,
+});
 
 function applyPersistentResult(
   kind: "preset" | "output" | "mogrt",
@@ -1052,11 +932,11 @@ function guarded(handler: () => Promise<void>, context: string): () => Promise<v
 
 function bindCoreEvents(): void {
   bind("refresh-btn", "click", guarded(() => refreshStatus().then(() => undefined), "상태 새로고침 실패"));
-  bind("qc-btn", "click", guarded(handleQC, "QC 실패"));
-  bind("create-short-btn", "click", guarded(handleCreateShort, "숏폼 생성 실패"));
-  bind("scan-markers-btn", "click", guarded(handleScanMarkers, "마커 검색 실패"));
-  bind("batch-create-btn", "click", guarded(handleBatchCreate, "일괄 생성 실패"));
-  bind("add-story-markers-btn", "click", guarded(handleStoryMarkers, "스토리 마커 추가 실패"));
+  bind("qc-btn", "click", guarded(() => markersQcPanel.runQC(), "QC 실패"));
+  bind("create-short-btn", "click", guarded(() => markersQcPanel.createShort(), "숏폼 생성 실패"));
+  bind("scan-markers-btn", "click", guarded(() => markersQcPanel.scanMarkers(), "마커 검색 실패"));
+  bind("batch-create-btn", "click", guarded(() => markersQcPanel.batchCreate(), "일괄 생성 실패"));
+  bind("add-story-markers-btn", "click", guarded(() => markersQcPanel.addStoryMarkers(), "스토리 마커 추가 실패"));
   bind("choose-preset-btn", "click", guarded(handleChoosePreset, "프리셋 선택 실패"));
   bind("choose-output-btn", "click", guarded(handleChooseOutput, "출력 폴더 선택 실패"));
   bind("choose-mogrt-btn", "click", guarded(handleChooseMogrt, "MOGRT 선택 실패"));
