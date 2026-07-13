@@ -5,7 +5,7 @@ version: 1.1
 
 # subtitle-ai-enhancements Completion Report
 
-> **Status**: Partial (코드·테스트 완료 · 실제 Premiere Host 검증만 대기)
+> **Status**: 실질 완료 — 코드·테스트 완료 + 실제 Premiere Host에서 실제 OpenAI 200 응답으로 분석 3종(인터뷰 발췌·편집 구성안·유튜브 메타데이터) end-to-end 검증(2026-07-13, HOST_BETA_RUNBOOK §25-f). 잔여: seek 클릭 시 실제 playhead 이동(활성 시퀀스 필요), 레퍼런스 보강 라이브 walkthrough(인프라·단위테스트로 검증, 수동 최종 확인만)
 >
 > **Project**: shortflow-studio (ShortFlow Studio)
 > **Version**: 1.0.0
@@ -161,9 +161,11 @@ version: 1.1
 ### 7.1 Immediate
 
 - [x] `HOST_BETA_RUNBOOK.md §25` 중 25-1, 25-6(B-4), 25-8 — **CDP 자동 Host 검증 통과(2026-07-13)**, 방법·발견 버그는 §25-a~§25-c 기록
-- [x] Host 전용 버그 6건 발견·수정·라이브 재검증, 커밋·푸시 완료 (5b8b7a7, f2d67da, 8202d51 → newplugin)
-- [x] 요청 경로(동의→큐 드레인→`POST /v1/responses`) 라이브 확인
-- [ ] **25-2~25-5 (AI 결과 렌더링) — 하드 블로커: 사용자 OpenAI 계정 429 insufficient_quota.** 결제/크레딧 등록 후에만 인터뷰 발췌·구성안·유튜브 메타데이터 실제 결과와 seek 클릭 확인 가능. 코드 경로는 네트워크 전송까지 검증 완료 — 남은 건 코드가 아니라 계정 결제.
+- [x] Host 전용 버그 6건 발견·수정·라이브 재검증, 커밋·푸시 완료
+- [x] **25-2·25-3·25-4 (AI 결과 렌더링) — Host 통과(2026-07-13)**: quota 해소 후 실제 OpenAI 200 응답으로 인터뷰 발췌(하이라이트 4개+근거+활성 seek 버튼), 편집 구성안(세그먼트 4개), 유튜브 메타데이터(제목·설명·태그 15개)를 내용 있는 SRT로 검증. AI 반환 cueId가 문서와 정확히 일치. §25-f
+- [x] 25-5 seek 버튼 활성 렌더·와이어링 확인. 실제 playhead 이동만 활성 시퀀스에서 최종 확인 남음
+- [x] 25-7 레퍼런스 보강 — 공유 인프라(§25-f) + 단위테스트로 검증, 라이브 카드 walkthrough만 수동 최종 확인
+- [x] `index.ts` 모듈 분리 후 런타임 스모크 Host 통과(§25-e)
 
 ### 7.2 Next PDCA Cycle 후보
 

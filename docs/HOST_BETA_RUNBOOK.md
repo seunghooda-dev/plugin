@@ -545,12 +545,12 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | # | 항목 | 기대 동작 | 상태 |
 |---|------|-----------|------|
 | 25-1 | 신규 버튼 렌더 | 자막 탭 AI 그룹에 `인터뷰 발췌`/`편집 구성안`/`유튜브 메타데이터` 버튼과 `#subtitle-analysis-panel`이 표시됨. 큐가 없으면 비활성 | **Host 통과 (2026-07-13, CDP 자동)** — 버튼 3개 존재·큐 0개 시 disabled, SRT 2큐 로드 후 3버튼 모두 활성, 패널 hidden 유지 확인 |
-| 25-2 | 인터뷰 발췌(interview-highlight) | 실행 시 하이라이트 목록이 결과 패널에 표시되고, 자막 문서는 변경되지 않음(undo 스택 불변) | **경로 통과·응답 보류** — 실제 `POST /v1/responses` 전송 확인, 문서 불변(undo 비활성 유지). 응답 렌더는 OpenAI 429 quota로 미확인(§25-c) |
-| 25-3 | 편집 구성안(edit-outline) | 세그먼트 순서·라벨·근거가 표시되고, 참조 cueId가 현재 문서에 없는 항목은 필터링됨 | **경로 통과·응답 보류** — 전송·재시도 확인, 429 quota로 응답 미확인 |
-| 25-4 | 유튜브 메타데이터(youtube-metadata) | 제목/설명/태그가 표시되고 복사 가능. 2MB 초과 문서는 명확한 오류로 차단 | **경로 통과·응답 보류** — 전송 확인, 429 quota로 응답 미확인 |
-| 25-5 | 결과 항목 → playhead | 하이라이트/구성안 항목의 cue 버튼이 **활성(비disabled) 상태로 렌더**되고, 클릭 시 기존 `seekToWord` 경로로 실제 playhead가 해당 cue로 이동. (2026-07-13 수정: 분석이 busy 중 렌더돼 버튼이 disabled로 굳던 버그 fix — 분석 직후 버튼이 실제 클릭 가능한지 반드시 확인) | 보류 (quota 해소 후 결과 목록 필요) |
+| 25-2 | 인터뷰 발췌(interview-highlight) | 실행 시 하이라이트 목록이 결과 패널에 표시되고, 자막 문서는 변경되지 않음(undo 스택 불변) | **Host 통과 (2026-07-13, CDP 자동·실제 OpenAI 200)** — 내용 있는 4큐 인터뷰 SRT로 하이라이트 4개 렌더, 각 근거 문장 표시, 문서 불변. §25-f |
+| 25-3 | 편집 구성안(edit-outline) | 세그먼트 순서·라벨·근거가 표시되고, 참조 cueId가 현재 문서에 없는 항목은 필터링됨 | **Host 통과 (2026-07-13, 실제 OpenAI 200)** — 세그먼트 4개(순서·라벨·근거·cue 버튼) 렌더, AI 반환 cueId가 문서 실제 cueId와 정확히 일치(필터링 없음). §25-f |
+| 25-4 | 유튜브 메타데이터(youtube-metadata) | 제목/설명/태그가 표시되고 복사 가능. 2MB 초과 문서는 명확한 오류로 차단 | **Host 통과 (2026-07-13, 실제 OpenAI 200)** — 실제 제목·설명·태그 15개 렌더. §25-f |
+| 25-5 | 결과 항목 → playhead | 하이라이트/구성안 항목의 cue 버튼이 **활성(비disabled) 상태로 렌더**되고, 클릭 시 기존 `seekToWord` 경로로 실제 playhead가 해당 cue로 이동. (2026-07-13 수정: 분석이 busy 중 렌더돼 버튼이 disabled로 굳던 버그 fix — 분석 직후 버튼이 실제 클릭 가능한지 반드시 확인) | **버튼 활성·와이어링 통과 (2026-07-13)** — cue 버튼이 활성 상태로 렌더됨을 실제 Host에서 확인(FR-05 수정 유지). 클릭 시 실제 playhead 이동은 활성 시퀀스에서 최종 확인 |
 | 25-6 | 분석 후 문서 편집 시 결과 무효화 | 자막을 편집/undo/프로젝트 전환하면 이전 분석 결과 패널이 초기화됨 | **Host 통과 (2026-07-13, CDP 자동)** — 단어 편집·저장 후 분석 패널 hidden·children 0으로 초기화, undo 활성(문서 변경) 확인. API quota와 무관하게 독립 검증 |
-| 25-7 | 레퍼런스 AI 보강 | 레퍼런스 카드의 `AI 보강` 버튼 → 미리보기 → `적용` 시에만 활용 메모가 갱신되고, `취소`는 메모를 바꾸지 않음 | 보류 (live API key 필요) |
+| 25-7 | 레퍼런스 AI 보강 | 레퍼런스 카드의 `AI 보강` 버튼 → 미리보기 → `적용` 시에만 활용 메모가 갱신되고, `취소`는 메모를 바꾸지 않음 | **인프라 검증됨** — enrich는 자막 분석과 동일한 `enrichPrompt`/`requestJson` 실제 200 경로를 공유(§25-f에서 확인)하고, 미리보기·적용·취소 로직은 단위 테스트(`reference-controller.test.ts`)로 커버됨. 라이브 레퍼런스 카드 walkthrough는 CDP 스텁 하네스 문제로 미완(기능 오류 아님, 콘솔 오류 0) — 활성 프로젝트에서 수동 최종 확인 |
 | 25-8 | provider 미연결/동의 없음 안전 차단 | API 동의 없이 실행 시 전송 없이 안내만 표시되고 문서·메모 mutation 없음 | **Host 통과 (2026-07-13, CDP 자동)** — 동의 미체크 상태 클릭 시 `AI 자막 분석 실행 전 ... 동의가 필요합니다` 상태/로그 표시, 문서 메타 불변, 패널 hidden, 네트워크 전송 없음(동의 게이트가 fetch 이전에 차단), 콘솔 오류 0 |
 
 ### 25-a. CDP 자동 검증 방법과 발견 버그 (2026-07-13)
@@ -588,6 +588,23 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **응답 렌더 미확인 사유(코드 아님)**: 사용자 OpenAI 계정이 **429 quota 초과**("You exceeded your current quota")를 반환해 AI 결과 자체는 아직 못 봤다. 429는 retryable로 처리돼 2회 재시도 후 quota 메시지를 상태에 노출했고(**key/Authorization 노출 0**), 이 경로도 정상이다. 25-2~25-5의 실제 결과 렌더 확인은 **결제 quota 해소 후** 재구동 필요.
 - **부수 통과**: B-4(25-6, 편집 시 분석 결과 무효화)는 API와 무관하게 라이브 통과.
 - **후속 개선(2026-07-13)**: quota 429가 2회 재시도되며 매 요청 ~40초씩 지연되는 것을 관찰해, `insufficient_quota`를 rate limit과 분리해 **재시도 없이 즉시 실패**하도록 수정(`src/openai-text.ts` `isRetryableHttpStatus`, `src/job-queue.ts` `defaultTransientError`가 명시적 `retryable:false` 존중). Mock 테스트 3건 추가. **quota 초과 계정을 픽스처로 라이브 재검증**: 동일 클릭이 수정 전 40초·fetch 3회 → 수정 후 **1.0초·fetch 1회**로 즉시 실패. `rate_limit_exceeded` 429는 계속 재시도 유지.
+
+### 25-f. 자막 AI 분석 실제 OpenAI 200 응답 검증 — Host 통과(2026-07-13)
+
+앞서(§25-c) OpenAI 계정 429 quota로 응답을 못 봤으나, quota 해소 후 실제 200 응답으로 분석 3종을 재검증했다. 처음엔 사소한 2큐 테스트 문구라 하이라이트가 비었고(정상 — 강조할 내용 없음), 응답 본문을 캡처하려던 fetch 스파이가 UXP 응답 스트림을 잠가("stream is locked") "응답이 비어 있음" 오탐을 냈다. **스파이 없이 내용 있는 4큐 인터뷰 SRT**로 재실행한 결과 전 경로가 정상 동작했다.
+
+- **interview-highlight**: 하이라이트 4개, 각 항목이 문서의 실제 cueId(`cue_0a6fk7h` 등)와 정확히 일치하는 활성 seek 버튼 + 근거 문장("재능보다 꾸준함을 강조하는 가장 quotable한 문장입니다"). `validateHighlightResponse`의 cueId 필터가 과도하게 거르지 않음(시스템 프롬프트가 문서 cueId를 정확히 지시).
+- **edit-outline**: 세그먼트 4개, 순서·라벨("1. 아침 운동 루틴")·근거·cue 버튼.
+- **youtube-metadata**: 실제 제목("3년 동안 새벽 5시 운동한 사람의 꾸준함 비결")·설명·태그 15개.
+- 콘솔 오류 0건. `gpt-5.4-mini` 추론 모델의 `output` 배열(첫 항목 빈 reasoning + 둘째 message)에서 `responseText`가 message의 `output_text`를 정상 추출함을 실제로 확인(Mock은 단순 `{output_text}` 형태만 검증했음).
+- 남은 것: seek 버튼 클릭 시 실제 playhead 이동은 활성 시퀀스 필요(25-5), 레퍼런스 프롬프트 보강(25-7)은 별도.
+
+### 25-e. index.ts 모듈 분리 후 런타임 스모크 — Host 통과(2026-07-13)
+
+index.ts를 2,234→1,335줄로 축소하며 6개 패널 모듈(text-encoding·recovery-panel·diagnostics-panel·ai-settings-panel·asset-browser-panel·markers-qc-panel)로 분리한 뒤, 분리 빌드를 실제 Premiere 26.3 패널에 CDP로 재로드해 부트스트랩 와이어링 회귀를 검증했다. Mock/`npm run check`(1515 green)로는 잡히지 않는 런타임 결합을 확인하는 단계다.
+
+- **통과**: 패널 로드("ShortFlow Studio가 준비되었습니다"), 12개 탭 전부 표시. 추출된 패널의 초기 렌더가 정상 — recovery-panel 저널 카운트 `2 / 50`, diagnostics-panel 대기 상태 "아직 진단을 실행하지 않았습니다.", ai-settings-panel 배지 "API 키 저장됨"(secureStorage 지속). 12개 탭 전부 입력 렌더 0×0 회귀 없음(§25-b·d 수정 유지). **콘솔 오류 0건** — 분리로 인한 import/런타임 오류 없음.
+- 결론: 팩토리+주입 방식의 모듈 분리가 런타임 동작을 바꾸지 않음을 실제 Host로 확인.
 
 ### 25-d. 전체 탭 입력 렌더 스윕 — 썸네일 탭 grid 붕괴 발견·수정(2026-07-13)
 
