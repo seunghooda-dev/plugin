@@ -27,6 +27,7 @@ import {
   removeVerifiedClonedSequenceFromProject,
   sameMediaPath,
   scanSequenceMediaQC,
+  setSequencePlayerPosition,
   tickTimeSeconds,
   translateSafeZonePosition,
   validatePremiereImportPath,
@@ -342,6 +343,33 @@ describe("readSequenceStatus Host snapshot", () => {
     assert.equal(status.selectedStart, null);
     assert.equal(status.selectedEnd, null);
   });
+
+  it("falls back the out point to the sequence end when the Host reports no out point", async () => {
+    const sequence = {
+      name: "No Out Point",
+      guid: "sequence-guid",
+      getFrameSize: async () => ({ width: 1080, height: 1920 }),
+      getEndTime: async () => ({ seconds: 24 }),
+      getInPoint: async () => ({ seconds: 6 }),
+      getOutPoint: async () => { throw new Error("no out point set"); },
+      getPlayerPosition: async () => ({ seconds: 0 }),
+      getSelection: async () => null,
+      getVideoTrackCount: async () => 1,
+      getAudioTrackCount: async () => 1,
+      getCaptionTrackCount: async () => 0,
+      getSettings: async () => ({ getVideoFrameRate: () => ({ value: 30 }) }),
+    };
+
+    const status = await readSequenceStatus({
+      project: { name: "Project", path: "C:\\Project.prproj", guid: "project-guid" },
+      sequence,
+    } as never);
+
+    assert.equal(status.outPoint, 24);
+    assert.equal(status.effectiveStart, 6);
+    assert.equal(status.effectiveEnd, 24);
+    assert.equal(status.effectiveDuration, 18);
+  });
 });
 
 describe("scanSequenceMediaQC", () => {
@@ -432,6 +460,37 @@ describe("scanSequenceMediaQC", () => {
     assert.equal(status.truncated, false);
     assert.equal(maxActive, 3);
   });
+
+  it("deduplicates offline media by project-item id across differently named clips", async () => {
+    const shared = (name: string) => ({
+      getName: async () => name,
+      getProjectItem: async () => ({ getId: () => "shared-asset", isOffline: async () => true }),
+    });
+    const status = await scanSequenceMediaQC(10, {
+      context: {
+        project: { name: "Project", guid: "project-guid" },
+        sequence: sequenceWithMedia([shared("timeline-a.mp4"), shared("timeline-b.mp4")]),
+      } as never,
+      concurrency: 1,
+    });
+
+    assert.deepEqual(status.offlineMedia, ["timeline-a.mp4"]);
+    assert.equal(status.scannedItems, 2);
+    assert.equal(status.truncated, false);
+  });
+
+  it("labels unnamed offline media and scans audio-track clips", async () => {
+    const status = await scanSequenceMediaQC(10, {
+      context: {
+        project: { name: "Project", guid: "project-guid" },
+        sequence: sequenceWithMedia([], [mediaItem("", "audio-asset", true)]),
+      } as never,
+      concurrency: 1,
+    });
+
+    assert.deepEqual(status.offlineMedia, ["이름 없는 오프라인 미디어"]);
+    assert.equal(status.scannedItems, 1);
+  });
 });
 
 describe("keyframeValue", () => {
@@ -480,6 +539,11 @@ describe("centeredPosition", () => {
     assert.equal(centeredPosition({ x: 1 }, 100, 100), null);
     assert.equal(centeredPosition({ x: Number.NaN, y: 1 }, 100, 100), null);
     assert.equal(centeredPosition({ x: 1, y: 1 }, 0, 100), null);
+  });
+
+  it("treats Motion positions within the +/-2 unit threshold as normalized coordinates", () => {
+    assert.deepEqual(centeredPosition({ x: 2, y: -2 }, 1080, 1920), { x: 0.5, y: 0.5 });
+    assert.deepEqual(centeredPosition({ x: 2.1, y: 0 }, 1080, 1920), { x: 540, y: 960 });
   });
 });
 
@@ -921,6 +985,111 @@ describe("audio timeline insertion collision gate", () => {
     );
     assert.equal(transactionCalls, 1);
   });
+
+  it("detects a collision anywhere inside the insertion range, not only at the playhead", async () => {
+    // Insertion range is [5, 10]; the clip [7, 8] touches neither boundary but sits mid-range.
+    await assert.rejects(
+      assertAudioInsertRangeAvailable(sequenceProbe([trackItem(7, 8)]), 1, { seconds: 5 }, 5, "clip"),
+      (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_COLLISION"),
+    );
+    // A clip that fully spans the range also collides.
+    await assert.rejects(
+      assertAudioInsertRangeAvailable(sequenceProbe([trackItem(3, 12)]), 1, { seconds: 5 }, 5, "clip"),
+      (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_COLLISION"),
+    );
+  });
+
+  it("returns a frozen insertion range when the whole span is clear of clips", async () => {
+    const range = await assertAudioInsertRangeAvailable(
+      sequenceProbe([trackItem(0, 4), trackItem(11, 13)]),
+      1,
+      { seconds: 5 },
+      5,
+      "clip",
+    );
+    assert.deepEqual({ ...range }, { start: 5, end: 10, duration: 5 });
+    assert.ok(Object.isFrozen(range));
+  });
+
+  it("rejects invalid audio track indices before probing the sequence", async () => {
+    const probe = sequenceProbe([]);
+    for (const index of [-1, 99, 1.5]) {
+      await assert.rejects(
+        assertAudioInsertRangeAvailable(probe, index, { seconds: 1 }, 1, "clip"),
+        (error: unknown) => assertShortFlowError(error, "INVALID_AUDIO_TRACK"),
+      );
+    }
+  });
+
+  it("rejects an unusable insertion time or duration before probing the sequence", async () => {
+    const probe = sequenceProbe([]);
+    for (const [insertion, duration] of [
+      [{ seconds: -1 }, 2],
+      [{ seconds: Number.NaN }, 2],
+      [{ seconds: 5 }, 0],
+      [{ seconds: 5 }, 90_000],
+    ] as const) {
+      await assert.rejects(
+        assertAudioInsertRangeAvailable(probe, 1, insertion, duration, "clip"),
+        (error: unknown) => assertShortFlowError(error, "AUDIO_INSERT_RANGE_UNAVAILABLE"),
+      );
+    }
+  });
+
+  it("rejects a non-numeric, negative, or failing audio track count", async () => {
+    for (const getAudioTrackCount of [
+      async () => "4" as unknown as number,
+      async () => -1,
+      async () => { throw new Error("no track count"); },
+    ]) {
+      await assert.rejects(
+        assertAudioInsertRangeAvailable({ getAudioTrackCount } as never, 1, { seconds: 5 }, 2, "clip"),
+        (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_UNAVAILABLE"),
+      );
+    }
+  });
+
+  it("rejects an audio track whose clip count exceeds the safety cap", async () => {
+    const tooMany = Array.from({ length: 5_001 }, () => ({}));
+    const sequence = {
+      getAudioTrackCount: async () => 2,
+      getAudioTrack: async () => ({
+        getIndex: async () => 1,
+        getTrackItems: () => tooMany,
+      }),
+    };
+    await assert.rejects(
+      assertAudioInsertRangeAvailable(sequence as never, 1, { seconds: 5 }, 2, "clip"),
+      (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_UNAVAILABLE"),
+    );
+  });
+
+  it("rejects an audio track item that hides its time-range API", async () => {
+    const sequence = {
+      getAudioTrackCount: async () => 2,
+      getAudioTrack: async () => ({
+        getIndex: async () => 1,
+        getTrackItems: () => [{}],
+      }),
+    };
+    await assert.rejects(
+      assertAudioInsertRangeAvailable(sequence as never, 1, { seconds: 5 }, 2, "clip"),
+      (error: unknown) => assertShortFlowError(error, "AUDIO_TRACK_UNAVAILABLE"),
+    );
+  });
+
+  it("aborts when In/Out probing throws or yields an out-of-bounds duration", async () => {
+    for (const item of [
+      { getInPoint: async () => { throw new Error("no in point"); }, getOutPoint: async () => ({ seconds: 5 }) },
+      { getInPoint: async () => ({ seconds: -1 }), getOutPoint: async () => ({ seconds: 5 }) },
+      { getInPoint: async () => ({ seconds: 0 }), getOutPoint: async () => ({ seconds: 90_000 }) },
+    ]) {
+      await assert.rejects(
+        audioProjectItemDurationSeconds(item, "audio"),
+        (error: unknown) => assertShortFlowError(error, "ASSET_AUDIO_DURATION_UNAVAILABLE"),
+      );
+    }
+  });
 });
 
 describe("automation clone preparation and clip-local punch planning", () => {
@@ -1028,6 +1197,70 @@ describe("automation clone preparation and clip-local punch planning", () => {
     assert.ok(guardedStart < body.indexOf("const cloneContextKey = premiereContextKey"));
     assert.ok(guardedStart < body.indexOf("await hooks.onClonePrepared?."));
     assert.match(body, /catch \(error\)[\s\S]*removeKnownClonedSequenceFromProject\(project, source, clone\)/u);
+  });
+
+  it("renames, opens, and activates the newly discovered clone on the happy path", async () => {
+    const sequences: Array<Record<string, unknown>> = [];
+    const events: string[] = [];
+    let active: unknown = null;
+    const cloneItem = { createSetNameAction: (name: string) => ({ kind: "rename", name }) };
+    const clone = { guid: "clone-guid", name: "Untitled Clone", getProjectItem: async () => cloneItem };
+    const source = { guid: "source-guid", name: "Source", createCloneAction: () => ({ kind: "clone" }) };
+    sequences.push(source);
+    const project = {
+      getSequences: async () => [...sequences],
+      getActiveSequence: async () => active,
+      lockedAccess: (callback: () => void) => callback(),
+      executeTransaction: (callback: (compound: { addAction(action: { kind: string }): boolean }) => void) => {
+        callback({
+          addAction: (action) => {
+            events.push(action.kind);
+            if (action.kind === "clone") sequences.push(clone);
+            return true;
+          },
+        });
+        return true;
+      },
+      openSequence: async () => { events.push("open"); return true; },
+      setActiveSequence: async (sequence: unknown) => { active = sequence; events.push("activate"); return true; },
+    } as unknown as Project;
+
+    const result = await cloneSequence(project, source as unknown as never, "My Short");
+    assert.equal(result, clone);
+    assert.equal(active, clone);
+    assert.deepEqual(sequences, [source, clone]);
+    assert.deepEqual(events, ["clone", "rename", "open", "activate"]);
+  });
+
+  it("throws CLONE_FAILED when Premiere rejects the clone transaction", async () => {
+    const source = { guid: "s", name: "Source", createCloneAction: () => ({ kind: "clone" }) };
+    const project = {
+      getSequences: async () => [source],
+      lockedAccess: (callback: () => void) => callback(),
+      executeTransaction: () => false,
+    } as unknown as Project;
+    await assert.rejects(
+      () => cloneSequence(project, source as unknown as never, "X"),
+      (error) => assertShortFlowError(error, "CLONE_FAILED"),
+    );
+  });
+
+  it("returns no punch keyframes for invalid clip ranges or non-overlapping cues", () => {
+    assert.deepEqual(planClipPunchKeyframes(Number.NaN, 3, 100, [cue(0, 4)]), []);
+    assert.deepEqual(planClipPunchKeyframes(3, 3, 100, [cue(0, 4)]), []);
+    assert.deepEqual(planClipPunchKeyframes(1, 3, Number.NaN, [cue(0, 4)]), []);
+    assert.deepEqual(planClipPunchKeyframes(1, 3, 100, [cue(5, 6)]), []);
+  });
+
+  it("clamps the punch zoom multiplier to its 1.01x floor and 1.5x ceiling", () => {
+    assert.deepEqual(planClipPunchKeyframes(0, 2, 200, [cue(0, 2, 100)]), [
+      { time: 0, value: 202 },
+      { time: 2, value: 202 },
+    ]);
+    assert.deepEqual(planClipPunchKeyframes(0, 2, 200, [cue(0, 2, 300)]), [
+      { time: 0, value: 300 },
+      { time: 2, value: 300 },
+    ]);
   });
 });
 
@@ -1229,5 +1462,212 @@ describe("Safe Zone Motion alignment", () => {
     assert.equal(result.changed, false);
     assert.deepEqual(result.actions, []);
     assert.match(result.warning ?? "", /위치 키프레임.*보존/u);
+  });
+
+  const moveOnly: SafeZoneAlignment = {
+    rect: { x: 0, y: 0, width: 1, height: 1 }, deltaX: 0.1, deltaY: 0.2, scale: 1, changed: true, wasOversized: false,
+  };
+  const scaleOnly: SafeZoneAlignment = {
+    rect: { x: 0, y: 0, width: 1, height: 1 }, deltaX: 0, deltaY: 0, scale: 0.8, changed: true, wasOversized: true,
+  };
+  const noChange: SafeZoneAlignment = {
+    rect: { x: 0, y: 0, width: 1, height: 1 }, deltaX: 0, deltaY: 0, scale: 1, changed: false, wasOversized: false,
+  };
+
+  const staticParam = (kind: "position" | "scale", value: unknown) => ({
+    displayName: kind === "position" ? "Position" : "Scale",
+    isTimeVarying: () => false,
+    getStartValue: async () => ({ value: { value } }),
+    createKeyframe: (created: unknown) => ({ created }),
+    createSetValueAction: (keyframe: { created: unknown }) => ({ kind, value: keyframe.created }),
+  });
+
+  function motionItem(
+    params: { position?: unknown; scale?: unknown },
+    options: { adjustment?: boolean; noChain?: boolean } = {},
+  ): VideoClipTrackItem {
+    const list = [params.position, params.scale].filter((param) => param !== undefined);
+    const component = {
+      getMatchName: async () => "ADBE Motion",
+      getDisplayName: async () => "Motion",
+      getParamCount: () => list.length,
+      getParam: (index: number) => list[index] ?? null,
+    };
+    return {
+      isAdjustmentLayer: async () => options.adjustment ?? false,
+      getComponentChain: async () => options.noChain
+        ? null
+        : { getComponentCount: () => 1, getComponentAtIndex: () => component },
+    } as unknown as VideoClipTrackItem;
+  }
+
+  it("no-ops without touching the item when neither move nor scale is needed", async () => {
+    const result = await buildSafeZoneItemAlignmentActions({} as unknown as VideoClipTrackItem, noChange, { width: 1000, height: 500 });
+    assert.deepEqual(result, { actions: [], changed: false });
+  });
+
+  it("builds a lone position action for a move-only alignment", async () => {
+    const item = motionItem({ position: staticParam("position", { x: 100, y: 200 }) });
+    const result = await buildSafeZoneItemAlignmentActions(item, moveOnly, { width: 1000, height: 500 }, (x, y) => ({ x, y }) as PointF);
+    assert.equal(result.changed, true);
+    assert.equal(result.actions.length, 1);
+    assert.deepEqual(result.actions[0]!(), { kind: "position", value: { x: 200, y: 300 } });
+  });
+
+  it("builds a lone proportional scale action for a scale-only alignment", async () => {
+    const item = motionItem({ scale: staticParam("scale", 100) });
+    const result = await buildSafeZoneItemAlignmentActions(item, scaleOnly, { width: 1000, height: 500 });
+    assert.equal(result.changed, true);
+    assert.equal(result.actions.length, 1);
+    assert.deepEqual(result.actions[0]!(), { kind: "scale", value: 80 });
+  });
+
+  it("preserves adjustment layers, missing components, and missing Motion properties", async () => {
+    const adjustment = await buildSafeZoneItemAlignmentActions(
+      motionItem({ position: staticParam("position", { x: 100, y: 200 }) }, { adjustment: true }),
+      moveOnly,
+      { width: 1000, height: 500 },
+    );
+    assert.match(adjustment.warning ?? "", /조정 레이어/u);
+
+    const noComponent = await buildSafeZoneItemAlignmentActions(motionItem({}, { noChain: true }), moveOnly, { width: 1000, height: 500 });
+    assert.match(noComponent.warning ?? "", /Motion 속성이 없는/u);
+
+    const noPosition = await buildSafeZoneItemAlignmentActions(motionItem({}), moveOnly, { width: 1000, height: 500 });
+    assert.match(noPosition.warning ?? "", /위치 속성이 없는/u);
+
+    const noScale = await buildSafeZoneItemAlignmentActions(motionItem({}), scaleOnly, { width: 1000, height: 500 });
+    assert.match(noScale.warning ?? "", /스케일 속성이 없는/u);
+  });
+
+  it("preserves keyed scale, ambiguous positions, and unreadable scale values", async () => {
+    const keyedScale = await buildSafeZoneItemAlignmentActions(
+      motionItem({ scale: { ...staticParam("scale", 100), isTimeVarying: () => true } }),
+      scaleOnly,
+      { width: 1000, height: 500 },
+    );
+    assert.equal(keyedScale.changed, false);
+    assert.match(keyedScale.warning ?? "", /스케일 키프레임이 있는/u);
+
+    const ambiguousPosition = await buildSafeZoneItemAlignmentActions(
+      motionItem({ position: staticParam("position", { x: 0, y: 0 }) }),
+      moveOnly,
+      { width: 1000, height: 500 },
+    );
+    assert.match(ambiguousPosition.warning ?? "", /좌표 공간을 안전하게 판별하지 못해/u);
+
+    const unreadableScale = await buildSafeZoneItemAlignmentActions(
+      motionItem({ scale: staticParam("scale", "not-a-number") }),
+      scaleOnly,
+      { width: 1000, height: 500 },
+    );
+    assert.match(unreadableScale.warning ?? "", /스케일 값을 안전하게 읽지 못해/u);
+  });
+
+  it("preserves the item and reports the redacted reason when reading Motion throws", async () => {
+    const item = { isAdjustmentLayer: async () => { throw new Error("host motion failure"); } } as unknown as VideoClipTrackItem;
+    const result = await buildSafeZoneItemAlignmentActions(item, moveOnly, { width: 1000, height: 500 });
+    assert.equal(result.changed, false);
+    assert.deepEqual(result.actions, []);
+    assert.match(result.warning ?? "", /안전하게 읽지 못해 선택 항목을 보존했습니다: .*host motion failure/u);
+  });
+
+  it("rejects unusable values, deltas, frames, integer unit corners, and runaway pixel translations", () => {
+    assert.equal(translateSafeZonePosition(null, 0.1, 0.1, 1080, 1920), null);
+    assert.equal(translateSafeZonePosition({ x: 0.4, y: 0.5 }, Number.NaN, 0.1, 1080, 1920), null);
+    assert.equal(translateSafeZonePosition({ x: 0.4, y: 0.5 }, 0.1, 0.1, 0, 1920), null);
+    assert.equal(translateSafeZonePosition({ x: 1, y: 1 }, 0.1, 0.1, 1080, 1920), null);
+    assert.equal(translateSafeZonePosition({ x: 540, y: 960 }, 10, 0, 1080, 1920), null);
+  });
+});
+
+describe("verified clone removal boundary", () => {
+  function removableClone(guid: string) {
+    return {
+      guid,
+      getProjectItem: async () => ({
+        getParentBin: () => ({ createRemoveItemAction: () => ({ kind: "remove" }) }),
+      }),
+    };
+  }
+
+  it("rejects empty or identical clone identifiers before reading sequences", async () => {
+    const project = {
+      getSequences: async () => { throw new Error("sequences must not be read"); },
+    } as unknown as Project;
+    for (const [sourceGuid, cloneGuid] of [["", "clone"], ["source", ""], ["same", "same"]] as const) {
+      await assert.rejects(
+        () => removeVerifiedClonedSequenceFromProject(project, sourceGuid, cloneGuid),
+        (error) => assertShortFlowError(error, "INVALID_CLONE_ID"),
+      );
+    }
+  });
+
+  it("throws SOURCE_SEQUENCE_NOT_FOUND when the preserved source is missing", async () => {
+    const project = {
+      getSequences: async () => [{ guid: "clone" }],
+    } as unknown as Project;
+    await assert.rejects(
+      () => removeVerifiedClonedSequenceFromProject(project, "source", "clone"),
+      (error) => assertShortFlowError(error, "SOURCE_SEQUENCE_NOT_FOUND"),
+    );
+  });
+
+  it("resolves without reactivating or removing when the clone is already gone", async () => {
+    let activated = false;
+    const project = {
+      getSequences: async () => [{ guid: "source" }],
+      setActiveSequence: async () => { activated = true; return true; },
+    } as unknown as Project;
+    await removeVerifiedClonedSequenceFromProject(project, "source", "missing-clone");
+    assert.equal(activated, false);
+  });
+
+  it("throws SOURCE_REACTIVATE_FAILED when the source cannot be reactivated", async () => {
+    const source = { guid: "source" };
+    const project = {
+      getSequences: async () => [source, removableClone("clone")],
+      setActiveSequence: async () => false,
+      getActiveSequence: async () => ({ guid: "someone-else" }),
+    } as unknown as Project;
+    await assert.rejects(
+      () => removeVerifiedClonedSequenceFromProject(project, "source", "clone"),
+      (error) => assertShortFlowError(error, "SOURCE_REACTIVATE_FAILED"),
+    );
+  });
+
+  it("wraps removal in lockedAccess and reports CLONE_REMOVE_FAILED on transaction rejection or lock failure", async () => {
+    const source = { guid: "source" };
+    for (const project of [
+      {
+        getSequences: async () => [source, removableClone("clone")],
+        setActiveSequence: async () => true,
+        getActiveSequence: async () => source,
+        lockedAccess: (callback: () => void) => callback(),
+        executeTransaction: () => false,
+      },
+      {
+        getSequences: async () => [source, removableClone("clone")],
+        setActiveSequence: async () => true,
+        lockedAccess: () => { throw new Error("host locked-access failure"); },
+        executeTransaction: () => true,
+      },
+    ] as unknown as Project[]) {
+      await assert.rejects(
+        () => removeVerifiedClonedSequenceFromProject(project, "source", "clone"),
+        (error) => assertShortFlowError(error, "CLONE_REMOVE_FAILED"),
+      );
+    }
+  });
+});
+
+describe("setSequencePlayerPosition validation", () => {
+  it("rejects out-of-range playhead targets before any Host access", async () => {
+    for (const seconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, 86_400.5, 90_000]) {
+      await assert.rejects(
+        () => setSequencePlayerPosition(seconds),
+        (error) => assertShortFlowError(error, "INVALID_PLAYHEAD"),
+      );
+    }
   });
 });
