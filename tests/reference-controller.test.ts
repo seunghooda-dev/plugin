@@ -549,3 +549,71 @@ describe("ReferenceController 카드 상태와 AI 선택 상한", () => {
     }
   });
 });
+
+describe("ReferenceController AI 이미지 생성", () => {
+  function registerGenControls(dom: DomHandle): void {
+    dom.doc.register("reference-gen-prompt-input", "textarea");
+    dom.doc.register("reference-gen-size-select", "select");
+    dom.doc.register("reference-gen-btn", "button");
+  }
+
+  it("provider가 돌려준 파일 엔트리를 'AI 생성' 출처로 레퍼런스에 추가한다", async () => {
+    const dom = installDom();
+    registerGenControls(dom);
+    try {
+      const { library } = createSeededLibrary();
+      const calls: Array<{ prompt: string; size: string }> = [];
+      const controller = new ReferenceController({
+        library,
+        generatedImageProvider: async (prompt, size) => {
+          calls.push({ prompt, size });
+          return mockPngFile("ai-gen.png");
+        },
+      });
+      await controller.initialize();
+
+      const promptInput = dom.doc.getElementById("reference-gen-prompt-input")!;
+      promptInput.value = "붉은 노을 실루엣";
+      dom.doc.getElementById("reference-gen-size-select")!.value = "1536x1024";
+      dom.doc.getElementById("reference-gen-btn")!.dispatch("click");
+      await flush();
+
+      assert.deepEqual(calls, [{ prompt: "붉은 노을 실루엣", size: "1536x1024" }]);
+      assert.equal(controller.items.length, 1);
+      assert.match(controller.items[0]?.source ?? "", /AI 생성/u);
+      assert.equal(controller.items[0]?.type, "image");
+      assert.equal(promptInput.value, "");
+    } finally {
+      dom.restore();
+    }
+  });
+
+  it("프롬프트가 비어 있으면 provider를 호출하지 않고 오류를 알린다", async () => {
+    const dom = installDom();
+    registerGenControls(dom);
+    try {
+      const { library } = createSeededLibrary();
+      let providerCalls = 0;
+      const errors: string[] = [];
+      const controller = new ReferenceController({
+        library,
+        generatedImageProvider: async () => {
+          providerCalls += 1;
+          return mockPngFile("x.png");
+        },
+        onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+      });
+      await controller.initialize();
+
+      dom.doc.getElementById("reference-gen-prompt-input")!.value = "   ";
+      dom.doc.getElementById("reference-gen-btn")!.dispatch("click");
+      await flush();
+
+      assert.equal(providerCalls, 0);
+      assert.equal(controller.items.length, 0);
+      assert.match(errors[0] ?? "", /프롬프트/u);
+    } finally {
+      dom.restore();
+    }
+  });
+});

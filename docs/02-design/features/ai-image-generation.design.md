@@ -8,8 +8,12 @@
 프롬프트 텍스트로 이미지를 생성(text→image)해 **레퍼런스 보드**에 생성물로 추가한다. 레퍼런스 보드는 이미 AI 이미지 레퍼런스·프롬프트 메모·에셋 권리 인프라를 갖고 있어 새 표면을 만들지 않고 얹기에 자연스럽다. 영상 생성(Phase 4)은 provider·비용 결정이 필요해 별도.
 
 두 단위로 나눈다.
-- **3a (이 문서·이번 단위)**: 클라이언트 코어 `OpenAIImageClient.generateImage` — gpt-image-2 `images/generations`. 자체 완결, 단위 테스트로 검증.
-- **3b (다음 단위)**: 레퍼런스 보드 UI 와이어링 — "프롬프트로 생성" → 생성 바이트를 레퍼런스로 추가(권리=AI 생성). AI 작업 큐 예산·동의 게이트 재사용.
+- **3a (완료)**: 클라이언트 코어 `OpenAIImageClient.generateImage` — gpt-image-2 `images/generations`. 자체 완결, 단위 테스트로 검증.
+- **3b (완료)**: 레퍼런스 보드 UI 와이어링 — "프롬프트로 생성" → 생성 바이트를 레퍼런스로 추가(출처=AI 생성). AI 작업 큐 예산·동의 게이트 재사용.
+
+### 3b 구현 결정 (2026-07-13)
+
+레퍼런스 항목은 파일(persistent token) 필수라 raw 바이트만으로는 추가 불가. 생성 바이트를 **UXP `getDataFolder()`**(플러그인 전용 폴더, 네이티브 피커 불필요)에 `ai-gen-<ts>.png`로 쓰고, 그 파일 엔트리를 `addEntries`로 추가한다. 아키텍처 규칙대로 `ReferenceController`는 `generatedImageProvider?: (prompt, size) => Promise<ReferenceFileEntry>` 포트만 선언하고 반환 엔트리를 신뢰하지 않는다(`addEntries`가 파일 형식·중복·토큰 재검증). index.ts가 AI 호출(`generateImage`, 큐·동의 게이트)과 데이터 폴더 쓰기(`writeGeneratedReferenceFile`)를 주입한다. 출처는 "AI 생성 (gpt-image-2)", 태그 "ai-생성" 기본. UI는 레퍼런스 폼에 프롬프트 textarea + size select(1:1/3:2/2:3) + "이미지 생성" 버튼(`.ai-gen-controls` flex — grid 붕괴 회피). 단위 테스트 2개(생성물 추가·빈 프롬프트 가드).
 
 ## 2. 3a 설계 — generateImage
 

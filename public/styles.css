@@ -491,6 +491,29 @@ strong {
   margin-top: 16px;
 }
 
+.ai-gen-field {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+/* UXP에서 display:grid가 0폭으로 붕괴하므로 flex로 배치한다. */
+.ai-gen-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ai-gen-controls .select-wrap {
+  flex: 1 1 auto;
+}
+
+.ai-gen-controls #reference-gen-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .metric-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

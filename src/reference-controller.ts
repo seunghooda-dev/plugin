@@ -16,6 +16,11 @@ export interface ReferenceControllerOptions {
   onError?: (error: unknown, context: string) => void;
   onSelectionChange?: (selectedReferenceIds: readonly string[]) => void;
   enrichPromptProvider?: (prompt: string) => Promise<string>;
+  /**
+   * 프롬프트로 이미지를 생성해 디스크에 쓴 뒤 그 파일 엔트리를 돌려주는 포트.
+   * 반환값은 신뢰하지 않으며 `addEntries`가 다시 검증한다(index.ts가 AI 호출·파일 쓰기를 주입).
+   */
+  generatedImageProvider?: (prompt: string, size: string) => Promise<ReferenceFileEntry>;
   /** Injectable for tests; defaults to the UXP-backed library. */
   library?: ReferenceLibrary;
 }
@@ -82,6 +87,10 @@ export class ReferenceController {
     bind("add-reference-btn", "click", () => this.guard(
       () => this.addStagedFiles(),
       "레퍼런스 추가 실패",
+    ));
+    bind("reference-gen-btn", "click", () => this.guard(
+      () => this.generateReferenceImage(),
+      "AI 이미지 생성 실패",
     ));
     bind("reference-type-select", "change", () => this.updateStagedUI());
   }
@@ -153,6 +162,32 @@ export class ReferenceController {
     this.updateStagedUI();
     this.render();
     this.options.onActivity?.(`${additions.length}개 레퍼런스를 보드에 추가했습니다.`);
+  }
+
+  private async generateReferenceImage(): Promise<void> {
+    if (!this.options.generatedImageProvider) {
+      throw new Error("이미지 생성 콜백이 연결되지 않았습니다. index.ts에서 generatedImageProvider를 주입해 주세요.");
+    }
+    const prompt = valueOf("reference-gen-prompt-input").trim();
+    if (!prompt) {
+      throw new Error("생성할 이미지를 설명하는 프롬프트를 입력해 주세요.");
+    }
+    const size = valueOf("reference-gen-size-select").trim() || "1024x1024";
+    const button = element<HTMLButtonElement>("reference-gen-btn");
+    button.disabled = true;
+    try {
+      // 포트 반환값은 신뢰하지 않는다 — addEntries가 파일 엔트리·형식·중복을 다시 검증한다.
+      const entry = await this.options.generatedImageProvider(prompt, size);
+      const additions = await this.library.addEntries([entry], `[AI 생성] ${prompt}`, {
+        source: "AI 생성 (gpt-image-2)",
+        tags: "ai-생성",
+      });
+      element<HTMLTextAreaElement>("reference-gen-prompt-input").value = "";
+      this.render();
+      this.options.onActivity?.(`AI 이미지 ${additions.length}개를 레퍼런스로 추가했습니다.`);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   private setReferenceSelected(item: ReferenceItem, checked: boolean): void {

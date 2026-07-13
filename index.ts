@@ -41,6 +41,7 @@ import {
   OpenAIImageClient,
   createDefaultOpenAIImageAdapter,
   type ImageEditPreset,
+  type ImageGenerateSize,
 } from "./src/ai";
 import {
   initializeThumbnailController,
@@ -74,7 +75,11 @@ import { SubtitleController, type SubtitleAiRequest, type SubtitleAnalysisReques
 import { resolveAutomationTranscript, subtitleDocumentToAutomationTranscript } from "./src/automation-transcript";
 import { createSubtitleDocument } from "./src/subtitles";
 import { OpenAITextClient, chunkSubtitleCues } from "./src/openai-text";
-import { buildReferencePrompt, type ReferenceItem } from "./src/references";
+import {
+  buildReferencePrompt,
+  type ReferenceFileEntry,
+  type ReferenceItem,
+} from "./src/references";
 import { RecoveryManager } from "./src/recovery";
 import { createRecoveryPanel } from "./src/recovery-panel";
 import { installTextEncodingPolyfill } from "./src/text-encoding";
@@ -885,6 +890,52 @@ async function handleThumbnailAI(
   return { bytes, name: `GPT Image 2 · ${preset}` };
 }
 
+function imageGenerateSize(value: string): ImageGenerateSize | undefined {
+  return value === "1024x1024" || value === "1536x1024" || value === "1024x1536"
+    ? value
+    : undefined;
+}
+
+// 생성 바이트를 플러그인 데이터 폴더에 PNG로 쓰고, 레퍼런스 라이브러리가 토큰화할 수 있는 파일 엔트리를 돌려준다.
+async function writeGeneratedReferenceFile(bytes: Uint8Array): Promise<ReferenceFileEntry> {
+  let uxp: any;
+  try {
+    uxp = require("uxp");
+  } catch {
+    throw new Error("Premiere Pro UXP 환경에서 실행해 주세요.");
+  }
+  const storage = uxp?.storage;
+  const fileSystem = storage?.localFileSystem;
+  if (!fileSystem || typeof fileSystem.getDataFolder !== "function") {
+    throw new Error("UXP 데이터 폴더 API를 사용할 수 없어 생성 이미지를 저장하지 못했습니다.");
+  }
+  const folder = await fileSystem.getDataFolder();
+  const file = await folder.createFile(`ai-gen-${Date.now()}.png`, { overwrite: true });
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  await file.write(buffer, { format: storage?.formats?.binary });
+  return file as ReferenceFileEntry;
+}
+
+async function runReferenceImageGen(prompt: string, size: string): Promise<ReferenceFileEntry> {
+  ensureAiConsent("AI 이미지 생성");
+  const client = imageAIClient ?? createImageAIClient();
+  const genSize = imageGenerateSize(size);
+  const request = genSize ? { prompt, size: genSize } : { prompt };
+  const descriptor = {
+    model: settings.aiModel,
+    kind: "generate",
+    size: genSize ?? "1024x1024",
+    promptHash: deterministicHash(prompt),
+  };
+  const bytes = aiQueueController
+    ? await aiQueueController.run("image", descriptor, () => client.generateImage(request), {
+      estimateUnits: 5,
+      cacheTtlMs: 0,
+    })
+    : await client.generateImage(request);
+  return writeGeneratedReferenceFile(bytes);
+}
+
 async function createPremiereSafeZoneOverlay(
   platform: SocialPlatform,
   role: "content" | "caption",
@@ -999,6 +1050,7 @@ async function bootstrap(): Promise<void> {
       onError: (error, context) => reportError(error, context),
       onSelectionChange: (ids) => activity.add("info", `AI 참고 레퍼런스 ${ids.length}개 선택`),
       enrichPromptProvider: runPromptEnrich,
+      generatedImageProvider: runReferenceImageGen,
     });
     await referenceController.initialize();
   } catch (error) {
