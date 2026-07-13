@@ -514,6 +514,20 @@ strong {
   white-space: nowrap;
 }
 
+.asset-waveform {
+  margin-top: 10px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 6px;
+  padding: 6px;
+  background: rgba(122, 162, 247, 0.06);
+}
+
+.asset-waveform img {
+  display: block;
+  width: 100%;
+  height: 72px;
+}
+
 .metric-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

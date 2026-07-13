@@ -19,6 +19,7 @@ import {
 import type { AssetRightsRegistry } from "./asset-rights";
 import { detectBeats } from "./audio-beats";
 import { parseWavPcm } from "./wav-pcm";
+import { computeWaveformPeaks, renderWaveformSvg } from "./waveform";
 import { element, numberOf, optionalElement, renderEmptyState, setText, toast, valueOf } from "./ui";
 
 const ASSET_ORDER_STORAGE_KEY = "shortflow.assetOrder.v1";
@@ -308,11 +309,27 @@ export function createAssetBrowserPanel(options: AssetBrowserPanelOptions): {
         event.stopPropagation();
         void analyzeBeats(asset).catch((error) => options.onError(error, "비트 분석 실패"));
       });
+      const waveform = document.createElement("span");
+      waveform.className = "asset-preview-action";
+      waveform.textContent = "파형";
+      waveform.setAttribute("role", "button");
+      waveform.setAttribute("tabindex", "0");
+      waveform.setAttribute("aria-label", `${asset.name} 파형 보기`);
+      waveform.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void showWaveform(asset).catch((error) => options.onError(error, "파형 표시 실패"));
+      });
+      waveform.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        void showWaveform(asset).catch((error) => options.onError(error, "파형 표시 실패"));
+      });
       const hint = document.createElement("span");
       hint.className = "drag-hint";
       hint.textContent = "↕";
       hint.title = "드래그해서 목록 순서 이동";
-      actions.append(preview, analyze, hint);
+      actions.append(preview, analyze, waveform, hint);
       card.append(icon, copy, actions);
       card.addEventListener("click", () => {
         selectedAssetId = asset.id;
@@ -451,6 +468,37 @@ export function createAssetBrowserPanel(options: AssetBrowserPanelOptions): {
       );
       toast(`${asset.name}: 템포 불명확`, "info");
     }
+  }
+
+  async function showWaveform(asset: AssetItem): Promise<void> {
+    if (asset.extension.toLocaleLowerCase("en-US") !== ".wav") {
+      options.onActivity(
+        "warning",
+        `${asset.name}: 파형은 WAV만 지원합니다(현재 환경에 오디오 디코더가 없어 WAV만 읽을 수 있습니다).`,
+      );
+      toast("파형은 WAV 파일만 지원합니다.", "warning");
+      return;
+    }
+    const svg = await options.runBusy(`${asset.name} 파형을 그리고 있습니다…`, async () => {
+      const bytes = await assetBytes(asset);
+      const pcm = parseWavPcm(bytes);
+      const peaks = computeWaveformPeaks(pcm.samples, 600);
+      // data-URI <img>는 currentColor를 못 물려받으므로 명시 색을 넣는다.
+      return renderWaveformSvg(peaks, { width: 600, height: 72, color: "#7aa2f7" });
+    });
+    const container = optionalElement<HTMLElement>("asset-waveform");
+    if (container) {
+      // UXP innerHTML은 SVG 렌더가 불안정하므로 data-URI <img>로 그린다(프리뷰와 동일 패턴).
+      const image = document.createElement("img");
+      image.src = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+      image.alt = `${asset.name} 파형`;
+      container.replaceChildren(image);
+      container.hidden = false;
+    }
+    selectedAssetId = asset.id;
+    render();
+    options.renderRights(asset);
+    options.onActivity("success", `파형 표시: ${asset.name}`);
   }
 
   async function insertAsset(asset: AssetItem): Promise<void> {
