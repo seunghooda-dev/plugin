@@ -24,6 +24,7 @@ import {
   readRuntimeMember,
   redactSensitive,
   requireAvailableApi,
+  type CapabilityProbeValue,
   type DiagnosticsAdapter,
   type TelemetryPayload,
   type TelemetryProvider,
@@ -574,6 +575,7 @@ describe("active diagnostic redaction self-check", () => {
     });
     assert.equal(diagnosticRedactionSelfCheck(() => markerOnly), false);
     assert.equal(diagnosticRedactionSelfCheck(() => "not-json"), false);
+    assert.equal(diagnosticRedactionSelfCheck(() => ""), false);
   });
 
   it("throws only a fixed safe error when serialization fails with canaries in the cause", () => {
@@ -982,5 +984,141 @@ describe("TelemetryManager send, retry, and discard", () => {
     const adapter = createDefaultTelemetryAdapter(provider, storage);
     assert.equal(adapter.storage, storage);
     assert.equal(adapter.provider, provider);
+  });
+});
+
+describe("capability probe result shapes", () => {
+  it("treats a probe result without a boolean available flag as unavailable", async () => {
+    const adapter = healthyAdapter();
+    const report = await buildDiagnosticsReport({
+      ...adapter,
+      capabilities: {
+        ...adapter.capabilities,
+        encoder: () => ({ available: "yes" } as unknown as CapabilityProbeValue),
+      },
+    });
+    const check = report.checks.find((item) => item.id === "capability:encoder");
+    assert.equal(check?.available, false);
+    assert.equal(check?.status, "red");
+    assert.match(check?.message ?? "", /사용할 수 없습니다/u);
+    assert.equal(report.compatible, false);
+  });
+
+  it("resolves async probes and bounds probe version and detail strings", async () => {
+    const adapter = healthyAdapter();
+    const report = await buildDiagnosticsReport({
+      getHostInfo: async () => ({ name: "Adobe Premiere Pro", version: "25.6.0" }),
+      getUxpInfo: async () => ({ version: "8.1.0" }),
+      getOsInfo: async () => ({ platform: "Windows" }),
+      getRuntimeInfo: async () => ({ pluginVersion: "1.0.0" }),
+      capabilities: {
+        ...adapter.capabilities,
+        transcript: async () => ({
+          available: true,
+          version: "v".repeat(100),
+          detail: "d".repeat(500),
+        }),
+      },
+    });
+    assert.equal(report.overall, "green");
+    assert.equal(report.compatible, true);
+    const check = report.checks.find((item) => item.id === "capability:transcript");
+    assert.equal(check?.version, "v".repeat(40));
+    assert.equal(check?.message, "d".repeat(240));
+  });
+
+  it("marks every capability failed when the adapter exposes no probes", async () => {
+    const report = await buildDiagnosticsReport({});
+    assert.equal(report.checks.length, 8);
+    assert.equal(report.overall, "red");
+    assert.equal(report.compatible, false);
+    for (const name of ["encoder", "secureStorage", "filesystem"]) {
+      const check = report.checks.find((item) => item.id === `capability:${name}`);
+      assert.equal(check?.available, false);
+      assert.equal(check?.status, "red");
+      assert.match(check?.message ?? "", /확인에 실패했습니다/u);
+    }
+    for (const name of ["transcript", "network"]) {
+      assert.equal(report.checks.find((item) => item.id === `capability:${name}`)?.status, "yellow");
+    }
+  });
+});
+
+describe("redaction of non-string diagnostic values", () => {
+  it("replaces object and array values under sensitive keys entirely", () => {
+    const result = redactSensitive({
+      apiKey: { nested: "secret-object", list: [1, 2] },
+      password: ["hunter2", "hunter3"],
+    }) as Record<string, unknown>;
+    assert.equal(result.apiKey, "<redacted:secret>");
+    assert.equal(result.password, "<redacted:secret>");
+  });
+
+  it("normalizes dates, bigints, and non-finite numbers and drops functions and symbols", () => {
+    const result = redactSensitive({
+      when: new Date(0),
+      broken: new Date(Number.NaN),
+      big: 10n,
+      ratio: Number.POSITIVE_INFINITY,
+      fn: () => "callable",
+      sym: Symbol("marker"),
+    }) as Record<string, unknown>;
+    assert.equal(result.when, "1970-01-01T00:00:00.000Z");
+    assert.equal(result.broken, null);
+    assert.equal(result.big, "10");
+    assert.equal(result.ratio, null);
+    assert.equal("fn" in result, false);
+    assert.equal("sym" in result, false);
+  });
+});
+
+describe("telemetry state hardening", () => {
+  it("ignores stored state with an unknown schema version", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(TELEMETRY_STORAGE_KEY, JSON.stringify({
+      schemaVersion: 2,
+      consent: { enabled: true, version: TELEMETRY_CONSENT_VERSION, updatedAt: 5 },
+      queue: [],
+    }));
+    const manager = new TelemetryManager({ storage });
+    await manager.initialize();
+    assert.equal(manager.enabled, false);
+    assert.equal(manager.queue.length, 0);
+  });
+
+  it("drops persisted queue items when stored consent is disabled", async () => {
+    const storage = new MemoryStorage();
+    const now = 10_000;
+    storage.values.set(TELEMETRY_STORAGE_KEY, JSON.stringify({
+      schemaVersion: 1,
+      consent: { enabled: false, version: TELEMETRY_CONSENT_VERSION, updatedAt: now },
+      queue: [{
+        payload: normalizeTelemetryPayload("plugin_started", {}, { eventId: "evt:orphan", timestamp: now }),
+        attempts: 0,
+        createdAt: now,
+        nextAttemptAt: now,
+      }],
+    }));
+    const manager = new TelemetryManager({ storage }, { now: () => now });
+    await manager.initialize();
+    assert.equal(manager.enabled, false);
+    assert.equal(manager.queue.length, 0);
+  });
+
+  it("rejects a non-boolean opt-in value without touching stored state", async () => {
+    const { manager, storage } = telemetryFixture();
+    await assert.rejects(
+      manager.setOptIn("yes" as never),
+      (error: unknown) => error instanceof DiagnosticsError && error.code === "INVALID_TELEMETRY",
+    );
+    assert.equal(manager.enabled, false);
+    assert.equal(storage.writes, 0);
+  });
+
+  it("refuses to build a default adapter around unusable storage", () => {
+    assert.throws(
+      () => createDefaultTelemetryAdapter(undefined, {} as TelemetryStorage),
+      (error: unknown) => error instanceof DiagnosticsError && error.code === "STORAGE_ERROR",
+    );
   });
 });
