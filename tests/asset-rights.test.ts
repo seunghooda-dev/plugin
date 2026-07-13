@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   ASSET_RIGHTS_SCHEMA_VERSION,
   ASSET_RIGHTS_STORAGE_KEY,
+  MAX_ASSET_RIGHTS_ITEMS,
   AssetRightsError,
   AssetRightsRegistry,
   assetRightsReportToJSON,
@@ -267,3 +268,188 @@ describe("AssetRightsRegistry", () => {
   });
 }
 );
+
+describe("asset rights expiry evaluation", () => {
+  const now = Date.parse("2025-06-15T00:00:00Z");
+
+  function expiryCodes(expiresAt: unknown): string[] {
+    return evaluateAssetRightsRecord(normalizeAssetRightsRecord(validInput({ expiresAt })), now)
+      .map((item) => item.code);
+  }
+
+  it("raises no issues for a fully documented, far-future licensed asset", () => {
+    assert.deepEqual(evaluateAssetRightsRecord(normalizeAssetRightsRecord(validInput()), now), []);
+  });
+
+  it("errors when the license expiry date is already in the past", () => {
+    const issues = evaluateAssetRightsRecord(
+      normalizeAssetRightsRecord(validInput({ expiresAt: "2025-06-01" })),
+      now,
+    );
+    const expired = issues.find((item) => item.code === "rights-expired");
+    assert.equal(expired?.level, "error");
+    assert.deepEqual(issues.map((item) => item.code), ["rights-expired"]);
+  });
+
+  it("warns when the license expires within thirty days", () => {
+    assert.deepEqual(expiryCodes("2025-06-20"), ["rights-expiry-soon"]);
+  });
+
+  it("stays silent when the expiry is more than thirty days away", () => {
+    assert.deepEqual(expiryCodes("2030-01-01"), []);
+  });
+
+  it("warns instead of throwing when a stored expiry cannot be parsed", () => {
+    const record = normalizeAssetRightsRecord(validInput({ expiresAt: "sometime next year" }));
+    assert.equal(record.expiresAt, "sometime next year");
+    assert.deepEqual(expiryCodes("sometime next year"), ["rights-expiry-invalid"]);
+  });
+
+  it("treats a blank expiry as no expiry constraint", () => {
+    const record = normalizeAssetRightsRecord(validInput({ expiresAt: "   " }));
+    assert.equal(record.expiresAt, null);
+    assert.deepEqual(expiryCodes("   "), []);
+  });
+});
+
+describe("asset rights field validation", () => {
+  const now = Date.parse("2025-06-15T00:00:00Z");
+
+  it("flags forbidden commercial use as a blocking error", () => {
+    const issues = evaluateAssetRightsRecord(
+      normalizeAssetRightsRecord(validInput({ commercialUse: "forbidden" })),
+      now,
+    );
+    const forbidden = issues.find((item) => item.code === "rights-commercial-forbidden");
+    assert.equal(forbidden?.level, "error");
+  });
+
+  it("collapses unknown or unrecognized commercial-use states to an unknown warning", () => {
+    assert.equal(normalizeAssetRightsRecord(validInput({ commercialUse: "maybe" })).commercialUse, "unknown");
+    const issues = evaluateAssetRightsRecord(
+      normalizeAssetRightsRecord(validInput({ commercialUse: "maybe" })),
+      now,
+    );
+    assert.equal(issues.some((item) => item.code === "rights-commercial-unknown"), true);
+  });
+
+  it("falls back to the 'other' kind for an unrecognized kind", () => {
+    assert.equal(normalizeAssetRightsRecord(validInput({ kind: "banana" })).kind, "other");
+  });
+
+  it("requires a non-empty asset name", () => {
+    assert.throws(
+      () => normalizeAssetRightsRecord(validInput({ assetName: "   " })),
+      expectRightsError("INVALID_RECORD"),
+    );
+  });
+
+  it("warns on each missing provenance field without blocking export", () => {
+    const record = normalizeAssetRightsRecord(validInput({ source: "", license: "", attribution: "" }));
+    assert.deepEqual(
+      evaluateAssetRightsRecord(record, now).map((item) => item.code),
+      ["rights-source-missing", "rights-license-missing", "rights-attribution-missing"],
+    );
+    assert.equal(createAssetRightsReport([record], now).blocking, false);
+  });
+
+  it("rejects a placeholder record that lacks any stable identity", () => {
+    assert.throws(() => createMissingAssetRightsRecord({}), expectRightsError("INVALID_RECORD"));
+  });
+});
+
+describe("asset rights report guards", () => {
+  const now = Date.parse("2025-06-15T00:00:00Z");
+
+  it("rejects a non-array record set", () => {
+    assert.throws(
+      () => createAssetRightsReport(null as unknown as never[]),
+      expectRightsError("INVALID_RECORD"),
+    );
+  });
+
+  it("rejects a record set beyond the safety cap before normalizing anything", () => {
+    assert.throws(
+      () => createAssetRightsReport(new Array(MAX_ASSET_RIGHTS_ITEMS + 1) as never[]),
+      expectRightsError("INPUT_TOO_LARGE"),
+    );
+  });
+
+  it("deduplicates identical attribution lines across distinct assets", () => {
+    const report = createAssetRightsReport([
+      normalizeAssetRightsRecord(validInput({ assetId: "a", assetName: "a.wav", attribution: "Shared credit" })),
+      normalizeAssetRightsRecord(validInput({ assetId: "b", assetName: "b.wav", attribution: "Shared credit" })),
+    ], now);
+    assert.equal(report.assets.length, 2);
+    assert.deepEqual(report.attributionLines, ["Shared credit"]);
+  });
+
+  it("renders a passing markdown and JSON gate when there are no issues", () => {
+    const report = createAssetRightsReport([normalizeAssetRightsRecord(validInput())], now);
+    const markdown = assetRightsReportToMarkdown(report);
+    assert.match(markdown, /게이트: \*\*통과\*\*/u);
+    assert.match(markdown, /권리 정보 문제가 없습니다/u);
+    const parsed = JSON.parse(assetRightsReportToJSON(report)) as {
+      blocking: boolean;
+      counts: { error: number; warning: number };
+    };
+    assert.equal(parsed.blocking, false);
+    assert.deepEqual(parsed.counts, { error: 0, warning: 0 });
+  });
+});
+
+describe("AssetRightsRegistry edge cases", () => {
+  it("loads a bare persisted array as well as the wrapped document shape", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ASSET_RIGHTS_STORAGE_KEY, JSON.stringify([validInput()]));
+    const registry = new AssetRightsRegistry(storage);
+    assert.equal((await registry.load()).length, 1);
+  });
+
+  it("treats a persisted document without an assets array as empty", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ASSET_RIGHTS_STORAGE_KEY, JSON.stringify({ schemaVersion: 1 }));
+    const registry = new AssetRightsRegistry(storage);
+    assert.deepEqual(await registry.load(), []);
+  });
+
+  it("maps corrupted persisted JSON to a storage error", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ASSET_RIGHTS_STORAGE_KEY, "{ not valid json");
+    const registry = new AssetRightsRegistry(storage);
+    await assert.rejects(registry.load(), expectRightsError("STORAGE_ERROR"));
+  });
+
+  it("surfaces a malformed persisted record as an invalid-record error", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set(ASSET_RIGHTS_STORAGE_KEY, JSON.stringify({ assets: [{ assetId: "only-id" }] }));
+    const registry = new AssetRightsRegistry(storage);
+    await assert.rejects(registry.load(), expectRightsError("INVALID_RECORD"));
+  });
+
+  it("does not persist when removing an unknown asset id", async () => {
+    const storage = new MemoryStorage();
+    const registry = new AssetRightsRegistry(storage);
+    assert.equal(await registry.remove("c:/assets/nope.wav"), false);
+    assert.equal(storage.values.has(ASSET_RIGHTS_STORAGE_KEY), false);
+  });
+
+  it("merges a partial upsert onto the existing record", async () => {
+    const storage = new MemoryStorage();
+    const registry = new AssetRightsRegistry(storage);
+    await registry.upsert(validInput());
+    const merged = await registry.upsert({ assetId: validInput().assetId, notes: "renewed" });
+    assert.equal(merged.notes, "renewed");
+    assert.equal(merged.source, "Artlist");
+    assert.equal(merged.commercialUse, "allowed");
+    assert.equal(registry.items.length, 1);
+  });
+
+  it("maps a clear() storage failure to a storage error", async () => {
+    const storage = new MemoryStorage();
+    const registry = new AssetRightsRegistry(storage);
+    await registry.upsert(validInput());
+    storage.fail = true;
+    await assert.rejects(registry.clear(), expectRightsError("STORAGE_ERROR"));
+  });
+});

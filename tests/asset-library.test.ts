@@ -8,6 +8,7 @@ import {
   AssetLibraryError,
   applyAssetOrder,
   audioAssetCategoryRoot,
+  createDefaultAssetLibraryAdapter,
   createAssetDragPayload,
   parseAudioAssetDragPayload,
   parseAssetDragPayload,
@@ -827,5 +828,254 @@ describe("AssetLibrary open folder", () => {
       library.openAssetFile(asset("forged.wav", "audio", "C:/Outside/forged.wav")),
       (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
     );
+  });
+});
+
+describe("asset preview bytes edges", () => {
+  it("rejects an asset whose synced entry can no longer be read", async () => {
+    await assert.rejects(readAssetPreviewBytes({}, "binary"), /동기화된 파일 entry/u);
+    await assert.rejects(
+      readAssetPreviewBytes({ entry: { read: 123 } }, "binary"),
+      /동기화된 파일 entry/u,
+    );
+  });
+});
+
+describe("filterAssets edges", () => {
+  const items = [
+    asset("bgm.wav", "audio", "/Lib/Music/bgm.wav", { folderPath: "/Lib/Music" }),
+    asset("promo.mp4", "video", "/Lib/Music Videos/promo.mp4", { folderPath: "/Lib/Music Videos" }),
+    asset("hero.png", "image", "/Lib/References/hero.png", { folderPath: "/Lib/References" }),
+  ];
+
+  it("treats kind 'all' as no kind filter", () => {
+    assert.equal(filterAssets(items, { kind: "all" }).length, 3);
+  });
+
+  it("filters down to a single requested kind", () => {
+    assert.deepEqual(filterAssets(items, { kind: "image" }).map((item) => item.name), ["hero.png"]);
+  });
+
+  it("scopes a folder filter to the exact subtree, not to sibling name prefixes", () => {
+    assert.deepEqual(
+      filterAssets(items, { folderPath: "/Lib/Music" }).map((item) => item.name),
+      ["bgm.wav"],
+    );
+  });
+
+  it("requires every whitespace-separated token to match somewhere in the asset", () => {
+    assert.deepEqual(filterAssets(items, "music bgm").map((item) => item.name), ["bgm.wav"]);
+    assert.deepEqual(filterAssets(items, "music png").map((item) => item.name), []);
+  });
+});
+
+describe("audio category derivation edges", () => {
+  it("returns null for blank, rootless, or unknown audio roots", () => {
+    assert.equal(audioAssetCategoryRoot(""), null);
+    assert.equal(audioAssetCategoryRoot("   "), null);
+    assert.equal(audioAssetCategoryRoot("References/Images"), null);
+    assert.equal(audioAssetCategoryRoot("musique/foo"), null);
+  });
+
+  it("resolves nested music and sfx roots case-insensitively", () => {
+    assert.equal(audioAssetCategoryRoot("Music/Chill/Deep"), "music");
+    assert.equal(audioAssetCategoryRoot("sfx\\Impacts\\Metal"), "sfx");
+  });
+
+  it("orders music categories ahead of sfx regardless of folder name", () => {
+    const items = [
+      asset("z.wav", "audio", "C:/A/SFX/aaa/z.wav", { folderPath: "SFX/aaa" }),
+      asset("a.wav", "audio", "C:/A/Music/zzz/a.wav", { folderPath: "Music/zzz" }),
+    ];
+    assert.deepEqual(
+      listAudioAssetCategories(items).map((category) => [category.root, category.folderPath]),
+      [["music", "Music/zzz"], ["sfx", "SFX/aaa"]],
+    );
+  });
+});
+
+describe("asset custom order edges", () => {
+  const items = [
+    asset("a.wav", "audio", "C:/A/SFX/a.wav"),
+    asset("b.wav", "audio", "C:/A/SFX/b.wav"),
+    asset("c.wav", "audio", "C:/A/SFX/c.wav"),
+  ];
+
+  it("normalizes and de-duplicates ids when no allowlist is supplied", () => {
+    assert.deepEqual(
+      normalizeAssetOrder([" C:\\A\\SFX\\B.wav ", "c:/a/sfx/b.wav", "", null, "C:/A/SFX/C.wav"]),
+      ["c:/a/sfx/b.wav", "c:/a/sfx/c.wav"],
+    );
+  });
+
+  it("keeps the existing order when the dragged or target id is not visible", () => {
+    const existing = ["c:/a/sfx/c.wav", "c:/a/sfx/a.wav"];
+    const visible = items.map((item) => item.id);
+    assert.deepEqual(
+      reorderAssetIds(existing, visible, "c:/a/sfx/zzz.wav", "c:/a/sfx/b.wav"),
+      existing,
+    );
+    assert.deepEqual(
+      reorderAssetIds(existing, visible, "c:/a/sfx/a.wav", "c:/a/sfx/zzz.wav"),
+      existing,
+    );
+  });
+
+  it("appends assets that are absent from the saved order after the ordered subset", () => {
+    assert.deepEqual(
+      applyAssetOrder(items, ["c:/a/sfx/does-not-exist.wav", "c:/a/sfx/c.wav"]).map((item) => item.name),
+      ["c.wav", "a.wav", "b.wav"],
+    );
+  });
+
+  it("lands a downward drag into the target slot", () => {
+    assert.deepEqual(
+      reorderAssetIds([], items.map((item) => item.id), "c:/a/sfx/a.wav", "c:/a/sfx/c.wav"),
+      ["c:/a/sfx/b.wav", "c:/a/sfx/c.wav", "c:/a/sfx/a.wav"],
+    );
+  });
+});
+
+describe("sortAssets edges", () => {
+  const items = [
+    asset("clip.mov", "video", "/L/clip.mov", { size: 30 }),
+    asset("song.mp3", "audio", "/L/song.mp3", { size: 10 }),
+    asset("beep.wav", "audio", "/L/beep.wav"),
+    asset("photo.png", "image", "/L/photo.png", { size: 20 }),
+  ];
+
+  it("sorts by kind and then by extension", () => {
+    assert.deepEqual(
+      sortAssets(items, "type").map((item) => item.name),
+      ["song.mp3", "beep.wav", "photo.png", "clip.mov"],
+    );
+  });
+
+  it("sorts assets without a known size ahead of sized ones when ascending", () => {
+    assert.deepEqual(
+      sortAssets(items, { by: "size", direction: "asc" }).map((item) => item.name),
+      ["beep.wav", "song.mp3", "photo.png", "clip.mov"],
+    );
+  });
+
+  it("sorts by normalized path", () => {
+    assert.deepEqual(
+      sortAssets(items, "path").map((item) => item.name),
+      ["beep.wav", "clip.mov", "photo.png", "song.mp3"],
+    );
+  });
+});
+
+describe("asset library adapter assembly", () => {
+  function fakeLocalFileSystem(): Record<string, unknown> {
+    return {
+      getFolder: async () => null,
+      createPersistentToken: async () => "token",
+      getEntryForPersistentToken: async () => null,
+    };
+  }
+
+  it("builds an adapter from an injected UXP module and attaches an optional shell", () => {
+    const localFileSystem = fakeLocalFileSystem();
+    const shell = { openPath: async () => "" };
+    const storage = new MemoryStorage();
+    const adapter = createDefaultAssetLibraryAdapter({
+      uxp: { storage: { localFileSystem }, shell },
+      storage,
+      allowFolderLaunch: true,
+    });
+
+    assert.equal(adapter.localFileSystem, localFileSystem);
+    assert.equal(adapter.storage, storage);
+    assert.equal(adapter.shell, shell);
+    assert.equal(adapter.allowFolderLaunch, true);
+  });
+
+  it("omits folder-launch permission and shell unless they are provided", () => {
+    const adapter = createDefaultAssetLibraryAdapter({
+      uxp: { storage: { localFileSystem: fakeLocalFileSystem() } },
+      storage: new MemoryStorage(),
+    });
+    assert.equal(adapter.allowFolderLaunch, undefined);
+    assert.equal(adapter.shell, undefined);
+  });
+
+  it("fails with a clear error when the UXP file system is unavailable", () => {
+    assert.throws(
+      () => createDefaultAssetLibraryAdapter({ uxp: { storage: {} }, storage: new MemoryStorage() }),
+      (error: unknown) => assertLibraryError(error, "UNSUPPORTED_API"),
+    );
+  });
+
+  it("requires both a file system and a storage adapter", () => {
+    assert.throws(
+      () => new AssetLibrary({ storage: new MemoryStorage() } as unknown as AssetLibraryAdapter),
+      (error: unknown) => assertLibraryError(error, "UNSUPPORTED_API"),
+    );
+  });
+});
+
+describe("AssetLibrary open folder edges", () => {
+  it("rejects a picker file that is not an audio asset", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    adapter.localFileSystem.getFileForOpening = async () => mockFile("cover.png", "C:/Assets/cover.png");
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRootFolder(),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+  });
+
+  it("rejects a picker result that is a folder rather than a file", async () => {
+    const root = mockFolder("Assets", "C:/Assets");
+    const adapter = createAdapter(root);
+    adapter.localFileSystem.getFileForOpening = async () => mockFolder("Nested", "C:/Assets/Nested");
+    const library = new AssetLibrary(adapter);
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRootFolder(),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+  });
+
+  it("rejects opening a folder that has no resolvable system path", async () => {
+    const root = mockFolder("Assets", "");
+    const library = new AssetLibrary(createAdapter(root));
+    await library.selectRoot();
+
+    await assert.rejects(
+      library.openRootFolder(),
+      (error: unknown) => assertLibraryError(error, "INVALID_ROOT"),
+    );
+  });
+
+  it("reports UNSUPPORTED_API when previewing a synced file without a shell", async () => {
+    const clip = mockFile("hook.wav", "C:/Assets/SFX/hook.wav");
+    const root = mockFolder("Assets", "C:/Assets", [mockFolder("SFX", "C:/Assets/SFX", [clip])]);
+    const library = new AssetLibrary(createAdapter(root));
+    await library.selectRoot();
+    const [synced] = await library.sync();
+
+    await assert.rejects(
+      library.openAssetFile(synced!),
+      (error: unknown) => assertLibraryError(error, "UNSUPPORTED_API"),
+    );
+  });
+});
+
+describe("AssetLibrary sync stats", () => {
+  it("returns an isolated copy of the last sync stats", async () => {
+    const root = mockFolder("Assets", "C:/Assets", [mockFile("hook.wav", "C:/Assets/hook.wav")]);
+    const library = new AssetLibrary(createAdapter(root));
+    await library.selectRoot();
+    await library.sync();
+
+    const stats = library.lastSyncStats;
+    stats.supportedAssets = 999;
+    assert.equal(library.lastSyncStats.supportedAssets, 1);
   });
 });
