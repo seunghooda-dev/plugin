@@ -159,6 +159,12 @@ describe("sanitizeSequenceName", () => {
     const result = sanitizeSequenceName("가".repeat(500));
     assert.equal(result.length, 120);
   });
+
+  it("falls back to the default limit for an invalid maxLength", () => {
+    assert.equal(sanitizeSequenceName("가".repeat(500), 0).length, 120);
+    assert.equal(sanitizeSequenceName("가".repeat(500), Number.NaN).length, 120);
+    assert.equal(sanitizeSequenceName("abcdefg", 5.9), "abcde");
+  });
 });
 
 describe("sanitizeFileName", () => {
@@ -219,6 +225,19 @@ describe("sanitizeFileName", () => {
     assert.ok(result.length <= 24);
     assert.ok(result.length > 0);
     assert.doesNotMatch(result, /[. ]$/u);
+  });
+
+  it("keeps the extension when truncating a long name", () => {
+    const result = sanitizeFileName(`${"a".repeat(100)}.mp4`, 24);
+    assert.equal(result.length, 24);
+    assert.ok(result.endsWith(".mp4"));
+  });
+
+  it("drops an extension that would not fit the limit", () => {
+    const result = sanitizeFileName(`clip.${"x".repeat(40)}`, 10);
+    assert.ok(result.length <= 10);
+    assert.ok(result.length > 0);
+    assert.equal(result.includes("."), false);
   });
 });
 
@@ -399,6 +418,39 @@ describe("resolveTimeRange", () => {
     assert.equal(range.duration, 0);
     assert.ok(Number.isFinite(range.duration));
   });
+
+  it("falls back to the full sequence when clamped in/out points collapse", () => {
+    assert.deepEqual(
+      resolveTimeRange({
+        mode: "inout",
+        sequenceEnd: 100,
+        inPoint: 150,
+        outPoint: 200,
+      }),
+      { start: 0, end: 100, duration: 100, usedFallback: true },
+    );
+  });
+
+  it("falls back to the full sequence when the playhead is missing", () => {
+    assert.deepEqual(
+      resolveTimeRange({ mode: "playhead", sequenceEnd: 50 }),
+      { start: 0, end: 50, duration: 50, usedFallback: true },
+    );
+  });
+
+  it("clamps a negative playhead to the sequence start", () => {
+    assert.deepEqual(
+      resolveTimeRange({ mode: "playhead", sequenceEnd: 50, playhead: -10 }),
+      { start: 0, end: 50, duration: 50, usedFallback: false },
+    );
+  });
+
+  it("ignores a non-positive maxDuration", () => {
+    assert.deepEqual(
+      resolveTimeRange({ mode: "full", sequenceEnd: 40, maxDuration: 0 }),
+      { start: 0, end: 40, duration: 40, usedFallback: false },
+    );
+  });
 });
 
 describe("markerToSegment", () => {
@@ -476,6 +528,58 @@ describe("markerToSegment", () => {
       null,
     );
   });
+
+  it("returns null when the sequence has no usable duration", () => {
+    for (const sequenceEnd of [0, -10, Number.NaN]) {
+      assert.equal(
+        markerToSegment(
+          { name: "X", comments: "", start: 0, duration: 5, index: 0 },
+          sequenceEnd,
+          10,
+        ),
+        null,
+      );
+    }
+  });
+
+  it("names an unnamed marker from its 1-based index", () => {
+    const segment = markerToSegment(
+      { name: "", comments: "", start: 2, duration: 4, index: 4 },
+      60,
+      10,
+    );
+
+    assert.ok(segment);
+    assert.equal((segment as unknown as MarkerSegmentView).name, "Short 5");
+  });
+
+  it("clamps a negative marker start to zero before measuring the duration", () => {
+    const segment = markerToSegment(
+      { name: "Early", comments: "", start: -5, duration: 10, index: 0 },
+      60,
+      10,
+    );
+
+    assert.ok(segment);
+    const view = segment as unknown as MarkerSegmentView;
+    assert.equal(view.start, 0);
+    assert.equal(view.end, 10);
+    assert.equal(view.duration, 10);
+  });
+
+  it("normalizes a non-integer index and falls back to one second for an invalid default duration", () => {
+    const segment = markerToSegment(
+      { name: "Beat", comments: "", start: 5, duration: 0, index: 2.5 },
+      60,
+      Number.NaN,
+    );
+
+    assert.ok(segment);
+    const view = segment as unknown as MarkerSegmentView;
+    assert.equal(view.index, 0);
+    assert.equal(view.end, 6);
+    assert.equal(view.duration, 1);
+  });
 });
 
 describe("formatDuration", () => {
@@ -493,6 +597,11 @@ describe("formatDuration", () => {
   it("adds an hour field only when needed", () => {
     assert.equal(formatDuration(3599), "59:59");
     assert.equal(formatDuration(3661), "1:01:01");
+  });
+
+  it("rolls exactly one hour into the hour field", () => {
+    assert.equal(formatDuration(3600), "1:00:00");
+    assert.equal(formatDuration(3600.9), "1:00:00");
   });
 
   it("clamps negative and non-finite values to zero", () => {
