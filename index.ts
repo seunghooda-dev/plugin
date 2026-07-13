@@ -91,6 +91,7 @@ import { buildReferencePrompt, type ReferenceItem } from "./src/references";
 import { RecoveryManager } from "./src/recovery";
 import { createRecoveryPanel } from "./src/recovery-panel";
 import { installTextEncodingPolyfill } from "./src/text-encoding";
+import { createAiSettingsPanel } from "./src/ai-settings-panel";
 import { createDiagnosticsPanel } from "./src/diagnostics-panel";
 import {
   ActivityLog,
@@ -1310,21 +1311,6 @@ function setupAssetDropZone(): void {
   });
 }
 
-function setConnectionStatus(
-  id: "ai-status" | "speech-status",
-  status: "idle" | "connected" | "error",
-  message: string,
-): void {
-  const target = optionalElement<HTMLElement>(id);
-  if (!target) return;
-  target.classList.toggle("is-idle", status === "idle");
-  target.classList.toggle("is-connected", status === "connected");
-  target.classList.toggle("is-error", status === "error");
-  target.dataset.status = status;
-  const label = target.querySelector<HTMLElement>("span:last-child");
-  if (label) label.textContent = message;
-}
-
 function createImageAIClient(): OpenAIImageClient {
   const current = syncSettingsFromUI();
   imageAIClient = new OpenAIImageClient(createDefaultOpenAIImageAdapter(), {
@@ -1333,54 +1319,12 @@ function createImageAIClient(): OpenAIImageClient {
   return imageAIClient;
 }
 
-async function initializeAISettings(): Promise<void> {
-  try {
-    const client = createImageAIClient();
-    const storedKey = await client.getApiKey();
-    const input = optionalElement<HTMLInputElement>("ai-api-key-input");
-    if (input) input.placeholder = storedKey ? "저장된 API 키 유지" : "API 키 입력";
-    const state = storedKey ? "connected" : "idle";
-    const message = storedKey ? "API 키 저장됨" : "API 키 필요";
-    setConnectionStatus("ai-status", state, message);
-    setConnectionStatus("speech-status", state, message);
-  } catch (error) {
-    setConnectionStatus("ai-status", "error", "AI 설정 오류");
-    setConnectionStatus("speech-status", "error", "AI 설정 오류");
-    reportError(error, "AI 설정 초기화 실패");
-  }
-}
-
-async function handleAISave(): Promise<void> {
-  const client = createImageAIClient();
-  const input = element<HTMLInputElement>("ai-api-key-input");
-  if (input.value.trim()) {
-    await client.setApiKey(input.value);
-    input.value = "";
-  }
-  const hasKey = Boolean(await client.getApiKey());
-  input.placeholder = hasKey ? "저장된 API 키 유지" : "API 키 입력";
-  setConnectionStatus("ai-status", hasKey ? "connected" : "idle", hasKey ? "설정 저장됨" : "API 키 필요");
-  setConnectionStatus("speech-status", hasKey ? "connected" : "idle", hasKey ? "AI 연결 준비됨" : "AI 설정 필요");
-  activity.add("success", "AI 연결 설정을 저장했습니다. API 키는 UXP 보안 저장소에만 보관됩니다.");
-  toast("AI 설정을 저장했습니다.", "success");
-}
-
-async function handleAITest(): Promise<void> {
-  ensureAiConsent("AI 연결 테스트");
-  const client = createImageAIClient();
-  const input = element<HTMLInputElement>("ai-api-key-input");
-  if (input.value.trim()) {
-    await client.setApiKey(input.value);
-    input.value = "";
-  }
-  setConnectionStatus("ai-status", "idle", "연결 확인 중…");
-  await client.testConnection();
-  input.placeholder = "저장된 API 키 유지";
-  setConnectionStatus("ai-status", "connected", "GPT Image 2 연결됨");
-  setConnectionStatus("speech-status", "connected", "AI 연결 준비됨");
-  activity.add("success", "OpenAI GPT Image 2 연결 테스트를 통과했습니다.");
-  toast("AI 연결이 정상입니다.", "success");
-}
+const aiSettingsPanel = createAiSettingsPanel({
+  createClient: createImageAIClient,
+  ensureConsent: () => ensureAiConsent("AI 연결 테스트"),
+  onActivity: (level, message) => activity.add(level, message),
+  onError: reportError,
+});
 
 function imagePreset(value: string): ImageEditPreset {
   if (["basic", "vivid", "upscale", "remove-bg", "chat"].includes(value)) {
@@ -1510,8 +1454,8 @@ function bindCoreEvents(): void {
   bind("asset-category-select", "change", () => renderAssets());
   bind("open-asset-category-btn", "click", guarded(handleOpenAssetCategory, "선택 폴더 열기 실패"));
   bind("asset-rights-save-btn", "click", guarded(handleSaveAssetRights, "에셋 권리 정보 저장 실패"));
-  bind("ai-save-btn", "click", guarded(handleAISave, "AI 설정 저장 실패"));
-  bind("ai-test-btn", "click", guarded(handleAITest, "AI 연결 테스트 실패"));
+  bind("ai-save-btn", "click", guarded(() => aiSettingsPanel.save(), "AI 설정 저장 실패"));
+  bind("ai-test-btn", "click", guarded(() => aiSettingsPanel.test(), "AI 연결 테스트 실패"));
   bind("clear-log-btn", "click", () => activity.clear());
   bind("run-diagnostics-btn", "click", guarded(() => diagnosticsPanel.run(), "시스템 진단 실패"));
   bind("export-diagnostics-btn", "click", guarded(() => diagnosticsPanel.exportJson(), "진단 JSON 저장 실패"));
@@ -1564,7 +1508,7 @@ async function bootstrap(): Promise<void> {
     referenceController = null;
     reportError(error, "레퍼런스 보드 초기화 실패");
   }
-  await initializeAISettings();
+  await aiSettingsPanel.initialize();
   try {
     aiQueueController = new AIQueueController({
       onActivity: (message) => activity.add("success", message),
