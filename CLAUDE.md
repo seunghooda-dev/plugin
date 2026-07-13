@@ -49,6 +49,14 @@ Checkpoint commits require a passing `npm run check` first — never commit a re
 
 Fable는 가장 똑똑하지만 Opus보다 느리고 비용이 약 2배이므로, 위 두 경우가 아니면 쓰지 않는다. 문제를 해결하면 다시 Opus로 돌아온다.
 
+## 문맥·토큰 효율 (Context & token efficiency)
+
+모델은 매 턴마다 그때까지 쌓인 대화 전체를 입력으로 다시 읽는다. 그래서 토큰 비용은 산출물의 양보다 문맥 크기와 왕복 횟수에 더 좌우된다. 다음을 기본으로 삼는다.
+
+- 작업 단위로 문맥을 정리한다. 무관한 새 작업으로 넘어갈 때는 /clear로 초기화하고, 같은 작업이 길어져 기록이 비대해지면 /compact로 요약 압축한다. 단 한 작업 도중에는 비우지 않는다 — 진행 맥락을 잃으면 다시 파악하느라 오히려 더 든다.
+- 중요한 결정과 그 근거는 대화에만 두지 말고 CLAUDE.md와 PDCA 문서(docs/01-plan, docs/02-design, docs/03-analysis, docs/.pdca-status.json)에 기록한다. 세션을 초기화해도 이 문서만 다시 읽으면 핵심 맥락이 복원된다.
+- 무거운 탐색(대량 파일 읽기, 넓은 검색)은 메인 세션에서 직접 하지 말고 서브에이전트에 위임한다. 서브에이전트는 가벼운 새 문맥에서 일하고 작은 결과만 돌려주므로 메인 세션의 문맥이 비대해지지 않는다.
+
 ## Things not to carry over from other CEP/UXP reference projects
 
 If porting ideas from older Adobe CEP-based plugins: don't reintroduce QE DOM dependency, filename-only project-item lookup, or single-point track search with `overwriteClip`. This project identifies media by file path, checks the full insertion range for conflicts, checks locked tracks, and rolls back on failure (see `src/recovery.ts`, `src/premiere.ts`).
