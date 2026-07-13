@@ -2703,17 +2703,25 @@ textarea {
   color: var(--danger);
 }
 
+/* Premiere 26.3 UXP가 이 grid들을 0×0으로 붕괴시켜 썸네일 탭 입력 전체가 안 보이던
+   Host 버그(§25-d, 전체 탭 스윕으로 발견)를 flex 등가 레이아웃으로 해결한다. */
 .thumbnail-workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 238px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: start;
   gap: 12px;
 }
 
 .thumbnail-main-column {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  flex: 1 1 300px;
   gap: 12px;
+}
+
+.thumbnail-workspace > .thumbnail-inspector {
+  flex: 1 1 238px;
 }
 
 .thumbnail-toolbar {
@@ -2968,7 +2976,8 @@ input[type="range"] {
 }
 
 .effect-stack {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -2994,7 +3003,10 @@ input[type="range"] {
   flex: 0 0 auto;
 }
 
-input[type="color"] {
+/* UXP는 input[type="color"] 속성 선택자를 무시하므로(§25-d) color 입력이 bare input의
+   width:100%를 받아 flex:0 0 auto 부모 안에서 0으로 붕괴한다. 클래스 기반으로 고정 크기를 준다. */
+input[type="color"],
+.color-field input {
   width: 33px;
   height: 33px;
   padding: 3px;

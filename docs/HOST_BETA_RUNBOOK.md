@@ -589,6 +589,14 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
 - **부수 통과**: B-4(25-6, 편집 시 분석 결과 무효화)는 API와 무관하게 라이브 통과.
 - **후속 개선(2026-07-13)**: quota 429가 2회 재시도되며 매 요청 ~40초씩 지연되는 것을 관찰해, `insufficient_quota`를 rate limit과 분리해 **재시도 없이 즉시 실패**하도록 수정(`src/openai-text.ts` `isRetryableHttpStatus`, `src/job-queue.ts` `defaultTransientError`가 명시적 `retryable:false` 존중). Mock 테스트 3건 추가. **quota 초과 계정을 픽스처로 라이브 재검증**: 동일 클릭이 수정 전 40초·fetch 3회 → 수정 후 **1.0초·fetch 1회**로 즉시 실패. `rate_limit_exceeded` 429는 계속 재시도 유지.
 
+### 25-d. 전체 탭 입력 렌더 스윕 — 썸네일 탭 grid 붕괴 발견·수정(2026-07-13)
+
+§25-b(입력 0×0) 수정이 다른 탭에도 남아 있는지 CDP로 12개 탭 전체의 input/select/textarea 렌더 크기를 스윕한 결과, **썸네일 탭에서만 표시 입력 대부분이 0×0**으로 남아 있었다(다른 11개 탭 정상). 조상 체인 실측으로 붕괴 컨테이너를 특정했다.
+
+- `.thumbnail-workspace`(2열 grid), `.thumbnail-main-column`(단일열 grid), `.effect-stack`(grid) 세 컨테이너가 UXP에서 0px로 붕괴 → 내부 입력 전부 연쇄 0×0. asset/speech/automation workspace grid는 같은 환경에서 정상이라(스윕 근거) 관찰된 이 셋만 flex 등가로 전환했다.
+- `.color-field` 안의 color 입력은 추가로 고정 크기(33×33)를 클래스 기반 규칙으로 부여(그림자·글로우 색상). 수정 후 실측 33×33 확인.
+- 재스윕: 표시 입력 0×0 잔여 0건. 남는 `thumb-ai-preset-select`·`thumb-ai-prompt-input`은 `.thumb-ai-card { display:none }`(내부 베타에서 숨긴 썸네일 AI)이라 의도된 0×0. `npm run check` 1063/1063.
+
 즉시 차단 조건(신규 기능):
 
 - 읽기 전용 분석 3종 중 하나라도 자막 문서를 변경(cue/word/timing 변동)하면 즉시 차단
