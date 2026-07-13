@@ -11,6 +11,10 @@ import {
   type SpeechFileAdapter,
   type SpeechFileEntry,
   type SpeechFolderEntry,
+  type SpeechOutputFolder,
+  type SpeechOutputFormat,
+  type TranscriptFormat,
+  type TtsAudioFormat,
   classifySttInput,
   safeSpeechFilename,
   speechBytes,
@@ -698,5 +702,155 @@ describe("collision-free binary and text writes", () => {
       manager.writeTranscript("text", "captions", "txt"),
       (error) => assertSpeechError(error, "PERMISSION_DENIED"),
     );
+  });
+});
+
+describe("output format and filename edge cases", () => {
+  it("strips query and fragment suffixes before classifying an STT path", () => {
+    assert.equal(classifySttInput("voice.MP3#fragment"), "mp3");
+    assert.equal(classifySttInput("C:\\media\\clip.wav?cache=1"), "wav");
+  });
+
+  it("normalizes dotted and uppercase output formats", () => {
+    assert.equal(safeSpeechFilename("voice", " .WAV " as unknown as SpeechOutputFormat), "voice.wav");
+  });
+
+  it("rejects unsupported output formats with INVALID_FORMAT", () => {
+    assert.throws(
+      () => safeSpeechFilename("voice", "exe" as unknown as SpeechOutputFormat),
+      (error) => assertSpeechError(error, "INVALID_FORMAT"),
+    );
+  });
+
+  it("falls back to the shortflow stem when the requested name is only separators", () => {
+    assert.equal(safeSpeechFilename("../..", "mp3"), "shortflow.mp3");
+    assert.equal(safeSpeechFilename("////", "mp3"), "shortflow.mp3");
+  });
+
+  it("fails with INVALID_FILENAME when every numbered candidate collides", () => {
+    const existing = [
+      "voice.wav",
+      ...Array.from({ length: 9_999 }, (_value, index) => `voice (${index + 2}).wav`),
+    ];
+    assert.throws(
+      () => uniqueSpeechFilename("voice", "wav", existing),
+      (error) => assertSpeechError(error, "INVALID_FILENAME"),
+    );
+  });
+});
+
+describe("SpeechFileManager write and restore edge cases", () => {
+  it("rejects cross-kind output formats before touching any folder", async () => {
+    const { adapter } = createHarness();
+    const manager = new SpeechFileManager(adapter);
+    await assert.rejects(
+      manager.writeTtsAudio([1], "voice", "txt" as unknown as TtsAudioFormat),
+      (error) => assertSpeechError(error, "INVALID_FORMAT"),
+    );
+    await assert.rejects(
+      manager.writeTranscript("text", "captions", "wav" as unknown as TranscriptFormat),
+      (error) => assertSpeechError(error, "INVALID_FORMAT"),
+    );
+  });
+
+  it("maps a storage read failure during folder restore to STORAGE_ERROR", async () => {
+    const { adapter, storage } = createHarness();
+    storage.getError = new Error("storage io failure");
+    await assert.rejects(
+      new SpeechFileManager(adapter).restoreOutputFolder("tts"),
+      (error) => assertSpeechError(error, "STORAGE_ERROR"),
+    );
+  });
+
+  it("keeps the write queue alive after a failed write", async () => {
+    const { adapter, state } = createHarness();
+    const folder = new MockFolder();
+    state.selectedFolder = folder;
+    const manager = new SpeechFileManager(adapter);
+    await manager.selectOutputFolder("tts");
+    folder.getEntriesError = new Error("folder listing locked");
+    await assert.rejects(
+      manager.writeTtsAudio([1], "voice", "wav"),
+      (error) => assertSpeechError(error, "FILESYSTEM_ERROR"),
+    );
+    folder.getEntriesError = null;
+    assert.equal((await manager.writeTtsAudio([2], "voice", "wav")).name, "voice.wav");
+  });
+
+  it("counts subfolder names when avoiding output collisions", async () => {
+    const { adapter, state } = createHarness();
+    const occupied = new MockFolder("voice.wav", "C:\\Out\\voice.wav");
+    const folder = new MockFolder("Out", "C:\\Out", [occupied]);
+    state.selectedFolder = folder;
+    const manager = new SpeechFileManager(adapter);
+    await manager.selectOutputFolder("tts");
+    assert.equal((await manager.writeTtsAudio([1], "voice", "wav")).name, "voice (2).wav");
+  });
+
+  it("fails with WRITE_FAILED when the created entry has no write function", async () => {
+    const { adapter } = createHarness();
+    const manager = new SpeechFileManager(adapter);
+    const entryWithoutWrite: SpeechFileEntry = {
+      name: "voice.wav",
+      nativePath: "C:\\Out\\voice.wav",
+      isFile: true,
+    };
+    const snapshot: SpeechOutputFolder = {
+      kind: "tts",
+      token: "snapshot-token",
+      name: "Out",
+      nativePath: "C:\\Out",
+      entry: {
+        name: "Out",
+        nativePath: "C:\\Out",
+        isFolder: true,
+        async getEntries() { return []; },
+        async createFile() { return entryWithoutWrite; },
+      },
+    };
+    await assert.rejects(
+      manager.writeTtsAudio([1], "voice", "wav", snapshot),
+      (error) => assertSpeechError(error, "WRITE_FAILED"),
+    );
+  });
+
+  it("maps a mid-write disk failure to FILESYSTEM_ERROR that names the file", async () => {
+    const { adapter, state } = createHarness();
+    const folder = new MockFolder();
+    state.selectedFolder = folder;
+    const manager = new SpeechFileManager(adapter);
+    await manager.selectOutputFolder("stt");
+    const original = folder.createFile.bind(folder);
+    folder.createFile = async (name, options) => {
+      const file = await original(name, options);
+      file.writeError = new Error("disk full");
+      return file;
+    };
+    await assert.rejects(
+      manager.writeTranscript("text", "captions", "txt"),
+      (error) => {
+        assertSpeechError(error, "FILESYSTEM_ERROR");
+        assert.match((error as SpeechFileError).message, /captions\.txt/u);
+        return true;
+      },
+    );
+  });
+
+  it("clears folder tokens with the setItem fallback when storage lacks removeItem", async () => {
+    const { adapter, storage, state } = createHarness();
+    state.selectedFolder = new MockFolder();
+    const values = storage.values;
+    const manager = new SpeechFileManager({
+      ...adapter,
+      storage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => { values.set(key, value); },
+      },
+    });
+    await manager.selectOutputFolder("tts");
+    assert.equal(values.get(TTS_OUTPUT_FOLDER_TOKEN_KEY), "folder-token-1");
+    await manager.clearOutputFolder("tts");
+    assert.equal(values.get(TTS_OUTPUT_FOLDER_TOKEN_KEY), "");
+    assert.equal(await manager.restoreOutputFolder("tts"), null);
   });
 });
