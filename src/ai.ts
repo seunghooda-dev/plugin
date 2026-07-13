@@ -27,6 +27,14 @@ export interface ImageEditRequest {
   timeoutMs?: number;
 }
 
+export type ImageGenerateSize = "1024x1024" | "1536x1024" | "1024x1536";
+
+export interface ImageGenerateRequest {
+  prompt: string;
+  size?: ImageGenerateSize;
+  timeoutMs?: number;
+}
+
 export interface SecureStorageAdapter {
   setItem(key: string, value: Uint8Array): Promise<any> | any;
   getItem(key: string): Promise<any> | any;
@@ -134,6 +142,27 @@ export function buildEditPrompt(
     throw new AIClientError("INVALID_INPUT", "지원하지 않는 이미지 편집 프리셋입니다.");
   }
   return userPrompt ? `${presetPrompt} User request: ${userPrompt}` : presetPrompt;
+}
+
+const GENERATE_SIZES: readonly ImageGenerateSize[] = ["1024x1024", "1536x1024", "1024x1536"];
+
+function normalizeGenerateSize(size: ImageGenerateSize | undefined): ImageGenerateSize {
+  if (size === undefined) return "1024x1024";
+  if (!GENERATE_SIZES.includes(size)) {
+    throw new AIClientError(
+      "INVALID_INPUT",
+      "지원하는 이미지 크기(1024x1024, 1536x1024, 1024x1536)를 선택해 주세요.",
+    );
+  }
+  return size;
+}
+
+function buildGeneratePrompt(prompt: string): string {
+  const cleaned = cleanPrompt(prompt);
+  if (!cleaned) {
+    throw new AIClientError("INVALID_INPUT", "생성할 이미지를 설명하는 프롬프트를 입력해 주세요.");
+  }
+  return cleaned;
 }
 
 function isPrivateIpv4(hostname: string): boolean {
@@ -480,6 +509,46 @@ export class OpenAIImageClient {
       },
       apiKey,
       request.timeoutMs ?? this.timeoutMs,
+    );
+    if (!response?.ok) {
+      await this.throwApiError(response, apiKey);
+    }
+
+    let payload: any;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new AIClientError("INVALID_RESPONSE", "OpenAI 이미지 응답을 JSON으로 읽지 못했습니다.");
+    }
+    const base64 = payload?.data?.[0]?.b64_json;
+    if (typeof base64 !== "string") {
+      throw new AIClientError("INVALID_RESPONSE", "OpenAI 응답에 b64_json 이미지가 없습니다.");
+    }
+    return assertPngResponse(decodeBase64(base64));
+  }
+
+  async generateImage(request: ImageGenerateRequest): Promise<Uint8Array> {
+    const prompt = buildGeneratePrompt(request?.prompt);
+    const size = normalizeGenerateSize(request?.size);
+    const apiKey = await this.requireApiKey();
+    const body = JSON.stringify({
+      model: OPENAI_IMAGE_MODEL,
+      prompt,
+      size,
+      quality: "high",
+      output_format: "png",
+      n: 1,
+    });
+
+    const response = await this.fetchWithRetry(
+      `${this.endpoint}/images/generations`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body,
+      },
+      apiKey,
+      request?.timeoutMs ?? this.timeoutMs,
     );
     if (!response?.ok) {
       await this.throwApiError(response, apiKey);

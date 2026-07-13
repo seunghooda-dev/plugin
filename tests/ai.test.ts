@@ -595,6 +595,70 @@ describe("client construction and secure storage failure paths", () => {
   });
 });
 
+describe("generateImage text-to-image", () => {
+  it("requires a stored API key", async () => {
+    const { adapter } = createAdapter();
+    const client = new OpenAIImageClient(adapter);
+    await assert.rejects(
+      client.generateImage({ prompt: "a red fox" }),
+      expectCode("MISSING_API_KEY"),
+    );
+  });
+  it("rejects an empty prompt", async () => {
+    const { client } = await readyClient();
+    await assert.rejects(client.generateImage({ prompt: "   " }), expectCode("INVALID_INPUT"));
+  });
+  it("rejects an over-length prompt", async () => {
+    const { client } = await readyClient();
+    await assert.rejects(
+      client.generateImage({ prompt: "a".repeat(4_097) }),
+      expectCode("INVALID_INPUT"),
+    );
+  });
+  it("rejects an unsupported size", async () => {
+    const { client } = await readyClient();
+    await assert.rejects(
+      client.generateImage({ prompt: "a red fox", size: "512x512" as never }),
+      expectCode("INVALID_INPUT"),
+    );
+  });
+  it("posts the exact generation fields as JSON and returns PNG bytes", async () => {
+    const { client, calls } = await readyClient();
+    const result = await client.generateImage({ prompt: "  a <red> fox  " });
+    assert.deepEqual([...result], PNG_SIGNATURE);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, `${DEFAULT_OPENAI_ENDPOINT}/images/generations`);
+    assert.equal(calls[0]?.init.method, "POST");
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    assert.equal(headers["Content-Type"], "application/json");
+    assert.equal(headers.Authorization, `Bearer ${API_KEY}`);
+    const body = JSON.parse(calls[0]?.init.body as string) as Record<string, unknown>;
+    assert.equal(body.model, OPENAI_IMAGE_MODEL);
+    assert.equal(body.prompt, "a red fox"); // cleanPrompt strips angle brackets and trims
+    assert.equal(body.size, "1024x1024"); // default
+    assert.equal(body.output_format, "png");
+    assert.equal(body.n, 1);
+  });
+  it("honors a provided size", async () => {
+    const { client, calls } = await readyClient();
+    await client.generateImage({ prompt: "a red fox", size: "1536x1024" });
+    const body = JSON.parse(calls[0]?.init.body as string) as Record<string, unknown>;
+    assert.equal(body.size, "1536x1024");
+  });
+  it("rejects a non-PNG response even when b64_json is present", async () => {
+    const { client } = await readyClient(async () => mockResponse(200, { data: [{ b64_json: "AQID" }] }));
+    await assert.rejects(client.generateImage({ prompt: "a red fox" }), expectCode("INVALID_RESPONSE"));
+  });
+  it("rejects a response without b64_json", async () => {
+    const { client } = await readyClient(async () => mockResponse(200, { data: [{}] }));
+    await assert.rejects(client.generateImage({ prompt: "a red fox" }), expectCode("INVALID_RESPONSE"));
+  });
+  it("surfaces an API error with the status", async () => {
+    const { client } = await readyClient(async () => mockResponse(400, { error: { message: "bad prompt" } }));
+    await assert.rejects(client.generateImage({ prompt: "a red fox" }), expectCode("API_ERROR"));
+  });
+});
+
 describe("editImage input edge shapes", () => {
   it("rejects a non-array images payload", async () => {
     const { client } = await readyClient();
