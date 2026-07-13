@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  MAX_AUTOMATION_MARKERS,
   MAX_AUTOMATION_SEGMENTS,
+  MAX_AUTOMATION_SEGMENT_TEXT_LENGTH,
+  MAX_PUNCH_KEYWORDS,
+  assertAutomationMarkerBudget,
   buildPunchKeyframes,
   createAutomationAnalysisFingerprint,
   normalizeAutomationAnalysisSettings,
@@ -91,6 +95,52 @@ describe("automation analysis fingerprint", () => {
   it("rejects an unusable fingerprint source duration", () => {
     assert.throws(() => fingerprint({ sourceDuration: Number.NaN }), /fingerprint/u);
   });
+
+  it("rejects zero and negative fingerprint source durations", () => {
+    assert.throws(() => fingerprint({ sourceDuration: 0 }), /fingerprint/u);
+    assert.throws(() => fingerprint({ sourceDuration: -4 }), /fingerprint/u);
+  });
+
+  it("applies documented defaults and strict boolean semantics to loose settings input", () => {
+    assert.deepEqual(normalizeAutomationAnalysisSettings({}), {
+      minSilence: 0.42,
+      padding: 0.08,
+      trimLeading: true,
+      trimTrailing: true,
+      punchEnabled: false,
+      punchScale: 112,
+      punchCount: 12,
+      keywords: [],
+    });
+    const loose = normalizeAutomationAnalysisSettings({
+      punchEnabled: "true",
+      trimLeading: "false",
+      trimTrailing: 0,
+      keywords: "중요" as unknown as string[],
+    });
+    assert.equal(loose.punchEnabled, false);
+    assert.equal(loose.trimLeading, true);
+    assert.equal(loose.trimTrailing, true);
+    assert.deepEqual(loose.keywords, []);
+  });
+
+  it("caps punch keywords at the configured maximum", () => {
+    const keywords = Array.from({ length: MAX_PUNCH_KEYWORDS + 20 }, (_value, index) => `키워드${index}`);
+    const settings = normalizeAutomationAnalysisSettings({ keywords });
+    assert.equal(settings.keywords.length, MAX_PUNCH_KEYWORDS);
+  });
+
+  it("ignores trimmed transcript names and segments that normalize away", () => {
+    const baseline = fingerprint();
+    assert.equal(fingerprint({ transcriptName: "  Interview A  " }), baseline);
+    assert.equal(fingerprint({
+      segments: [
+        ...segments,
+        { start: 9, end: 8, text: "무효" },
+        { start: 0.2, end: 0.4, text: "   " },
+      ],
+    }), baseline);
+  });
 });
 
 describe("normalizeSpeechSegments", () => {
@@ -132,6 +182,69 @@ describe("normalizeSpeechSegments", () => {
       text: "speech",
     }));
     assert.throws(() => normalizeSpeechSegments(segments, MAX_AUTOMATION_SEGMENTS + 2), /최대/u);
+  });
+
+  it("returns no segments for a non-array input or a non-positive duration", () => {
+    assert.deepEqual(normalizeSpeechSegments(null as never, 10), []);
+    assert.deepEqual(normalizeSpeechSegments([{ start: 0, end: 1, text: "valid" }], 0), []);
+    assert.deepEqual(normalizeSpeechSegments([{ start: 0, end: 1, text: "valid" }], Number.NaN), []);
+  });
+
+  it("drops segments that clamp to nothing at the duration boundary", () => {
+    assert.deepEqual(normalizeSpeechSegments([
+      { start: 12, end: 15, text: "beyond source" },
+      { start: 9.5, end: 20, text: "clipped tail" },
+    ], 10), [{ start: 9.5, end: 10, text: "clipped tail" }]);
+  });
+
+  it("accepts segment text at the length limit and rejects longer text", () => {
+    const limit = "글".repeat(MAX_AUTOMATION_SEGMENT_TEXT_LENGTH);
+    assert.deepEqual(
+      normalizeSpeechSegments([{ start: 0, end: 1, text: limit }], 2),
+      [{ start: 0, end: 1, text: limit }],
+    );
+    assert.throws(() => normalizeSpeechSegments([{ start: 0, end: 1, text: `${limit}자` }], 2), /최대/u);
+  });
+
+  it("sanitizes speaker labels and drops non-string speakers", () => {
+    const controlChars = String.fromCharCode(0, 31);
+    const [first, second] = normalizeSpeechSegments([
+      { start: 0, end: 1, text: "hello", speaker: ` A${controlChars}  B ` },
+      { start: 2, end: 3, text: "world", speaker: 42 as unknown as string },
+    ], 4);
+    assert.equal(first?.speaker, "A B");
+    assert.deepEqual(second, { start: 2, end: 3, text: "world" });
+    const [long] = normalizeSpeechSegments([
+      { start: 0, end: 1, text: "hi", speaker: "s".repeat(200) },
+    ], 2);
+    assert.equal(long?.speaker?.length, 80);
+  });
+
+  it("orders identical timestamps deterministically by text then speaker", () => {
+    assert.deepEqual(normalizeSpeechSegments([
+      { start: 0, end: 1, text: "나", speaker: "B" },
+      { start: 0, end: 1, text: "가", speaker: "B" },
+      { start: 0, end: 1, text: "가", speaker: "A" },
+    ], 2), [
+      { start: 0, end: 1, text: "가", speaker: "A" },
+      { start: 0, end: 1, text: "가", speaker: "B" },
+      { start: 0, end: 1, text: "나", speaker: "B" },
+    ]);
+  });
+});
+
+describe("assertAutomationMarkerBudget", () => {
+  it("accepts totals up to the combined marker budget", () => {
+    assert.doesNotThrow(() => assertAutomationMarkerBudget(0, 0));
+    assert.doesNotThrow(() => assertAutomationMarkerBudget(400, 100));
+    assert.doesNotThrow(() => assertAutomationMarkerBudget(MAX_AUTOMATION_MARKERS, 0));
+  });
+
+  it("rejects totals above the budget and unsafe counts", () => {
+    assert.throws(() => assertAutomationMarkerBudget(400, 101), /최대 500개/u);
+    assert.throws(() => assertAutomationMarkerBudget(-1, 0), /정수/u);
+    assert.throws(() => assertAutomationMarkerBudget(1.5, 2), /정수/u);
+    assert.throws(() => assertAutomationMarkerBudget(Number.NaN, 0), /정수/u);
   });
 });
 
@@ -230,6 +343,67 @@ describe("planSilenceCuts", () => {
   it("rejects an invalid source duration", () => {
     assert.throws(() => planSilenceCuts([], 0), /길이/u);
   });
+
+  it("rejects negative and non-finite source durations", () => {
+    assert.throws(() => planSilenceCuts([], -3), /길이/u);
+    assert.throws(() => planSilenceCuts([], Number.NaN), /길이/u);
+  });
+
+  it("cuts a silence exactly at the minimum-length boundary", () => {
+    const plan = planSilenceCuts([
+      { start: 0, end: 1, text: "one" },
+      { start: 1.5, end: 2, text: "two" },
+    ], 2, { minSilence: 0.5, padding: 0 });
+    assert.deepEqual(plan.cuts.map(({ start, end }) => [start, end]), [[1, 1.5]]);
+    assert.deepEqual(plan.keeps.map(({ start, end }) => [start, end]), [[0, 1], [1.5, 2]]);
+  });
+
+  it("keeps interior cuts when leading and trailing trims are disabled", () => {
+    const plan = planSilenceCuts([
+      { start: 2, end: 3, text: "one" },
+      { start: 5, end: 6, text: "two" },
+    ], 7, { minSilence: 0.5, padding: 0, trimLeading: false, trimTrailing: false });
+    assert.deepEqual(plan.cuts.map(({ start, end }) => [start, end]), [[3, 5]]);
+    assert.deepEqual(plan.keeps.map(({ start, end }) => [start, end]), [[0, 3], [5, 7]]);
+  });
+
+  it("lets padding bridge gaps that would otherwise be cut", () => {
+    const gapped = [
+      { start: 0, end: 1, text: "one" },
+      { start: 1.5, end: 3, text: "two" },
+    ];
+    assert.equal(planSilenceCuts(gapped, 3, { minSilence: 0.42, padding: 0 }).cuts.length, 1);
+    const bridged = planSilenceCuts(gapped, 3, { minSilence: 0.42, padding: 0.3 });
+    assert.equal(bridged.cuts.length, 0);
+    assert.deepEqual(bridged.speech.map(({ start, end }) => [start, end]), [[0, 3]]);
+  });
+
+  it("can disable minimum-keep absorption entirely", () => {
+    const plan = planSilenceCuts([
+      { start: 0.45, end: 0.5, text: "짧은 발화" },
+    ], 1, { minSilence: 0.1, padding: 0, minKeep: 0 });
+    assert.deepEqual(plan.keeps.map(({ start, end }) => [start, end]), [[0.45, 0.5]]);
+    assert.equal(plan.warnings.some((warning) => warning.includes("보존")), false);
+  });
+
+  it("accepts exactly the configured maximum number of cuts", () => {
+    const plan = planSilenceCuts([
+      { start: 1, end: 2, text: "one" },
+      { start: 4, end: 5, text: "two" },
+      { start: 7, end: 8, text: "three" },
+    ], 9, { minSilence: 0.5, padding: 0, maximumCuts: 4 });
+    assert.equal(plan.cuts.length, 4);
+    assert.ok(Math.abs(plan.compressionRatio - plan.outputDuration / plan.sourceDuration) <= 1e-12);
+  });
+
+  it("accepts a plan at the combined 500-marker cap and rejects one above it", () => {
+    const segmentAt = (index: number) => ({ start: index * 2 + 0.5, end: index * 2 + 1.5, text: `발화 ${index}` });
+    const atCap = Array.from({ length: 499 }, (_value, index) => segmentAt(index));
+    const plan = planSilenceCuts(atCap, 998, { minSilence: 0.4, padding: 0 });
+    assert.equal(plan.cuts.length, MAX_AUTOMATION_MARKERS);
+    const overCap = Array.from({ length: 500 }, (_value, index) => segmentAt(index));
+    assert.throws(() => planSilenceCuts(overCap, 1000, { minSilence: 0.4, padding: 0 }), /최대 500개/u);
+  });
 });
 
 describe("punch recommendations", () => {
@@ -295,6 +469,86 @@ describe("punch recommendations", () => {
   it("drops malformed punch cues", () => {
     assert.deepEqual(buildPunchKeyframes([
       { start: 2, end: 1, scale: 110, reason: "bad", text: "bad" },
+    ]), []);
+  });
+
+  it("clamps punch windows to the source boundaries", () => {
+    const late = recommendPunchCues([
+      { start: 9.4, end: 9.8, text: "마지막 하이라이트!" },
+    ], 10, { duration: 2 });
+    assert.deepEqual(late.map(({ start, end }) => [start, end]), [[8, 10]]);
+    const early = recommendPunchCues([
+      { start: 0, end: 0.2, text: "빠른 시작!" },
+    ], 10, { duration: 1 });
+    assert.deepEqual(early.map(({ start, end }) => [start, end]), [[0, 1]]);
+  });
+
+  it("fits the punch window inside a source shorter than the requested duration", () => {
+    const cues = recommendPunchCues([
+      { start: 0.1, end: 0.3, text: "아주 짧은 소스!" },
+    ], 0.5, { duration: 3 });
+    assert.deepEqual(cues.map(({ start, end }) => [start, end]), [[0, 0.5]]);
+  });
+
+  it("returns nothing for an empty transcript and clamps option floors", () => {
+    assert.deepEqual(recommendPunchCues([], 10), []);
+    const cues = recommendPunchCues([
+      { start: 0, end: 1, text: "첫 강조 문장입니다!" },
+      { start: 5, end: 6, text: "둘째 강조 문장입니다!" },
+    ], 10, { maximumCues: 0, scale: 1 });
+    assert.equal(cues.length, 1);
+    assert.equal(cues[0]?.scale, 101);
+  });
+
+  it("matches keywords after NFKC normalization and labels reasons by score", () => {
+    const cues = recommendPunchCues([
+      { start: 0, end: 1, text: "shortflow 팁 공개" },
+      { start: 4, end: 5, text: "그냥 평범한 한 문장" },
+      { start: 8, end: 9, text: "정말 놀라운 발견입니다!" },
+    ], 12, { keywords: ["ＳｈｏｒｔＦｌｏｗ"], maximumCues: 3, minGap: 1 });
+    assert.equal(cues.length, 3);
+    assert.deepEqual(cues.map((cue) => cue.reason), ["키워드: shortflow", "리듬 변화", "강조 문장"]);
+  });
+
+  it("boosts Korean emphasis vocabulary in punch scoring", () => {
+    const cues = recommendPunchCues([
+      { start: 0, end: 1, text: "핵심 정리입니다" },
+      { start: 6, end: 7, text: "평범한 마무리" },
+    ], 10, { maximumCues: 2, minGap: 1 });
+    assert.deepEqual(cues.map((cue) => cue.reason), ["강조 문장", "리듬 변화"]);
+  });
+
+  it("collapses the plateau when the transition exceeds half the cue length", () => {
+    const frames = buildPunchKeyframes([
+      { start: 1, end: 1.5, scale: 120, reason: "test", text: "짧은 컷" },
+    ], 100, 0.5);
+    assert.deepEqual(frames, [
+      { time: 1, scale: 100, interpolation: "bezier" },
+      { time: 1.25, scale: 120, interpolation: "hold" },
+      { time: 1.5, scale: 100, interpolation: "bezier" },
+    ]);
+  });
+
+  it("never dips below the base scale and dedupes shared boundary keyframes", () => {
+    const frames = buildPunchKeyframes([
+      { start: 1, end: 2, scale: 90, reason: "low", text: "낮은 배율" },
+      { start: 2, end: 3, scale: 120, reason: "high", text: "높은 배율" },
+    ], 100, 0.1);
+    assert.deepEqual(frames.map((frame) => frame.time), [1, 1.1, 1.9, 2, 2.1, 2.9, 3]);
+    assert.ok(frames.every((frame) => frame.scale >= 100));
+  });
+
+  it("applies the minimum transition floor", () => {
+    const frames = buildPunchKeyframes([
+      { start: 0, end: 1, scale: 110, reason: "test", text: "플로어" },
+    ], 100, 0.001);
+    assert.deepEqual(frames.map((frame) => frame.time), [0, 0.02, 0.98, 1]);
+  });
+
+  it("drops cues with non-finite bounds", () => {
+    assert.deepEqual(buildPunchKeyframes([
+      { start: Number.NaN, end: 1, scale: 110, reason: "bad", text: "NaN 시작" },
+      { start: 0, end: Number.POSITIVE_INFINITY, scale: 110, reason: "bad", text: "무한 끝" },
     ]), []);
   });
 });

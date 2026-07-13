@@ -59,6 +59,31 @@ describe("safe-zone profiles", () => {
     assert.throws(() => safeContentRect("unknown" as never), /지원하지/u);
     assert.throws(() => safeZoneGuideLabel("unknown" as never), /지원하지/u);
   });
+
+  it("labels the default content role", () => {
+    assert.equal(
+      safeZoneGuideLabel("youtube-shorts"),
+      "YouTube Shorts 콘텐츠 Safe Zone · 2026-conservative · 보수적 가이드",
+    );
+  });
+
+  it("merges partial custom margins with the selected role baseline", () => {
+    const margins = SAFE_ZONE_PROFILES.tiktok.captionMargins;
+    const rect = safeContentRect("tiktok", "caption", { bottom: 0 });
+    assert.equal(rect.x, margins.left);
+    assert.equal(rect.y, margins.top);
+    assert.equal(rect.width, 1 - margins.left - margins.right);
+    assert.equal(rect.height, 1 - margins.top);
+  });
+
+  it("supports slider extremes from zero to the 0.45 margin cap", () => {
+    const full = safeContentRect("youtube-shorts", "content", { top: 0, right: 0, bottom: 0, left: 0 });
+    assert.deepEqual(full, { x: 0, y: 0, width: 1, height: 1 });
+    const tight = safeContentRect("youtube-shorts", "content", { top: 0.45, right: 0.45, bottom: 0.25, left: 0.25 });
+    assert.ok(Math.abs(tight.width - 0.3) <= 1e-12);
+    assert.ok(Math.abs(tight.height - 0.3) <= 1e-12);
+    assert.throws(() => safeContentRect("youtube-shorts", "content", { top: 0.46 }), /margin/u);
+  });
 });
 
 describe("safe-zone normalization", () => {
@@ -96,6 +121,34 @@ describe("safe-zone normalization", () => {
       assert.ok(Math.abs(roundTrip[key] - source[key]) <= 1e-9);
     }
   });
+
+  it("treats missing or non-finite normalized fields as zero", () => {
+    assert.deepEqual(normalizeRect({}), { x: 0, y: 0, width: 0, height: 0 });
+    assert.deepEqual(
+      normalizeRect({ x: 0.75, width: 0.5, height: Number.NaN }),
+      { x: 0.75, y: 0, width: 0.25, height: 0 },
+    );
+  });
+
+  it("requires both margin sums to stay below 0.85", () => {
+    const fallback = SAFE_ZONE_PROFILES.tiktok.contentMargins;
+    assert.throws(() => normalizeMargins({ top: 0.45, bottom: 0.4 }, fallback), /상하/u);
+    assert.deepEqual(
+      normalizeMargins({ top: 0.45, bottom: 0.39 }, fallback),
+      { top: 0.45, right: fallback.right, bottom: 0.39, left: fallback.left },
+    );
+    assert.throws(() => normalizeMargins(null as never, fallback), /객체/u);
+  });
+
+  it("clamps pixel rects that overflow the frame and rejects malformed pixel rects", () => {
+    assert.deepEqual(
+      pixelRectToNormalized({ x: 540, y: 0, width: 1080, height: 1920 }, 1080, 1920),
+      { x: 0.5, y: 0, width: 0.5, height: 1 },
+    );
+    assert.throws(() => pixelRectToNormalized({ x: 0, y: 0, width: 0, height: 10 }, 100, 100), /픽셀 rect/u);
+    assert.throws(() => pixelRectToNormalized({ x: Number.NaN, y: 0, width: 10, height: 10 }, 100, 100), /픽셀 rect/u);
+    assert.throws(() => normalizedRectToPixels({ x: 11, y: 0, width: 1, height: 1 }, 100, 100), /안전 범위/u);
+  });
 });
 
 describe("safe-zone assessment", () => {
@@ -130,6 +183,35 @@ describe("safe-zone assessment", () => {
     assert.throws(() => assessSafeZone({ x: "0.2" as unknown as number, y: 0.2, width: 0.2, height: 0.2 }, "tiktok"), /유한한 숫자/u);
     assert.throws(() => assessSafeZone(null as never, "tiktok"), /rect/u);
     assert.throws(() => safeContentRect("tiktok", "other" as never), /역할/u);
+  });
+
+  it("reports zero overlap for an element fully outside the safe area", () => {
+    const result = assessSafeZone({ x: 0, y: 0, width: 0.05, height: 0.05 }, "tiktok");
+    assert.equal(result.inside, false);
+    assert.equal(result.overlapRatio, 0);
+    assert.ok(result.overflow.top > 0);
+    assert.ok(result.overflow.left > 0);
+    assert.equal(result.overflow.right, 0);
+    assert.equal(result.overflow.bottom, 0);
+  });
+
+  it("measures overlap when the element contains the entire safe area", () => {
+    const safe = safeContentRect("tiktok");
+    const result = assessSafeZone({ x: -1, y: -1, width: 3, height: 3 }, "tiktok");
+    assert.equal(result.inside, false);
+    for (const overflow of Object.values(result.overflow)) assert.ok(overflow > 0);
+    assert.ok(Math.abs(result.overlapRatio - (safe.width * safe.height) / 9) <= 1e-12);
+  });
+
+  it("rejects rects outside the normalized guard range", () => {
+    assert.throws(() => assessSafeZone({ x: 11, y: 0, width: 0.5, height: 0.5 }, "tiktok"), /안전 범위/u);
+    assert.throws(() => assessSafeZone({ x: 0, y: 0, width: 10.5, height: 0.5 }, "tiktok"), /안전 범위/u);
+  });
+
+  it("assesses against custom margins", () => {
+    const margins = { top: 0.25, right: 0.25, bottom: 0.25, left: 0.25 };
+    assert.equal(assessSafeZone({ x: 0.3, y: 0.3, width: 0.4, height: 0.4 }, "tiktok", "content", margins).inside, true);
+    assert.equal(assessSafeZone({ x: 0.2, y: 0.3, width: 0.4, height: 0.4 }, "tiktok", "content", margins).inside, false);
   });
 });
 
@@ -183,6 +265,58 @@ describe("alignToSafeZone", () => {
     assert.throws(() => assertSafeZoneAlignment({ ...alignment, deltaX: "0" }, "tiktok", "caption", margins), /delta/u);
     assert.throws(() => assertSafeZoneAlignment({ ...alignment, scale: -1 }, "tiktok", "caption", margins), /scale/u);
     assert.throws(() => assertSafeZoneAlignment({ ...alignment, rect: null }, "tiktok", "caption", margins), /rect/u);
+  });
+
+  it("scales an extreme wide banner down to the safe width", () => {
+    const safe = safeContentRect("youtube-shorts");
+    const aligned = alignToSafeZone({ x: 0, y: 0.45, width: 1, height: 0.01 }, "youtube-shorts");
+    assert.equal(aligned.wasOversized, true);
+    assert.ok(Math.abs(aligned.scale - safe.width) <= 1e-9);
+    assert.ok(Math.abs(aligned.rect.width - safe.width) <= 1e-9);
+    assert.equal(assessSafeZone(aligned.rect, "youtube-shorts").inside, true);
+  });
+
+  it("scales an extreme tall banner down to the safe height", () => {
+    const safe = safeContentRect("youtube-shorts");
+    const aligned = alignToSafeZone({ x: 0.48, y: 0, width: 0.04, height: 1 }, "youtube-shorts");
+    assert.equal(aligned.wasOversized, true);
+    assert.ok(Math.abs(aligned.scale - safe.height) <= 1e-9);
+    assert.ok(Math.abs(aligned.rect.height - safe.height) <= 1e-9);
+    assert.equal(assessSafeZone(aligned.rect, "youtube-shorts").inside, true);
+  });
+
+  it("keeps a full-frame element when custom margins are zero", () => {
+    const margins = { top: 0, right: 0, bottom: 0, left: 0 };
+    const aligned = alignToSafeZone({ x: 0, y: 0, width: 1, height: 1 }, "tiktok", "content", margins);
+    assert.equal(aligned.changed, false);
+    assert.equal(aligned.scale, 1);
+    assert.deepEqual(aligned.rect, { x: 0, y: 0, width: 1, height: 1 });
+  });
+
+  it("rejects alignment results whose flags disagree with delta and scale", () => {
+    const clean = alignToSafeZone({ x: 0.2, y: 0.2, width: 0.2, height: 0.2 }, "youtube-shorts");
+    assert.throws(() => assertSafeZoneAlignment({ ...clean, changed: true }, "youtube-shorts"), /플래그/u);
+    assert.throws(() => assertSafeZoneAlignment({ ...clean, wasOversized: true }, "youtube-shorts"), /플래그/u);
+    assert.throws(() => assertSafeZoneAlignment({ ...clean, scale: 1.2 }, "youtube-shorts"), /올바르지/u);
+    assert.throws(() => assertSafeZoneAlignment({ ...clean, deltaX: 3 }, "youtube-shorts"), /올바르지/u);
+    assert.throws(() => assertSafeZoneAlignment({ ...clean, changed: "yes" }, "youtube-shorts"), /올바르지/u);
+    assert.throws(() => assertSafeZoneAlignment(null, "youtube-shorts"), /객체/u);
+  });
+
+  it("rejects alignment results outside the frame or the safe area", () => {
+    const shape = { deltaX: 0, deltaY: 0, scale: 1, changed: false, wasOversized: false };
+    assert.throws(
+      () => assertSafeZoneAlignment({ ...shape, rect: { x: 0.9, y: 0.9, width: 0.2, height: 0.2 } }, "tiktok"),
+      /출력 프레임/u,
+    );
+    assert.throws(
+      () => assertSafeZoneAlignment({ ...shape, rect: { x: 0, y: 0, width: 0.2, height: 0.2 } }, "tiktok"),
+      /안전영역/u,
+    );
+    assert.throws(
+      () => assertSafeZoneAlignment({ ...shape, rect: { x: 0.2, y: 0.2, width: 0.2, height: 0.2 } }, "unknown" as never),
+      /지원하지/u,
+    );
   });
 });
 
@@ -312,5 +446,69 @@ describe("Safe Zone BMP byte renderer", () => {
       () => renderSafeZoneGuideBmp({ ...base, bitsPerPixel: 16 as never }),
       /24 또는 32/u,
     );
+  });
+
+  it("survives one-pixel and stride-padded tiny canvases", () => {
+    const single = renderSafeZoneGuideBmp({ width: 1, height: 1, platform: "tiktok" });
+    assert.deepEqual(single.safeRectPixels, { x: 0, y: 0, width: 1, height: 1 });
+    assert.equal(single.rowStride, 4);
+    assert.equal(single.byteLength, 122 + 4);
+    assert.equal(single.removalWarningRendered, true);
+    assert.equal(logicalPixel(single, 0, 0)[3], 245);
+    const padded = renderSafeZoneGuideBmp({
+      width: 2, height: 3, platform: "tiktok", bitsPerPixel: 24, includeRemovalWarning: false,
+    });
+    assert.equal(padded.rowStride, 8);
+    assert.equal(padded.byteLength, 54 + 8 * 3);
+  });
+
+  it("renders an extreme aspect ratio strip at the dimension cap", () => {
+    const result = renderSafeZoneGuideBmp({
+      width: MAX_SAFE_ZONE_BMP_DIMENSION,
+      height: 1,
+      platform: "youtube-shorts",
+      includeRemovalWarning: false,
+    });
+    assert.equal(result.width, MAX_SAFE_ZONE_BMP_DIMENSION);
+    assert.equal(result.height, 1);
+    assert.equal(result.safeRectPixels.y, 0);
+    assert.equal(result.safeRectPixels.height, 1);
+    assert.ok(result.safeRectPixels.x > 0);
+    assert.equal(result.byteLength, 122 + MAX_SAFE_ZONE_BMP_DIMENSION * 4);
+    assert.equal(logicalPixel(result, result.safeRectPixels.x, 0)[3], 235);
+  });
+
+  it("accepts caller limits exactly at the required size", () => {
+    const exact = renderSafeZoneGuideBmp({ width: 10, height: 10, platform: "tiktok", maxPixels: 100, maxBytes: 522 });
+    assert.equal(exact.byteLength, 522);
+    assert.throws(() => renderSafeZoneGuideBmp({ width: 10, height: 10, platform: "tiktok", maxPixels: 0 }), /1 이상/u);
+    assert.throws(() => renderSafeZoneGuideBmp({ width: 10, height: 10, platform: "tiktok", maxBytes: 1.5 }), /1 이상/u);
+  });
+
+  it("validates renderer option types", () => {
+    assert.throws(() => renderSafeZoneGuideBmp(null as never), /옵션 객체/u);
+    assert.throws(
+      () => renderSafeZoneGuideBmp({ width: 32, height: 32, platform: "tiktok", includeRemovalWarning: "no" as never }),
+      /불리언/u,
+    );
+    assert.throws(
+      () => renderSafeZoneGuideBmp({ width: 32, height: 32, platform: "tiktok", role: "banner" as never }),
+      /역할/u,
+    );
+    assert.throws(() => renderSafeZoneGuideBmp({ width: 32, height: 32, platform: "unknown" as never }), /지원하지/u);
+  });
+
+  it("honors custom margins in the rendered pixel rect", () => {
+    const result = renderSafeZoneGuideBmp({
+      width: 100,
+      height: 100,
+      platform: "instagram-reels",
+      customMargins: { top: 0, right: 0, bottom: 0, left: 0 },
+      includeRemovalWarning: false,
+    });
+    assert.deepEqual(result.safeRectPixels, { x: 0, y: 0, width: 100, height: 100 });
+    assert.equal(logicalPixel(result, 0, 0)[3], 235);
+    assert.equal(logicalPixel(result, 99, 99)[3], 235);
+    assert.equal(logicalPixel(result, 50, 50)[3], 0);
   });
 });
