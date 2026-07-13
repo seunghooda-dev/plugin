@@ -409,10 +409,15 @@ describe("DOM helpers", () => {
     dom.add("num", "input").value = "12.5";
     dom.add("text", "input").value = "abc";
     dom.add("infinite", "input").value = "Infinity";
+    dom.add("empty", "input").value = "";
+    dom.add("spaces", "input").value = "   ";
     await withDom(dom, () => {
       assert.equal(numberOf("num", 7), 12.5);
       assert.equal(numberOf("text", 7), 7);
       assert.equal(numberOf("infinite", 7), 7);
+      // 빈/공백 입력은 0이 아니라 fallback으로.
+      assert.equal(numberOf("empty", 7), 7);
+      assert.equal(numberOf("spaces", 7), 7);
     });
   });
 

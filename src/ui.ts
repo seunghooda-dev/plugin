@@ -32,7 +32,10 @@ export function valueOf(id: string): string {
 }
 
 export function numberOf(id: string, fallback: number): number {
-  const parsed = Number(valueOf(id));
+  // 빈 입력은 Number("")===0이 되어 0으로 잘못 읽히므로 fallback으로 처리한다.
+  const raw = valueOf(id).trim();
+  if (raw === "") return fallback;
+  const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
