@@ -132,6 +132,21 @@ describe("queue basics and concurrency", () => {
     assert.deepEqual(done.map((job) => job.state), Array(5).fill("succeeded"));
   });
 
+  it("drains without a global queueMicrotask (Premiere UXP runtime)", async () => {
+    // Premiere 26.3 UXP has no queueMicrotask global; the queue must still drain.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "queueMicrotask");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (globalThis as any).queueMicrotask;
+    try {
+      const queue = new JobQueue(successExecutor("ok"));
+      const job = queue.enqueue(request(1));
+      const done = await queue.waitFor(job.id);
+      assert.equal(done.state, "succeeded");
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "queueMicrotask", descriptor);
+    }
+  });
+
   it("defaults to one running job", async () => {
     const releases: Array<() => void> = [];
     let active = 0;

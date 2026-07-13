@@ -545,11 +545,11 @@ Safe Zone BMP overlay는 실제 Host에서 통과했습니다.
 | # | 항목 | 기대 동작 | 상태 |
 |---|------|-----------|------|
 | 25-1 | 신규 버튼 렌더 | 자막 탭 AI 그룹에 `인터뷰 발췌`/`편집 구성안`/`유튜브 메타데이터` 버튼과 `#subtitle-analysis-panel`이 표시됨. 큐가 없으면 비활성 | **Host 통과 (2026-07-13, CDP 자동)** — 버튼 3개 존재·큐 0개 시 disabled, SRT 2큐 로드 후 3버튼 모두 활성, 패널 hidden 유지 확인 |
-| 25-2 | 인터뷰 발췌(interview-highlight) | 실행 시 하이라이트 목록이 결과 패널에 표시되고, 자막 문서는 변경되지 않음(undo 스택 불변) | 보류 (live API key 필요) |
-| 25-3 | 편집 구성안(edit-outline) | 세그먼트 순서·라벨·근거가 표시되고, 참조 cueId가 현재 문서에 없는 항목은 필터링됨 | 보류 (live API key 필요) |
-| 25-4 | 유튜브 메타데이터(youtube-metadata) | 제목/설명/태그가 표시되고 복사 가능. 2MB 초과 문서는 명확한 오류로 차단 | 보류 (live API key 필요) |
-| 25-5 | 결과 항목 → playhead | 하이라이트/구성안 항목의 cue 버튼이 **활성(비disabled) 상태로 렌더**되고, 클릭 시 기존 `seekToWord` 경로로 실제 playhead가 해당 cue로 이동. (2026-07-13 수정: 분석이 busy 중 렌더돼 버튼이 disabled로 굳던 버그 fix — 분석 직후 버튼이 실제 클릭 가능한지 반드시 확인) | 보류 (live API key + 활성 시퀀스 필요) |
-| 25-6 | 분석 후 문서 편집 시 결과 무효화 | 자막을 편집/undo/프로젝트 전환하면 이전 분석 결과 패널이 초기화됨 | 보류 (live API key 필요) |
+| 25-2 | 인터뷰 발췌(interview-highlight) | 실행 시 하이라이트 목록이 결과 패널에 표시되고, 자막 문서는 변경되지 않음(undo 스택 불변) | **경로 통과·응답 보류** — 실제 `POST /v1/responses` 전송 확인, 문서 불변(undo 비활성 유지). 응답 렌더는 OpenAI 429 quota로 미확인(§25-c) |
+| 25-3 | 편집 구성안(edit-outline) | 세그먼트 순서·라벨·근거가 표시되고, 참조 cueId가 현재 문서에 없는 항목은 필터링됨 | **경로 통과·응답 보류** — 전송·재시도 확인, 429 quota로 응답 미확인 |
+| 25-4 | 유튜브 메타데이터(youtube-metadata) | 제목/설명/태그가 표시되고 복사 가능. 2MB 초과 문서는 명확한 오류로 차단 | **경로 통과·응답 보류** — 전송 확인, 429 quota로 응답 미확인 |
+| 25-5 | 결과 항목 → playhead | 하이라이트/구성안 항목의 cue 버튼이 **활성(비disabled) 상태로 렌더**되고, 클릭 시 기존 `seekToWord` 경로로 실제 playhead가 해당 cue로 이동. (2026-07-13 수정: 분석이 busy 중 렌더돼 버튼이 disabled로 굳던 버그 fix — 분석 직후 버튼이 실제 클릭 가능한지 반드시 확인) | 보류 (quota 해소 후 결과 목록 필요) |
+| 25-6 | 분석 후 문서 편집 시 결과 무효화 | 자막을 편집/undo/프로젝트 전환하면 이전 분석 결과 패널이 초기화됨 | **Host 통과 (2026-07-13, CDP 자동)** — 단어 편집·저장 후 분석 패널 hidden·children 0으로 초기화, undo 활성(문서 변경) 확인. API quota와 무관하게 독립 검증 |
 | 25-7 | 레퍼런스 AI 보강 | 레퍼런스 카드의 `AI 보강` 버튼 → 미리보기 → `적용` 시에만 활용 메모가 갱신되고, `취소`는 메모를 바꾸지 않음 | 보류 (live API key 필요) |
 | 25-8 | provider 미연결/동의 없음 안전 차단 | API 동의 없이 실행 시 전송 없이 안내만 표시되고 문서·메모 mutation 없음 | **Host 통과 (2026-07-13, CDP 자동)** — 동의 미체크 상태 클릭 시 `AI 자막 분석 실행 전 ... 동의가 필요합니다` 상태/로그 표시, 문서 메타 불변, 패널 hidden, 네트워크 전송 없음(동의 게이트가 fetch 이전에 차단), 콘솔 오류 0 |
 
@@ -577,6 +577,16 @@ Windows에서 UDT 서비스(`ws://127.0.0.1:14001`)의 proxy 프로토콜(`{comm
   - 수정 빌드 재로드 후 실측: `ai-api-key-input` 254×34, `ai-model-input` 254×34, `subtitle-max-chars-input` 62×34 — 클릭·입력 가능 상태로 복구. 런타임 `<style>` 주입은 UXP에서 반영되지 않아(주입 실험 무효과) 스타일시트 수정+리로드로만 검증 가능했다.
   - 부수 확인: CDT에 `Input.dispatchKeyEvent` 도메인 없음(원격 키 주입 불가), 프로그램적 값 설정+`input` 이벤트는 정상(저장 경로 무결), 패널이 OS 포커스가 없을 때 `document.activeElement`는 null.
   - 남은 grid 사용처(입력 미포함 표시용 다수)는 시각 이상 시 개별 판단. 사용자 실타이핑 최종 확인은 새 API key 입력 시점에 수행.
+
+### 25-c. AI 작업 큐 `queueMicrotask` 미정의 버그 — 발견·수정(2026-07-13, Critical)
+
+사용자가 실제 API key + 동의를 저장한 뒤 B-1~B-4를 CDP로 구동한 결과, 자막 분석 3종이 **네트워크 호출 전에** `queueMicrotask is not defined`로 즉시 실패했다. `src/job-queue.ts`의 `scheduleDrain()`이 `queueMicrotask` 전역을 직접 호출했는데, Premiere 26.3 UXP(uxp-9.3.0) 런타임에는 이 전역이 없다.
+
+- **영향 범위: Critical** — 자막 분석뿐 아니라 `aiQueueController.run()`을 경유하는 **모든 AI 작업**(이미지 편집, TTS, STT, 자막 reflow/review/translate)이 실제 Host에서 첫 실행 시 전부 실패한다. 라이브 AI 큐 작업이 이번에 처음 실행돼서 드러난 잠복 버그이며, Mock/Node 환경에는 `queueMicrotask`가 있어 자동 테스트로는 검출 불가.
+- **수정**: `scheduleMicrotask()` 헬퍼 도입 — `globalThis.queueMicrotask`가 있으면 사용, 없으면 `Promise.resolve().then()`으로 대체. 회귀 테스트 추가(`tests/job-queue.test.ts`: `queueMicrotask` 전역을 삭제한 상태에서도 큐가 정상 드레인·성공하는지 검증). `npm run check` 1060/1060.
+- **수정 후 재검증(라이브)**: 동일 CDP 구동에서 이제 실제 `POST https://api.openai.com/v1/responses`가 발생함을 fetch 스파이로 확인(수정 전 0건 → 수정 후 전송). 즉 동의 게이트 → 큐 드레인 → HTTPS 전송 경로가 끝까지 동작한다.
+- **응답 렌더 미확인 사유(코드 아님)**: 사용자 OpenAI 계정이 **429 quota 초과**("You exceeded your current quota")를 반환해 AI 결과 자체는 아직 못 봤다. 429는 retryable로 처리돼 2회 재시도 후 quota 메시지를 상태에 노출했고(**key/Authorization 노출 0**), 이 경로도 정상이다. 25-2~25-5의 실제 결과 렌더 확인은 **결제 quota 해소 후** 재구동 필요.
+- **부수 통과**: B-4(25-6, 편집 시 분석 결과 무효화)는 API와 무관하게 라이브 통과.
 
 즉시 차단 조건(신규 기능):
 

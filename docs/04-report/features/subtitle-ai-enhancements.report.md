@@ -131,6 +131,8 @@ version: 1.1
 | FR-05 seek 버튼이 busy 중 렌더돼 disabled로 굳는 버그 | `renderAnalysisPanel()`을 `runBusy` 밖으로 이동, 회귀 테스트 추가 | ✅ |
 | 분석 seek 버튼 렌더마다 리스너 누적 누수 | 이벤트 위임(`handleAnalysisPanelClick`)으로 전환, 버튼별 리스너 제거 | ✅ |
 | 자막 큐 리스트 stale row 중복 (실제 Host 전용, UXP `replaceChildren()` 버그) | `clearElementChildren()` 도입 — 큐 리스트·분석 패널·레퍼런스 목록·`renderEmptyState()` 적용, 실제 Premiere에서 import ×3 재검증 통과 | ✅ |
+| 텍스트 입력 0×0 렌더 (실제 Host 전용, UXP `input[type]` 속성 선택자·`display:grid` 미지원) | bare `input` 선택자 전환 + grid 6곳 flex-wrap 전환, 실측 254×34 복구 (§25-b) | ✅ |
+| **AI 작업 큐 `queueMicrotask` 미정의 (실제 Host 전용, Critical — 모든 AI 큐 작업 실패)** | `scheduleMicrotask()` 폴백 도입, 회귀 테스트 추가, 라이브에서 실제 네트워크 전송 재확인 (§25-c) | ✅ |
 
 ---
 

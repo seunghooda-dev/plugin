@@ -391,6 +391,14 @@ function defaultSleep(milliseconds: number, signal: AbortSignal): Promise<void> 
   });
 }
 
+// Premiere 26.3 UXP 런타임에는 queueMicrotask 전역이 없어 드레인 스케줄이 즉시
+// 예외로 실패했다(Host smoke에서 확인). 존재하면 사용하고, 없으면 Promise 마이크로태스크로 대체한다.
+function scheduleMicrotask(callback: () => void): void {
+  const queue = (globalThis as { queueMicrotask?: (task: () => void) => void }).queueMicrotask;
+  if (typeof queue === "function") queue(callback);
+  else void Promise.resolve().then(callback);
+}
+
 function deferred(): Deferred {
   let resolvePromise!: (job: JobSnapshot) => void;
   const promise = new Promise<JobSnapshot>((resolve) => { resolvePromise = resolve; });
@@ -717,7 +725,7 @@ export class JobQueue {
   private scheduleDrain(): void {
     if (this.drainScheduled) return;
     this.drainScheduled = true;
-    queueMicrotask(() => {
+    scheduleMicrotask(() => {
       this.drainScheduled = false;
       this.drain();
     });
