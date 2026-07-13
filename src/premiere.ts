@@ -1674,7 +1674,15 @@ export async function applyClipMotion(options: ClipMotionOptions): Promise<ClipM
     throw new ShortFlowError("INVALID_MOTION", "모션 길이는 0보다 커야 합니다.");
   }
   const { project, sequence } = await getActiveContext();
-  const items = await allVideoItems(sequence, options.scope);
+  let items: VideoClipTrackItem[];
+  try {
+    items = await allVideoItems(sequence, options.scope);
+  } catch (error) {
+    if (error instanceof ShortFlowError && error.code === "NO_SELECTED_VIDEO") {
+      throw new ShortFlowError("NO_SELECTED_VIDEO", "모션을 적용할 비디오 클립을 선택해 주세요.");
+    }
+    throw error;
+  }
   if (items.length === 0) {
     throw new ShortFlowError("NO_SELECTED_VIDEO", "모션을 적용할 비디오 클립을 선택해 주세요.");
   }
